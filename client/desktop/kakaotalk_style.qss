@@ -1,0 +1,295 @@
+/* KakaoTalk Desktop Clone - Exact Stylesheet */
+
+/* Main Window */
+QMainWindow {
+    background-color: #FFFFFF;
+}
+
+/* Chat Background */
+QWidget#chatArea {
+    background-color: #E3F2FD;
+    border: none;
+}
+
+/* Message List */
+QListWidget#messageList {
+    background-color: #E3F2FD;
+    border: none;
+    outline: none;
+    padding: 10px;
+}
+
+QListWidget#messageList::item {
+    background-color: transparent;
+    border: none;
+    padding: 4px 0px;
+}
+
+/* Scrollbar */
+QScrollBar:vertical {
+    background: transparent;
+    width: 8px;
+    margin: 0px;
+}
+
+QScrollBar::handle:vertical {
+    background: rgba(0, 0, 0, 0.2);
+    border-radius: 4px;
+    min-height: 30px;
+}
+
+QScrollBar::handle:vertical:hover {
+    background: rgba(0, 0, 0, 0.3);
+}
+
+QScrollBar::add-line:vertical,
+QScrollBar::sub-line:vertical,
+QScrollBar::add-page:vertical,
+QScrollBar::sub-page:vertical {
+    background: none;
+    border: none;
+    height: 0px;
+}
+
+/* Input Area */
+QWidget#inputArea {
+    background-color: #FFFFFF;
+    border-top: 1px solid #E0E0E0;
+    min-height: 56px;
+}
+
+/* Message Input Field */
+QTextEdit#messageInput {
+    background-color: #FFFFFF;
+    border: none;
+    color: #000000;
+    font-family: "맑은 고딕", "Malgun Gothic", "Segoe UI", sans-serif;
+    font-size: 14px;
+    padding: 8px;
+    selection-background-color: #FFE400;
+    selection-color: #000000;
+}
+
+/* Icon Buttons */
+QPushButton.iconButton {
+    background-color: transparent;
+    border: none;
+    padding: 8px;
+    min-width: 32px;
+    min-height: 32px;
+    max-width: 32px;
+    max-height: 32px;
+}
+
+QPushButton.iconButton:hover {
+    background-color: #F5F5F5;
+    border-radius: 4px;
+}
+
+QPushButton.iconButton:pressed {
+    background-color: #E0E0E0;
+}
+
+/* Send Button */
+QPushButton#sendButton {
+    background-color: #FFE400;
+    border: none;
+    border-radius: 4px;
+    padding: 8px 16px;
+    font-family: "맑은 고딕", "Malgun Gothic", sans-serif;
+    font-size: 13px;
+    font-weight: bold;
+    color: #3A1D1D;
+}
+
+QPushButton#sendButton:hover {
+    background-color: #FADD00;
+}
+
+QPushButton#sendButton:pressed {
+    background-color: #F0D000;
+}
+
+/* Title Bar */
+QWidget#titleBar {
+    background-color: #FFFFFF;
+    border-bottom: 1px solid #E0E0E0;
+    min-height: 50px;
+    max-height: 50px;
+}
+
+/* Title Bar Buttons */
+QPushButton.titleButton {
+    background-color: transparent;
+    border: none;
+    padding: 8px;
+    min-width: 36px;
+    min-height: 36px;
+    max-width: 36px;
+    max-height: 36px;
+    font-size: 18px;
+}
+
+QPushButton.titleButton:hover {
+    background-color: #F5F5F5;
+    border-radius: 4px;
+}
+
+/* Room Name Label */
+QLabel#roomName {
+    font-family: "맑은 고딕", "Malgun Gothic", sans-serif;
+    font-size: 16px;
+    font-weight: bold;
+    color: #000000;
+}
+
+/* Member Count Label */
+QLabel#memberCount {
+    font-family: "맑은 고딕", "Malgun Gothic", sans-serif;
+    font-size: 14px;
+    color: #999999;
+    padding-left: 8px;
+}
+
+/* Username Labels */
+QLabel.username {
+    color: #666666;
+    font-family: "맑은 고딕", "Malgun Gothic", sans-serif;
+    font-size: 13px;
+    padding-left: 4px;
+    padding-bottom: 2px;
+}
+
+/* Timestamp Labels */
+QLabel.timestamp {
+    color: #999999;
+    font-family: "맑은 고딕", "Malgun Gothic", sans-serif;
+    font-size: 11px;
+}
+
+/* Message Text */
+QLabel.messageText {
+    color: #000000;
+    font-family: "맑은 고딕", "Malgun Gothic", sans-serif;
+    font-size: 14px;
+    line-height: 1.4;
+}
+
+/* Sent Message Bubble */
+QWidget.sentBubble {
+    background-color: #FFE400;
+    border-radius: 18px;
+    padding: 8px 12px;
+}
+
+/* Received Message Bubble */
+QWidget.receivedBubble {
+    background-color: #FFFFFF;
+    border: 1px solid #E0E0E0;
+    border-radius: 18px;
+    padding: 8px 12px;
+}
+
+/* Profile Image Container */
+QLabel.profileImage {
+    min-width: 40px;
+    min-height: 40px;
+    max-width: 40px;
+    max-height: 40px;
+    border-radius: 20px;
+    background-color: #F0F0F0;
+}
+
+/* Date Separator */
+QLabel.dateSeparator {
+    color: #999999;
+    font-family: "맑은 고딕", "Malgun Gothic", sans-serif;
+    font-size: 12px;
+    padding: 16px;
+    background-color: transparent;
+}
+
+/* System Message */
+QLabel.systemMessage {
+    color: #666666;
+    font-family: "맑은 고딕", "Malgun Gothic", sans-serif;
+    font-size: 12px;
+    padding: 8px 16px;
+    background-color: rgba(0, 0, 0, 0.05);
+    border-radius: 12px;
+}
+
+/* Unread Message Separator */
+QWidget.unreadSeparator {
+    background-color: #FF6B6B;
+    min-height: 1px;
+    max-height: 1px;
+    margin: 8px 16px;
+}
+
+QLabel.unreadLabel {
+    color: #FF6B6B;
+    font-family: "맑은 고딕", "Malgun Gothic", sans-serif;
+    font-size: 11px;
+    padding: 4px 8px;
+    background-color: #FFFFFF;
+    border: 1px solid #FF6B6B;
+    border-radius: 10px;
+}
+
+/* Search Bar */
+QLineEdit#searchBar {
+    background-color: #F5F5F5;
+    border: none;
+    border-radius: 18px;
+    padding: 8px 16px;
+    font-family: "맑은 고딕", "Malgun Gothic", sans-serif;
+    font-size: 14px;
+    color: #000000;
+}
+
+QLineEdit#searchBar::placeholder {
+    color: #999999;
+}
+
+QLineEdit#searchBar:focus {
+    background-color: #FFFFFF;
+    border: 1px solid #FFE400;
+}
+
+/* Menu Items */
+QMenu {
+    background-color: #FFFFFF;
+    border: 1px solid #E0E0E0;
+    border-radius: 4px;
+    padding: 4px;
+}
+
+QMenu::item {
+    padding: 8px 24px;
+    font-family: "맑은 고딕", "Malgun Gothic", sans-serif;
+    font-size: 13px;
+    color: #000000;
+}
+
+QMenu::item:selected {
+    background-color: #F5F5F5;
+    border-radius: 4px;
+}
+
+QMenu::separator {
+    height: 1px;
+    background-color: #E0E0E0;
+    margin: 4px 0;
+}
+
+/* Tool Tips */
+QToolTip {
+    background-color: #333333;
+    color: #FFFFFF;
+    border: none;
+    padding: 6px 10px;
+    font-family: "맑은 고딕", "Malgun Gothic", sans-serif;
+    font-size: 12px;
+    border-radius: 4px;
+}

@@ -1,0 +1,54 @@
+# Core Dependencies
+python>=3.8
+
+# Async Framework
+asyncio
+aiohttp>=3.8.0
+aioredis>=2.0.0
+aiomysql>=0.1.0
+python-socketio>=5.7.0
+
+# Web Framework
+fastapi>=0.95.0
+uvicorn>=0.20.0
+pydantic>=1.10.0
+
+# Database
+psycopg2-binary>=2.9.0
+sqlalchemy>=2.0.0
+alembic>=1.10.0
+
+# GUI Framework
+PyQt5>=5.15.0
+qasync>=0.23.0
+pyqtgraph>=0.13.0
+
+# Security
+python-jose[cryptography]>=3.3.0
+passlib[bcrypt]>=1.7.4
+python-multipart>=0.0.5
+
+# Media Processing
+Pillow>=9.4.0
+opencv-python>=4.7.0
+numpy>=1.24.0
+
+# WebRTC
+aiortc>=1.5.0
+pyaudio>=0.2.13
+
+# Utilities
+python-dotenv>=1.0.0
+click>=8.1.0
+rich>=13.0.0
+
+# Testing
+pytest>=7.2.0
+pytest-asyncio>=0.20.0
+pytest-cov>=4.0.0
+
+# Development
+black>=23.0.0
+flake8>=6.0.0
+mypy>=1.0.0
+pre-commit>=3.0.0
