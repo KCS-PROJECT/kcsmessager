@@ -6,7 +6,8 @@
       "Read(C:\\Users\\KCS\\Downloads/**)",
       "Bash(pyinstaller:*)",
       "Bash(python:*)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "Bash(git add:*)"
     ],
     "deny": [],
     "ask": []
