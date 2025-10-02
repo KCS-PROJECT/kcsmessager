@@ -1,0 +1,92 @@
+====================================================
+   KCS Messenger - 시작 가이드
+====================================================
+
+[개발자용 - Windows exe 빌드하기]
+
+현재 상황:
+✓ 모든 빌드 스크립트 준비 완료
+✓ 배포 패키지 생성 도구 준비 완료
+✓ 사용자 가이드 작성 완료
+
+Windows PC에서 실행할 명령:
+
+  1단계: exe 빌드
+    build_windows.bat
+    → dist/KCS_Messenger.exe 생성
+
+  2단계: 배포 패키지 생성
+    prepare_distribution.bat
+    → KCS_Messenger_v1.0.zip 생성
+
+  3단계: 온라인 배포
+    - GitHub Releases에 ZIP 업로드
+    - 또는 Google Drive에 업로드
+
+====================================================
+
+[사용자용 - 다운로드 후 실행하기]
+
+  1. ZIP 파일 다운로드
+  2. 압축 해제
+  3. KCS_Messenger.exe 더블클릭
+  4. 완료!
+
+====================================================
+
+[주요 파일 설명]
+
+빌드 도구:
+  build_windows.bat           - Windows에서 exe 빌드
+  build_windows.py            - 빌드 Python 스크립트
+  QUICK_START_WINDOWS.bat     - 원클릭 빌드+실행
+
+배포 도구:
+  prepare_distribution.bat    - ZIP 배포 패키지 생성
+  create_installer.bat        - 설치 프로그램 생성 (NSIS 필요)
+
+실행 도구:
+  run_messenger.bat           - exe 실행 스크립트
+
+문서:
+  README_WINDOWS.md           - Windows 사용자 가이드
+  HOW_TO_DISTRIBUTE.md        - 배포 완벽 가이드
+  DISTRIBUTION_GUIDE.md       - 상세 배포 매뉴얼
+  USER_GUIDE_SIMPLE.txt       - 간단한 사용 설명
+
+설정 파일:
+  kakaotalk_launcher_windows.spec  - Windows용 PyInstaller 설정
+  requirements_windows.txt         - Windows 필수 패키지
+
+====================================================
+
+[빠른 시작]
+
+개발자라면:
+  1. Windows PC 준비
+  2. build_windows.bat 실행
+  3. prepare_distribution.bat 실행
+  4. 생성된 ZIP 파일 배포
+
+일반 사용자라면:
+  1. ZIP 다운로드
+  2. 압축 해제
+  3. exe 실행
+
+====================================================
+
+[다음 단계]
+
+1. Windows PC에서 빌드 실행
+2. 다른 PC에서 테스트
+3. GitHub Releases에 업로드
+4. 사용자에게 다운로드 링크 공유
+
+====================================================
+
+자세한 내용:
+- Windows 빌드: README_WINDOWS.md
+- 배포 방법: HOW_TO_DISTRIBUTE.md
+- 사용 설명: USER_GUIDE_SIMPLE.txt
+
+====================================================

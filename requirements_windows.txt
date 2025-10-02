@@ -1,0 +1,14 @@
+# Windows-specific requirements for KCS Messenger
+# Minimal dependencies for exe build
+
+# Core GUI Framework
+PyQt5>=5.15.0
+
+# Build tool
+pyinstaller>=6.0.0
+
+# Windows-specific (optional, for enhanced functionality)
+# pywin32>=300  # Uncomment if Windows API access is needed
+
+# Basic dependencies
+python-dotenv>=1.0.0

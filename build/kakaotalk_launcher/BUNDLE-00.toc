@@ -1,0 +1,3 @@
+([('KCS_Messenger',
+   '/Users/joogik/develop/kcsmessager/dist/KCS_Messenger',
+   'EXECUTABLE')],)

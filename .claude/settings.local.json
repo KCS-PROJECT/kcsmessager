@@ -3,7 +3,10 @@
     "allow": [
       "Read(C:\\Users\\KCS\\Downloads/**)",
       "Bash(python test_kakaotalk_ui.py)",
-      "Read(C:\\Users\\KCS\\Downloads/**)"
+      "Read(C:\\Users\\KCS\\Downloads/**)",
+      "Bash(pyinstaller:*)",
+      "Bash(python:*)",
+      "Bash(grep:*)"
     ],
     "deny": [],
     "ask": []
