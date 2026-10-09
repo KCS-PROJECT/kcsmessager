@@ -403,6 +403,25 @@ def devices_enabled():
     return platform not in ('offscreen', 'minimal')
 
 
+class RecBadge(QLabel):
+    """'녹음 중' 배지: 왼쪽 빨간 점은 직접 그린다 (글자 기호 ● 대신)"""
+
+    def __init__(self, text='', parent=None):
+        super().__init__(text, parent)
+        self.setIndent(12)   # 점 자리
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        from PyQt5.QtGui import QPainter
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor('#FF4B3E'))
+        r = 3.5
+        m = self.contentsMargins()
+        p.drawEllipse(QPointF(m.left() + 6, self.height() / 2), r, r)
+
+
 def format_duration(seconds):
     """state.fmt_duration 과 같은 함수 (통화 창에서 쓰는 이름 유지)"""
     from client.kakao.state import fmt_duration
@@ -1382,7 +1401,7 @@ class CallWindow(QWidget):
         titles.addWidget(self.title_label)
         titles.addWidget(self.sub_label)
         header.addLayout(titles, 1)
-        self.rec_badge = QLabel('● 녹음 중')
+        self.rec_badge = RecBadge('녹음 중')
         self.rec_badge.setObjectName('recBadge')
         self.rec_badge.hide()
         header.addWidget(self.rec_badge, 0, Qt.AlignTop)
@@ -1895,7 +1914,7 @@ class CallWindow(QWidget):
             return
         self._update_sub()
         if self.recorder is not None:
-            self.rec_badge.setText(f'● 녹음 중 {format_duration(self.recorder.duration)}')
+            self.rec_badge.setText(f'녹음 중 {format_duration(self.recorder.duration)}')
 
     # ------------------------------------------------------------ 장치
     def _start_devices(self):

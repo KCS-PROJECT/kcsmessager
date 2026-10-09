@@ -1001,7 +1001,9 @@ class KeywordChip(QFrame):
         label = QLabel(word)
         label.setStyleSheet(f"font-size: {theme.fs('meta')}px; background: transparent;")
         row.addWidget(label)
-        self.remove_button = QPushButton('✕')
+        self.remove_button = QPushButton()
+        self.remove_button.setIcon(make_icon('close', theme.c('text_sub'), 12))
+        self.remove_button.setAccessibleName('키워드 삭제')
         self.remove_button.setCursor(Qt.PointingHandCursor)
         self.remove_button.setToolTip(f"'{word}' 삭제")
         self.remove_button.setFixedSize(20, 20)
@@ -1172,8 +1174,7 @@ class BubblePreview(QAbstractButton):
         p.drawRoundedRect(outer, 12, 12)
         st = theme.bubble_style(self.key)
         r = st['radius']
-        f = theme.font('meta')
-        f.setPixelSize(12)
+        f = theme.font('meta', scaled=False)   # 고정 크기 미리보기 카드 안
         p.setFont(f)
         # 상대 말풍선
         other = QRectF(outer.left() + 10, outer.top() + 10, 92, 30)
@@ -1191,8 +1192,7 @@ class BubblePreview(QAbstractButton):
         p.setPen(QColor(st['fg']))
         p.drawText(mine, Qt.AlignCenter, '반가워요 😀\n잘 지냈어요?')
         # 이름
-        fb = theme.font('meta', bold=self.isChecked())
-        fb.setPixelSize(12)
+        fb = theme.font('meta', bold=self.isChecked(), scaled=False)
         p.setFont(fb)
         label_rect = QRectF(outer.left(), outer.bottom() - 32, outer.width(), 28)
         p.setPen(Qt.NoPen)

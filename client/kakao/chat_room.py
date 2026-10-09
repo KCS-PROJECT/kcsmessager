@@ -447,6 +447,28 @@ def retention_text(att):
     return f'~{dt:%Y.%m.%d}까지 보관' if dt else ''
 
 
+def chevron_pixmap(color, size, up=False):
+    """펼치기(∨)/접기(∧) 꺾쇠 — 글자 기호(▾▴) 대신 직접 그린 선"""
+    pm = QPixmap(size * 2, size * 2)
+    pm.setDevicePixelRatio(2.0)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing)
+    pen = QPen(to_qcolor(color), 1.8)
+    pen.setCapStyle(Qt.RoundCap)
+    pen.setJoinStyle(Qt.RoundJoin)
+    p.setPen(pen)
+    s = size / 24.0
+    y0, y1 = (15 * s, 9 * s) if up else (9 * s, 15 * s)
+    path = QPainterPath()
+    path.moveTo(6 * s, y0)
+    path.lineTo(12 * s, y1)
+    path.lineTo(18 * s, y0)
+    p.drawPath(path)
+    p.end()
+    return pm
+
+
 def pencil_pixmap(color, size):
     """'메시지 수정' 연필 아이콘 (widgets 아이콘 세트에 없어서 직접 그림)"""
     pm = QPixmap(size * 2, size * 2)
@@ -2056,7 +2078,9 @@ class PollCreateDialog(_Dialog):
         edit = QLineEdit(text, row)
         edit.setPlaceholderText(f'항목 {len(self.option_edits) + 1}')
         edit.textChanged.connect(self._validate)
-        rm = QPushButton('✕', row)
+        rm = QPushButton(row)
+        rm.setIcon(make_icon('close', theme.c('text_sub'), 14))
+        rm.setAccessibleName('항목 삭제')
         rm.setFixedWidth(34)
         rm.clicked.connect(lambda: self._remove(row, edit))
         h.addWidget(edit, 1)
@@ -2609,7 +2633,9 @@ class LadderDialog(_Dialog):
         arrow = _label('→', 'dlgHint', row)
         re_ = QLineEdit(result, row)
         re_.setPlaceholderText(f'결과 {len(self.rows) + 1}')
-        rm = QPushButton('✕', row)
+        rm = QPushButton(row)
+        rm.setIcon(make_icon('close', theme.c('text_sub'), 14))
+        rm.setAccessibleName('항목 삭제')
         rm.setFixedWidth(34)
         entry = (row, pe, re_, rm)
         rm.clicked.connect(lambda: self.remove_row(entry))
@@ -3268,13 +3294,16 @@ class ChatRoomWindow(QWidget):
         self.search_edit.installEventFilter(self)
         self.search_count = _label('', 'searchCount', self.search_bar)
         self.search_up = QToolButton(self.search_bar)
-        self.search_up.setText('▲')
+        self.search_up.setIcon(QIcon(chevron_pixmap(theme.c('text_sub'), 16, up=True)))
         self.search_up.setToolTip('이전(더 오래된) 결과')
+        self.search_up.setAccessibleName('이전 검색 결과')
         self.search_down = QToolButton(self.search_bar)
-        self.search_down.setText('▼')
+        self.search_down.setIcon(QIcon(chevron_pixmap(theme.c('text_sub'), 16)))
         self.search_down.setToolTip('다음(더 최근) 결과')
+        self.search_down.setAccessibleName('다음 검색 결과')
         self.search_close = QToolButton(self.search_bar)
-        self.search_close.setText('✕')
+        self.search_close.setIcon(make_icon('close', theme.c('text_sub'), 14))
+        self.search_close.setAccessibleName('검색 닫기')
         self.search_up.clicked.connect(self.search_prev)
         self.search_down.clicked.connect(self.search_next)
         self.search_close.clicked.connect(self.close_search)
@@ -3389,7 +3418,8 @@ class ChatRoomWindow(QWidget):
         rh.addLayout(rv, 1)
         self.reply_cancel = QToolButton(self.reply_bar)
         self.reply_cancel.setObjectName('noticeBtn')
-        self.reply_cancel.setText('✕')
+        self.reply_cancel.setIcon(make_icon('close', theme.c('text_sub'), 14))
+        self.reply_cancel.setAccessibleName('답장 취소')
         self.reply_cancel.clicked.connect(self.cancel_reply)
         rh.addWidget(self.reply_cancel, 0, Qt.AlignTop)
         self.reply_bar.hide()
@@ -3411,7 +3441,8 @@ class ChatRoomWindow(QWidget):
         eh.addLayout(ebv, 1)
         self.edit_cancel = QToolButton(self.edit_bar)
         self.edit_cancel.setObjectName('noticeBtn')
-        self.edit_cancel.setText('✕')
+        self.edit_cancel.setIcon(make_icon('close', theme.c('text_sub'), 14))
+        self.edit_cancel.setAccessibleName('수정 취소')
         self.edit_cancel.setToolTip('수정 취소 (Esc)')
         self.edit_cancel.clicked.connect(self.cancel_edit)
         eh.addWidget(self.edit_cancel, 0, Qt.AlignTop)
@@ -3813,18 +3844,34 @@ class ChatRoomWindow(QWidget):
     def _header_buttons_width(self):
         return sum(b.width() for b in self.header_buttons if not b.isHidden())
 
+    def header_overflow(self):
+        """좁을 때 ☰ 메뉴로 옮길 헤더 아이콘, 덜 중요한 것부터 (버튼, 메뉴 이름, 동작)"""
+        entries = [(self.drawer_btn, '채팅방 서랍', self.open_drawer)]
+        if not self.is_secret():
+            entries.append((self.invite_btn, '대화상대 초대', self.open_invite_dialog))
+        return entries
+
+    def _layout_header_overflow(self, title_room):
+        """제목이 몇 글자밖에 안 보이면(84px 미만) 우선순위가 낮은 아이콘부터 하나씩 ☰ 메뉴로 옮긴다"""
+        entries = self.header_overflow()
+        movable = {id(e[0]) for e in entries}
+        fixed = sum(b.sizeHint().width() for b in self.header_buttons
+                    if id(b) not in movable and b not in (self.invite_btn, self.drawer_btn) and not b.isHidden())
+        shown = list(entries)
+        while shown and title_room(fixed + sum(e[0].sizeHint().width() for e in shown)) < theme.px(84):
+            shown.pop(0)
+        self.overflowed = [e for e in entries if e not in shown]
+        self.compact_header = bool(self.overflowed)
+        for btn, _label, _slot in entries:
+            btn.setVisible(any(e[0] is btn for e in shown))
+        if self.is_secret():
+            self.invite_btn.setVisible(False)
+
     def _elide_title(self):
         icons = sum(18 for w in (self.lock_icon, self.mute_icon, self.pin_icon) if not w.isHidden())
         hw = self.header.width() if self.header.isVisible() else self.width()
         title_room = lambda buttons_w: hw - 86 - buttons_w - icons   # noqa: E731  제목에 남는 폭
-        # 좁은 창·큰 글자: 제목이 몇 글자밖에 안 보이면 '초대'·'서랍' 아이콘을 ☰ 메뉴로 옮긴다
-        secret = self.is_secret()
-        movable = [self.drawer_btn] + ([] if secret else [self.invite_btn])
-        full_buttons = sum(b.sizeHint().width() for b in self.header_buttons
-                           if b in movable or (b not in (self.invite_btn, self.drawer_btn) and not b.isHidden()))
-        self.compact_header = title_room(full_buttons) < theme.px(84)
-        self.drawer_btn.setVisible(not self.compact_header)
-        self.invite_btn.setVisible(not self.compact_header and not secret)
+        self._layout_header_overflow(title_room)
         avail = max(60, title_room(self._header_buttons_width()))
         self.title_label.ensurePolished()
         full = self._title_text()
@@ -3844,7 +3891,8 @@ class ChatRoomWindow(QWidget):
         dt = parse_dt(notice.get('timestamp'))
         when = f'{dt.year}. {dt.month}. {dt.day}.' if dt else ''
         self.notice_sub.setText(f"{self.state.display_name(notice.get('sender'))} · {when}")
-        self.notice_toggle.setText('▴' if self._notice_expanded else '▾')
+        self.notice_toggle.setIcon(QIcon(chevron_pixmap(theme.c('text_sub'), 14, up=self._notice_expanded)))
+        self.notice_toggle.setAccessibleName('공지 접기' if self._notice_expanded else '공지 펼치기')
         self.notice_text.setWordWrap(self._notice_expanded)
         self.notice_sub.setVisible(self._notice_expanded)
         width = max(80, self.width() - 20 - 12 - 18 - 10 - 6 - 2 * 26 - 12)
@@ -4837,8 +4885,10 @@ class ChatRoomWindow(QWidget):
         menu.setStyleSheet(menu_qss())
         if room.get('type') != 'secret':
             menu.addAction('대화상대 초대', self.open_invite_dialog)
-        if getattr(self, 'compact_header', False):
-            menu.addAction('채팅방 서랍', self.open_drawer)
+        present = {a.text() for a in menu.actions()}
+        for _btn, label, slot in getattr(self, 'overflowed', []):   # 헤더에서 밀려난 아이콘
+            if label not in present:
+                menu.addAction(label, slot)
         if room.get('type') == 'group':
             menu.addAction('채팅방 이름 변경', self.rename_room)
         bot_action = self._bot_menu_action(room)

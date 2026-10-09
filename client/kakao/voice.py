@@ -328,7 +328,8 @@ class VoiceRecordDialog(QDialog):
         v.addWidget(self.status)
         row = QHBoxLayout()
         row.setSpacing(8)
-        self.record_button = QPushButton('● 녹음')
+        self.record_button = QPushButton('녹음')
+        self._set_record_icon(False)
         self.cancel_button = QPushButton('취소')
         self.send_button = QPushButton('보내기')
         self.send_button.setObjectName('primary')
@@ -354,14 +355,35 @@ class VoiceRecordDialog(QDialog):
             self._stopped('녹음을 멈췄습니다. 보내기를 누르면 전송됩니다.')
         else:
             self.status.setText('녹음 중입니다. 말씀하세요.')
-            self.record_button.setText('■ 정지')
+            self.record_button.setText('정지')
+            self._set_record_icon(True)
             self.send_button.setEnabled(False)
             self.pulse.set_active(True)
             self.recorder.start()
 
+    def _set_record_icon(self, recording):
+        """녹음 = 빨간 원, 정지 = 사각 (글자 기호 ●■ 대신 직접 그린 아이콘)"""
+        from PyQt5.QtGui import QPixmap, QIcon
+        pm = QPixmap(28, 28)
+        pm.setDevicePixelRatio(2.0)
+        pm.fill(Qt.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(Qt.NoPen)
+        if recording:
+            p.setBrush(QColor(theme.c('text')))
+            p.drawRoundedRect(QRectF(3, 3, 8, 8), 1.5, 1.5)
+        else:
+            p.setBrush(QColor(theme.c('badge')))
+            p.drawEllipse(QRectF(2.5, 2.5, 9, 9))
+        p.end()
+        self.record_button.setIcon(QIcon(pm))
+        self.record_button.setAccessibleName('녹음 정지' if recording else '녹음 시작')
+
     def _stopped(self, text):
         self.pulse.set_active(False)
-        self.record_button.setText('● 다시 녹음')
+        self.record_button.setText('다시 녹음')
+        self._set_record_icon(False)
         self.status.setText(text)
         self.send_button.setEnabled(self.recorder.seconds >= 1)
 

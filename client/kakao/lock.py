@@ -145,8 +145,7 @@ class PinKey(QAbstractButton):
             p.setPen(Qt.NoPen)
             p.setBrush(bg)
             p.drawEllipse(r)
-        f = theme.font('numeral' if self.text() != '⌫' else 'display')
-        f.setPixelSize(24 if self.text() != '⌫' else 20)
+        f = theme.font('numeral' if self.text() != '⌫' else 'display', scaled=False)   # 고정 크기 원 안
         p.setFont(f)
         p.setPen(QColor('#FFFFFF'))
         p.drawText(r, Qt.AlignCenter, self.text())

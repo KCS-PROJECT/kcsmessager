@@ -95,8 +95,7 @@ class SidebarButton(QAbstractButton):
         s = 24
         rect = QRectF((self.width() - s) / 2, 8, s, s)
         # 아이콘 아래 탭 이름 (왼쪽 메뉴에서 '조직도' 등을 바로 찾을 수 있게)
-        f = theme.font('micro', bold=self.isChecked())
-        f.setPixelSize(10)
+        f = theme.font('micro', bold=self.isChecked(), scaled=False)   # 고정 크기 사이드바 버튼 안
         p.setFont(f)
         p.setPen(QColor(color))
         p.drawText(QRectF(0, 36, self.width(), 16), Qt.AlignHCenter | Qt.AlignVCenter, TAB_LABELS[self.key])

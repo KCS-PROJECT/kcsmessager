@@ -13,17 +13,17 @@
 | 8 | colorize | 요약 유형 태그 4색 (4.5:1↑) | `SUMMARY_TAGS` · `test_tag_colors_meet_aa` |
 | 9 | critique | v4 화면 비평 | `01_design_critique_v4.md` |
 | 10 | delight | 재생하면 실제 녹음 모양 파형 | `VoiceCard.play` · `real_wave` 검사 |
-| 11 | distill | 숨겨진 버튼 2개·클래스·아이콘 함수 제거 | `chats_tab.py` (OpenChatButton 제거) |
+| 11 | distill | 숨겨진 버튼 2개·클래스·아이콘 함수 제거 | `chats_tab.py` (OpenChatButton 제거) — 제거는 첫 커밋 이전이라 git 기록에는 없고, 커밋된 코드(HEAD)에 없음은 `check_image7.py` 와 `git grep` 으로 확인 |
 | 12 | layout | 요약 결과 배치 · 이전 세션 layout | `summary_html` · 스크린샷 |
-| 13 | optimize | 없는 글꼴 제외 → 첫 화면 **282→159ms** (중앙값, 5회씩) | `theme.font_families/installed` · `OptimizeTest` · 재현: `python3 scripts/measure_startup.py [--legacy]` |
+| 13 | optimize | 없는 글꼴 제외 → 첫 화면 **약 280ms → 약 155ms** (번갈아 여러 번 측정한 범위: 예전 258–293ms, 지금 144–166ms; `--legacy` 는 지금 코드에서 글꼴 체인만 예전처럼 되돌려 잰다) | `theme.font_families/installed` · `OptimizeTest` · 재현: `python3 scripts/measure_startup.py [--legacy]` |
 | 14 | overdrive | 녹음 창 실시간 파형 | `voice.LiveWave` · 녹음 테스트 |
 | 15 | polish | 버튼 변형 통합·다크 강조 4.62:1·실패 표시 | `theme.button_qss` · `test_button_variants_cover_all_states` |
 | 16 | quieter | 키워드 이중 강조 완화, 칩 대비 2.51→5.42 | `keyword_text_color` · `test_keyword_chip_text_contrast` |
-| 17 | typeset | 스타일시트·`theme.font()`·`ElidedLabel` 의 글자 크기 전부 이름 단계로(단계 11개: headline 19·numeral 26 추가, 흩어진 8/9/10.5/11.5/12.5/13.5/18/20/24 를 가까운 단계로) | `theme.fs`, `theme.size_of` · `test_type_scale_steps_used_by_name`(세 형태 모두 숫자 금지, 이모티콘 그림 46px만 예외) |
+| 17 | typeset | 스타일시트·`theme.font()`·`ElidedLabel` 의 글자 크기 전부 이름 단계로(단계 11개: headline 19·numeral 26 추가, 흩어진 8/9/10.5/11.5/12.5/13.5/18/20/24 를 가까운 단계로) | `theme.fs`, `theme.size_of` · `test_type_scale_steps_used_by_name`(스타일시트·`font()`·`ElidedLabel`·`setPixelSize` 네 형태 모두 숫자 금지, 이모티콘 그림 46px·설정 전 로그인 화면만 예외). 고정 크기로 직접 그리는 부품(사이드바 버튼·잠금 숫자판·말풍선 미리보기)은 `theme.font(단계, scaled=False)` — 단계 크기 그대로, 200% 설정에도 틀 밖으로 안 넘침 |
 | + | frontend-design | 그린 아이콘·파형 대비·요약 칩·카드 문구 | `RoundGlyphButton`, `Waveform` |
 | + | simplify | 검토 4종 30건 → 아래 B | 아래 표 |
 | 순서 | shape → craft → animate → polish → audit → adapt | 한 기능에 그 순서대로 | `10_image7_workflow_run.md` §1 |
-| 요청 | ui-ux-pro-max | 배지 맥락 읽기, 기호 아이콘 금지 | `AccessibilityTest.test_badges_read_with_context_and_no_glyph_icons` |
+| 요청 | ui-ux-pro-max | 배지 맥락 읽기, 기호 아이콘 금지 — 공지 펼치기 ▾▴·검색 ▲▼·닫기/취소/삭제 ✕·녹음 ●■·통화 '● 녹음 중'을 모두 직접 그린 아이콘으로 (컨트롤 글자 기호를 찾는 회귀 테스트) | `AccessibilityTest.test_badges_read_with_context_and_no_glyph_icons` |
 | 요청 | ui-styling | 접근성 체크리스트 · shadcn 테마 변수 · Canvas 보드 · **`tailwind_config_gen.py` + `shadcn_add.py`로 `web/` 디자인 시스템 문서** | `UiStylingPatternsTest`, `DesignTokenExportTest`, `web/` (`npm run build` 성공) |
 
 ## B. simplify 검토 결과 30건 → 처리 상태 (전부 처리)
@@ -58,7 +58,7 @@
 | 추상화 2 | history_loaded 를 다시 그리기용으로 | ✅ `message_removed` |
 | 추상화 3 | 실패 메시지가 서버 id 공간에 섞임 | ✅ 별도 저장소, 화면에서만 맨 아래 |
 | 추상화 4 | set_run 특수 처리 | ✅ `_run_key` 에서 실패는 독립 묶음 |
-| 추상화 5 | compact header 가 _elide_title 에 묻힘 | ✅ 계산 하나로 정리(우선순위 목록 일반화는 버튼 2개뿐이라 보류할 이유 없음 → 현재 구조 유지) |
+| 추상화 5 | compact header 가 _elide_title 에 묻힘 | ✅ `header_overflow()`(덜 중요한 것부터 우선순위 목록) + `_layout_header_overflow()` 가 필요한 만큼만 하나씩 ☰ 로 옮기고, 방 메뉴는 `self.overflowed` 를 그대로 덧붙인다 (버튼을 추가해도 목록 한 줄) |
 | 추상화 6 | 글꼴 캐시 2개 | ✅ (재사용 6) |
 
 ## C. 검증

@@ -26,7 +26,7 @@ Image #7 = 디자인/UI 스킬 17개 표 + 추가 스킬 2개(frontend-design, s
 | **delight** | 음성메시지를 재생하면 파형이 실제 녹음 모양으로 바뀜 | `real_wave` 테스트 |
 | **distill** | 채팅 탭에서 항상 숨겨져 있던 버튼 2개·클래스·아이콘 함수(쓰이지 않는 코드) 제거 | 전체 테스트 |
 | layout | 요약 결과 배치(제목 → 키워드 칩 → 유형 줄 → 공유 보조) + 이전 세션 layout | 스크린샷 |
-| **optimize** | 설치 안 된 글꼴('맑은 고딕' on macOS)을 체인에서 제외 → **메인 창 첫 화면 290ms → 155ms**, Qt 경고 제거 | `OptimizeTest` |
+| **optimize** | 설치 안 된 글꼴('맑은 고딕' on macOS)을 체인에서 제외 → **메인 창 첫 화면 약 280ms → 약 155ms** (번갈아 측정 범위: 예전 258–293ms, 지금 144–166ms, `scripts/measure_startup.py`), Qt 경고 제거 | `OptimizeTest` |
 | **overdrive** | 녹음 창에 실시간 흐르는 파형(최근 막대일수록 진하게, 5분 진행 바탕) | 스크린샷·테스트 |
 | polish | 버튼 변형 통합, 다크 강조색 4.62:1, 전송 실패 표시 | 08 문서 |
 | **quieter** | 키워드 알림의 이중 강조(진한 테두리+칩)를 칩 위주로, 테두리 1px·반투명. 칩 글자 대비 2.51 → 5.42:1 | `test_keyword_chip_text_contrast` |

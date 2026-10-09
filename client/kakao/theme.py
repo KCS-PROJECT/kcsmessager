@@ -292,11 +292,14 @@ def size_of(size):
     return TYPE_SCALE[size] if isinstance(size, str) else size
 
 
-def font(size='body', bold=False):
-    """size: 단계 이름(권장, 예 'meta') 또는 단계에 없는 특수 크기 숫자"""
+def font(size='body', bold=False, scaled=True):
+    """size: 단계 이름(권장, 예 'meta') 또는 단계에 없는 특수 크기 숫자.
+    scaled=False: 크기가 고정된 직접 그린 부품(사이드바 버튼·잠금 숫자판·말풍선 미리보기)용 — 단계 크기 그대로,
+    글자 크기 설정(최대 200%)을 적용하지 않아 고정된 틀 밖으로 넘치지 않는다"""
     f = QFont()
     f.setFamilies(font_families())
-    f.setPixelSize(px(size_of(size)))
+    n = size_of(size)
+    f.setPixelSize(px(n) if scaled else n)
     f.setBold(bold)
     f.setStyleHint(QFont.SansSerif)
     return f

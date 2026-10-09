@@ -362,7 +362,8 @@ class V4ChatRoomUiTest(unittest.TestCase):
         dlg = VoiceRecordDialog(recorder=rec, autostart=False)
         with mock.patch.object(VoiceRecorder, 'start', lambda self_: (self_.error.emit('마이크를 찾을 수 없습니다'), False)[1]):
             dlg.toggle()
-        self.assertEqual(dlg.record_button.text(), '● 다시 녹음')
+        self.assertEqual(dlg.record_button.text(), '다시 녹음')
+        self.assertFalse(dlg.record_button.icon().isNull())   # 그린 아이콘
         self.assertIn('마이크를 찾을 수 없습니다', dlg.status.text())
         self.assertFalse(rec.recording)
         self.assertFalse(dlg.send_button.isEnabled())
@@ -547,6 +548,7 @@ class AccessibilityTest(unittest.TestCase):
         self.assertNotIn('프로필 보기', [a.text() for a in win.build_context_menu(mine).actions()])
 
     def test_badges_read_with_context_and_no_glyph_icons(self):
+        import re
         from client.kakao.main_window import MainWindow
         from client.kakao.chats_tab import ChatsTab, RoomRow
         win = MainWindow(self.state, self.state.settings)
@@ -560,6 +562,18 @@ class AccessibilityTest(unittest.TestCase):
         room = ChatRoomWindow(self.state, 'r1')
         self.assertEqual(room.notice_close.text(), '')
         self.assertFalse(room.notice_close.icon().isNull())
+        room._refresh_notice()
+        self.assertEqual(room.notice_toggle.text(), '')                  # ▾▴ 대신 그린 꺾쇠
+        self.assertFalse(room.notice_toggle.icon().isNull())
+        import glob
+        root = os.path.join(os.path.dirname(__file__), '..', 'client', 'kakao')
+        glyphs = []
+        for path in glob.glob(os.path.join(root, '*.py')):
+            with open(path, encoding='utf-8') as fh:
+                for i, line in enumerate(fh, 1):
+                    if re.search(r"(setText|QLabel|QPushButton|_label)\(f?'[●■▴▾▲▼▶❚✕]", line):
+                        glyphs.append(f'{os.path.basename(path)}:{i}')
+        self.assertEqual(glyphs, [])                                      # 컨트롤 글자 기호 아이콘 없음
         win.close()
         room.close()
 
@@ -664,6 +678,9 @@ class DesignSystemTest(unittest.TestCase):
                 offenders.append(f'{os.path.basename(path)}: font({n})')
             for n in re.findall(r"ElidedLabel\((?:[^()]|\([^()]*\))*?, ([\d.]+), '", text):
                 offenders.append(f'{os.path.basename(path)}: ElidedLabel({n})')
+            for n in re.findall(r'setPixelSize\((\d+)', text):
+                if os.path.basename(path) != 'login.py':
+                    offenders.append(f'{os.path.basename(path)}: setPixelSize({n})')
         # 예외: 이모티콘 그림 크기(46px)는 글자 단계가 아니다
         offenders = [o for o in offenders if 'px(46)' not in o]
         self.assertEqual(offenders, [])

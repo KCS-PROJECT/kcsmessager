@@ -67,6 +67,7 @@ ROWS = [
      and has('client/kakao/voice.py', r'AudioEngine') and not has('client/kakao/voice.py', r'QAudioOutput|QAudioInput')
      and has('server/kakao/store.py', r'after_msg_id') and has('server/kakao/server.py', r"'done': part == len\(chunks\) - 1")
      and has('client/kakao/chats_tab.py', r'def _on_room_changed', r'def call_icon')
+     and has('client/kakao/chat_room.py', r'def header_overflow', r'def _layout_header_overflow')
      and has('client/kakao/state.py', r'CALL_MODE_LABELS = \{', r'def org_text\(self, username, sep')
      and not any(has(f, r"\{'voice': '보이스톡'") for f in ('client/kakao/chat_room.py', 'client/kakao/call.py',
                                                            'client/kakao/feature_tour.py', 'client/kakao/chats_tab.py'))
@@ -74,7 +75,8 @@ ROWS = [
          'client/kakao/chat_room.py', 'client/kakao/friends_tab.py', 'client/kakao/more_tab.py'))
      and has('server/kakao/rag.py', r'FATAL_LLM_ERRORS = '),
      [T + 'EfficiencyFollowupTest', T + 'V4ServerTest']),
-    ('ui-ux-pro-max', lambda: has('client/kakao/main_window.py', r'안 읽은 메시지 \{count\}개'),
+    ('ui-ux-pro-max', lambda: has('client/kakao/main_window.py', r'안 읽은 메시지 \{count\}개')
+     and has('client/kakao/chat_room.py', r'def chevron_pixmap') and has('client/kakao/call.py', r'class RecBadge'),
      [T + 'AccessibilityTest.test_badges_read_with_context_and_no_glyph_icons']),
     ('ui-styling', lambda: exists('web/tailwind.config.ts', 'web/components.json', 'web/src/components/ui/button.tsx',
                                   'web/src/components/ui/tabs.tsx', 'assets/design-tokens.css',
