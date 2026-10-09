@@ -1,6 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 # PyInstaller spec file for KCS Messenger
 
+import os
 import sys
 from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_data_files
 
@@ -63,7 +64,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=None,  # You can add an icon file here later
+    icon='assets/icon.ico' if os.path.exists('assets/icon.ico') else None,  # scripts/make_app_icon.py 로 생성
 )
 
 # For macOS, create an app bundle
@@ -71,7 +72,7 @@ if sys.platform == 'darwin':
     app = BUNDLE(
         exe,
         name='KCS Messenger.app',
-        icon=None,
+        icon='assets/icon.icns' if os.path.exists('assets/icon.icns') else None,
         bundle_identifier='com.kcs.messenger',
         info_plist={
             'NSHighResolutionCapable': 'True',

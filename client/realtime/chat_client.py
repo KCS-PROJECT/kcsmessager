@@ -155,14 +155,13 @@ class LoginDialog(QDialog):
     def init_ui(self):
         """Initialize login UI"""
         self.setWindowTitle("로그인")
-        self.setFixedSize(380, 250)  # 더 큰 크기로 설정
         self.setStyleSheet("""
             QDialog {
                 background-color: #FFFFFF;
-                font-family: "Malgun Gothic", "맑은 고딕", sans-serif;
+                font-family: "맑은 고딕", "Malgun Gothic", "Apple SD Gothic Neo", "Nanum Gothic", sans-serif;
             }
             QLabel {
-                font-family: "Malgun Gothic", "맑은 고딕", sans-serif;
+                font-family: "맑은 고딕", "Malgun Gothic", "Apple SD Gothic Neo", "Nanum Gothic", sans-serif;
                 font-size: 15px;
                 color: #2C2C2C;
                 font-weight: 500;
@@ -171,7 +170,7 @@ class LoginDialog(QDialog):
                 border: 2px solid #E0E0E0;
                 border-radius: 6px;
                 padding: 12px 15px;
-                font-family: "Malgun Gothic", "맑은 고딕", sans-serif;
+                font-family: "맑은 고딕", "Malgun Gothic", "Apple SD Gothic Neo", "Nanum Gothic", sans-serif;
                 font-size: 15px;
                 background-color: #FAFAFA;
                 color: #2C2C2C;
@@ -184,7 +183,7 @@ class LoginDialog(QDialog):
                 border: none;
                 border-radius: 6px;
                 padding: 12px 16px;
-                font-family: "Malgun Gothic", "맑은 고딕", sans-serif;
+                font-family: "맑은 고딕", "Malgun Gothic", "Apple SD Gothic Neo", "Nanum Gothic", sans-serif;
                 font-size: 14px;
                 font-weight: bold;
                 color: #2C2C2C;
@@ -235,6 +234,9 @@ class LoginDialog(QDialog):
         self.login_btn = QPushButton("입장하기")
         self.login_btn.clicked.connect(self.accept_login)
         layout.addWidget(self.login_btn)
+        
+        # 내용물 높이에 맞춰 고정 - 위젯이 찌그러지지 않도록 함
+        self.setFixedSize(380, self.sizeHint().height())
         
     def quick_login(self, username):
         """Quick login with preset username"""
@@ -473,7 +475,7 @@ class RealKakaoTalkWindow(QMainWindow):
     
     def init_ui(self):
         """Initialize UI"""
-        self.setWindowTitle("KakaoTalk - Real Chat")
+        self.setWindowTitle("KCS Talk - Real Chat")
         
         # 더 큰 윈도우 크기로 설정 - 글씨와 요소들이 잘 보이도록
         screen = QApplication.primaryScreen().geometry()
@@ -653,7 +655,7 @@ class RealKakaoTalkWindow(QMainWindow):
         dialog = LoginDialog(self)
         if dialog.exec_():
             self.username = dialog.get_username()
-            self.setWindowTitle(f"KakaoTalk - {self.username}")
+            self.setWindowTitle(f"KCS Talk - {self.username}")
             
             # Connect to server
             if self.chat_client.connect_to_server(self.username):

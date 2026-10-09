@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+server_data/
+*.db
+*.db-wal
+*.db-shm
+
+# 디자인 시스템 웹 문서 (web/) 빌드 산출물
+web/node_modules/
+web/dist/
+.playwright-mcp/

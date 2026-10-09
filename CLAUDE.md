@@ -23,6 +23,17 @@ server/
 tests/             # Test suite
 ```
 
+## KCS Talk 2.0 (current client/server)
+
+The maintained implementation is `client/kakao/` (PyQt5 client) + `server/kakao/` (TCP NDJSON server, SQLite, RAG bot).
+- Protocol & feature contract: `claudedocs/KAKAO_FEATURE_SPEC.md` — server, client `AppState`, and tests all follow it; update it first when changing the protocol.
+- UI never touches sockets: widgets call `client/kakao/state.py` (`AppState`) actions and listen to its signals.
+- Colors/fonts only via `client/kakao/theme.py`; icons/avatars via `client/kakao/widgets.py` (QPainter, no image assets).
+- Product name shown to users is **KCS Talk**. Company CI (㈜케이씨에스) assets live in `assets/brand/`; render them only via `client/kakao/brand.py`. Default accent theme is `kcs` (navy #2A386C); `theme.c('yellow')` means "primary accent" and text on it must use `theme.c('on_accent')`, my-bubble text `theme.c('bubble_mine_text')` — never hardcode `#191919` on accent colors.
+- Run: `python3 server/chat/chat_server.py` then `python3 client/kakao/app.py`. User guide: `docs/KCS_TALK_GUIDE.md`.
+- Tests: `python3 scripts/verify_features.py` (all tests → per-feature table in claudedocs/FEATURE_VERIFICATION.md; add new tests to its mapping) or `QT_QPA_PLATFORM=offscreen python3 -m unittest discover -s tests -p 'test_*.py'`. `python3 scripts/demo.py --headless-check` exercises the real server end to end. `tests/kakao_fakes.py` provides `make_demo_state()` for UI tests without a server. `tests/__init__.py` must stay (a site-packages `tests` package shadows it otherwise).
+- Avoid fixed window sizes (`setFixedSize`/`setMinimumSize` with literals) — they clipped widgets before; size from layouts.
+
 ## Core Components
 
 ### Server Architecture

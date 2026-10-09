@@ -44,7 +44,7 @@ class UnifiedKakaoTalkLauncher(QMainWindow):
         
     def init_ui(self):
         """런처 UI 초기화 - 개선된 가시성"""
-        self.setWindowTitle("🚀 KakaoTalk 통합 런처 v3.1")
+        self.setWindowTitle("🚀 KCS Talk 통합 런처 v3.1")
         
         # 더 큰 윈도우 크기 설정
         self.setMinimumSize(850, 750)
@@ -75,7 +75,7 @@ class UnifiedKakaoTalkLauncher(QMainWindow):
         layout.setContentsMargins(25, 25, 25, 25)
         
         # Title - 더 작게
-        title = QLabel("🚀 KakaoTalk 통합 런처")
+        title = QLabel("🚀 KCS Talk 통합 런처")
         title.setAlignment(Qt.AlignCenter)
         title.setStyleSheet("""
             QLabel {
@@ -579,7 +579,7 @@ class BuiltinDemoWindow(QMainWindow):
     
     def init_ui(self):
         """데모 UI 초기화"""
-        self.setWindowTitle("KakaoTalk - 내장 데모")
+        self.setWindowTitle("KCS Talk - 내장 데모")
         self.setGeometry(100, 100, 450, 600)
         
         central = QWidget()
@@ -930,7 +930,7 @@ def main():
     app.setFont(font)
     
     # 애플리케이션 정보 설정
-    app.setApplicationName("KakaoTalk Unified Launcher")
+    app.setApplicationName("KCS Talk Unified Launcher")
     app.setApplicationVersion("3.1")
     app.setOrganizationName("KCS Messenger")
     
@@ -939,8 +939,8 @@ def main():
     launcher.show()
     
     # 시작 메시지
-    QMessageBox.information(launcher, "🎉 KakaoTalk 통합 런처 v3.1", 
-                          "KakaoTalk 통합 런처에 오신 것을 환영합니다!\n\n"
+    QMessageBox.information(launcher, "🎉 KCS Talk 통합 런처 v3.1", 
+                          "KCS Talk 통합 런처에 오신 것을 환영합니다!\n\n"
                           "🚀 완전한 시작: 실시간 채팅 (서버 + 클라이언트)\n"
                           "🎨 데모 모드: 외부 데모 파일 실행\n"
                           "🎭 내장 데모: 완전 독립 실행 데모\n"

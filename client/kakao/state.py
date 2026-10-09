@@ -1,0 +1,1472 @@
+# -*- coding: utf-8 -*-
+"""
+AppState - 클라이언트의 단일 데이터 저장소
+서버 푸시를 받아 상태를 갱신하고, UI에는 고수준 시그널만 노출한다.
+UI는 소켓을 직접 다루지 않고 이 클래스의 액션 메서드만 호출한다.
+(프로토콜: claudedocs/KAKAO_FEATURE_SPEC.md)
+"""
+
+import base64
+import mimetypes
+import os
+import re
+from datetime import datetime, date, timedelta
+
+from PyQt5.QtCore import QObject, pyqtSignal
+
+MAX_ATTACHMENT = 10 * 1024 * 1024
+MAX_VOICE_SECONDS = 300   # 음성메시지 최대 5분 (명세 §9.3)
+FAILED_ID_BASE = 10 ** 12  # 보내지 못한 메시지의 로컬 id (서버 id 보다 항상 커서 대화 맨 아래에 놓인다)
+MAX_AVATAR = 512 * 1024
+PRESENCES = ('online', 'away', 'busy', 'meeting')
+PRESENCE_LABELS = {'online': '온라인', 'away': '자리비움', 'busy': '다른 용무 중',
+                   'meeting': '회의 중', 'offline': '오프라인'}
+PRESENCE_COLORS = {'online': '#3DD16B', 'away': '#F5B400', 'busy': '#FF4B3E',
+                   'meeting': '#8E6CEF', 'offline': '#BDBDBD'}
+BOT_NAME = 'AI 비서'
+URL_RE = re.compile(r'https?://[^\s<>"]+')
+
+
+WEEKDAYS = '월화수목금토일'
+CALL_MODE_LABELS = {'voice': '보이스톡', 'video': '페이스톡', 'voiceroom': '보이스룸'}   # 통화 종류 이름 (앱 전체 하나)
+
+
+def fmt_duration(seconds):
+    """초 → 'm:ss', 1시간 이상은 'h:mm:ss' (음성메시지·통화 길이 · 통화 창 공용)"""
+    try:
+        seconds = max(0, int(seconds))
+    except (TypeError, ValueError):
+        seconds = 0
+    if seconds >= 3600:
+        return f'{seconds // 3600}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}'
+    return f'{seconds // 60}:{seconds % 60:02d}'
+
+
+def fmt_ampm(dt):
+    """datetime → '오전 9:06' / '오후 2:30' (말풍선 시간 · 대화 내보내기 공용)"""
+    return f"{'오전' if dt.hour < 12 else '오후'} {dt.hour % 12 or 12}:{dt.minute:02d}"
+
+
+def fmt_day(d):
+    """date → '2026년 10월 9일 금요일'"""
+    return f'{d.year}년 {d.month}월 {d.day}일 {WEEKDAYS[d.weekday()]}요일'
+
+
+def attachment_payload(name, mime, data):
+    """send 요청의 첨부 형식 {name, mime, data_b64}"""
+    return {'name': name, 'mime': mime, 'data_b64': base64.b64encode(data).decode('ascii')}
+
+
+def parse_dt(value):
+    """ISO 문자열 → naive datetime (타임존 표기는 무시)"""
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value
+    try:
+        dt = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+    except ValueError:
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone().replace(tzinfo=None)
+    return dt
+
+
+class AppState(QObject):
+    welcomed = pyqtSignal()
+    connection_lost = pyqtSignal(str)
+    users_changed = pyqtSignal()
+    user_changed = pyqtSignal(str)
+    rooms_changed = pyqtSignal()
+    room_changed = pyqtSignal(str)
+    room_removed = pyqtSignal(str)
+    room_opened = pyqtSignal(str)              # 내가 요청한 방이 준비됨 → 창 열기
+    message_added = pyqtSignal(str, dict)      # room_id, message
+    message_updated = pyqtSignal(str, dict)
+    history_loaded = pyqtSignal(str, list, bool)  # room_id, 이번에 받은 메시지, has_more
+    read_changed = pyqtSignal(str)
+    events_changed = pyqtSignal()
+    event_reminder = pyqtSignal(dict, int)
+    todos_changed = pyqtSignal()
+    search_results = pyqtSignal(str, list)
+    attachment_loaded = pyqtSignal(int, bytes, str, str)  # id, data, name, mime
+    scheduled_ok = pyqtSignal(dict)
+    error = pyqtSignal(str)
+    notify = pyqtSignal(str, str, str)         # 제목, 본문, room_id (트레이 알림)
+    avatar_changed = pyqtSignal(str)           # username - 프로필 사진 로드/변경
+    rag_docs_changed = pyqtSignal(list)        # AI 지식베이스 문서 목록
+    # ---- v3 (명세 §8) ----
+    calls_changed = pyqtSignal()
+    call_ended = pyqtSignal(dict)              # {call_id, room_id, duration_seconds}
+    call_media = pyqtSignal(int, str, str, int, str, dict)  # call_id, from, kind, seq, data_b64, 기타 필드
+    stories_changed = pyqtSignal()
+    multi_profiles_changed = pyqtSignal(list)
+    blocked_changed = pyqtSignal()
+    board_changed = pyqtSignal(str)            # room_id
+    open_rooms_found = pyqtSignal(list)
+    drawer_loaded = pyqtSignal(str, list)      # kind, messages (전체 톡서랍)
+    friend_added = pyqtSignal(dict, bool)      # 추가된 사용자, 이미 친구였는지
+    my_friends_changed = pyqtSignal()
+    # v4 (명세 §9)
+    room_summary_ready = pyqtSignal(str, dict)   # room_id, {summary, source, count, unread_only}
+    call_history_changed = pyqtSignal()
+    room_export_ready = pyqtSignal(str, list, bool)  # room_id, messages, truncated
+    send_failed = pyqtSignal(str, dict)          # room_id, 보내지 못한 메시지
+    message_removed = pyqtSignal(str, object)    # room_id, msg_id (로컬 id 는 10^12 대라 int(32비트) 시그널로는 깨진다)
+
+    def __init__(self, conn, settings=None, parent=None):
+        super().__init__(parent)
+        self.conn = conn
+        self.settings = settings
+        self.me = ''
+        self.users = {}       # username -> User
+        self.rooms = {}       # room_id -> Room
+        self._messages = {}   # room_id -> {msg_id: Message}
+        self.has_more = {}    # room_id -> bool
+        self.history_requested = set()
+        self.events = {}      # event_id -> Event
+        self.todos = {}       # todo_id -> Todo
+        self.attachments = {}  # attachment_id -> (bytes, name, mime)
+        self.avatars = {}      # username -> (avatar_id, bytes)
+        self.rag_docs = []
+        self.org = {}
+        self.keyring = None      # 비밀채팅 키 (welcome 후 생성)
+        self.calls = {}          # call_id -> Call
+        self.stories = {}        # story_id -> Story
+        self.seen_stories = set()
+        self.multi_profiles = []
+        self.blocked = set()
+        self.boards = {}         # room_id -> {post_id: Post}
+        self.locked = False      # 잠금모드 중이면 알림 내용 숨김
+        self.my_friends = []     # 전화번호/이메일로 등록한 친구
+        self.call_history = []   # 끝난 통화 기록 (채팅탭 '통화' 폴더)
+        self._failed = None      # 보내지 못한 메시지 메모리 사본 (_failed_list)
+        self._failed_rooms = {}  # room_id → 실패 메시지 수 (채팅 목록 행마다 O(1) 조회)
+        self._export_parts = {}  # room_id → 받는 중인 내보내기 조각
+        self._failed_saved_at = -1e9
+        self._failed_save_timer = None
+        self.active_rooms = set()  # 현재 창이 열려 화면에 보이는 방(알림 억제용)
+        self._pending_direct = set()
+        self._pending_groups = []
+        if conn is not None:
+            conn.event_received.connect(self.handle)
+            conn.disconnected.connect(self.connection_lost)
+
+    # ================= 수신 처리 =================
+    def handle(self, msg_type, p):
+        handler = getattr(self, f'_on_{msg_type}', None)
+        if handler:
+            handler(p)
+
+    def _on_welcome(self, p):
+        self.me = p['me']['username']
+        self.users = {u['username']: u for u in p.get('users', [])}
+        self.users[self.me] = p['me']
+        self.rooms = {r['room_id']: r for r in p.get('rooms', [])}
+        self.org = p.get('org') or {}   # {'holding': {...}|None, 'companies': [{name, business, units...}]}
+        self.calls = {c['call_id']: c for c in p.get('calls', [])}
+        self.blocked = set(p.get('blocked', []))
+        self.my_friends = list(p.get('friends', []))
+        self._init_keyring()
+        self.users_changed.emit()
+        self.rooms_changed.emit()
+        for name in self.users:
+            self._sync_avatar(name)
+        self.welcomed.emit()
+        today = date.today()
+        self.request_events(datetime(today.year - 1, 1, 1), datetime(today.year + 2, 1, 1))
+        self.request_todos()
+        self.request_stories()
+        self.request_call_history()
+        self._restore_failed()
+        self.calls_changed.emit()
+
+    def _on_user_status_changed(self, p):
+        user = self.users.get(p['username'])
+        if user is not None:
+            user['online'] = p['status'] == 'online'
+            self.user_changed.emit(p['username'])
+            self.users_changed.emit()
+
+    def _on_user_updated(self, p):
+        user = p['user']
+        self.users[user['username']] = user
+        self._sync_avatar(user['username'])
+        self.user_changed.emit(user['username'])
+        self.users_changed.emit()
+        self.rooms_changed.emit()
+
+    def _on_room_updated(self, p):
+        room = p['room']
+        rid = room['room_id']
+        is_new = rid not in self.rooms
+        self.rooms[rid] = room
+        self.room_changed.emit(rid)
+        self.rooms_changed.emit()
+        members = set(room.get('members', []))
+        if room['type'] in ('direct', 'self', 'secret'):
+            others = members - {self.me}
+            target = next(iter(others)) if others else self.me
+            if target in self._pending_direct:
+                self._pending_direct.discard(target)
+                self.room_opened.emit(rid)
+        elif room['type'] in ('group', 'open') and is_new:
+            for pending in list(self._pending_groups):
+                if pending <= members:
+                    self._pending_groups.remove(pending)
+                    self.room_opened.emit(rid)
+                    break
+
+    def _on_room_removed(self, p):
+        rid = p['room_id']
+        self.rooms.pop(rid, None)
+        self._messages.pop(rid, None)
+        self.room_removed.emit(rid)
+        self.rooms_changed.emit()
+
+    def _on_history(self, p):
+        rid = p['room_id']
+        store = self._messages.setdefault(rid, {})
+        batch = p.get('messages', [])
+        for m in batch:
+            self._decrypt(m)
+        for m in batch:
+            store[m['msg_id']] = m
+        self.has_more[rid] = bool(p.get('has_more'))
+        self.history_loaded.emit(rid, batch, self.has_more[rid])
+
+    def _on_msg_new(self, p):
+        m = p['message']
+        self._decrypt(m)
+        rid = m['room_id']
+        self._messages.setdefault(rid, {})[m['msg_id']] = m
+        room = self.rooms.get(rid)
+        if room is not None:
+            room['last_message'] = m
+            if m['sender'] != self.me and m['kind'] != 'system':
+                room['unread_count'] = room.get('unread_count', 0) + 1
+            if m['sender'] == self.me:
+                room.setdefault('read_pointers', {})[self.me] = max(
+                    room.get('read_pointers', {}).get(self.me, 0), m['msg_id'])
+        self.message_added.emit(rid, m)
+        self.rooms_changed.emit()
+        if m['sender'] and m['sender'] != self.me and rid not in self.active_rooms and self.should_alert(rid, m):
+            if self.locked:
+                self.notify.emit('KCS Talk', '새 메시지가 있습니다', rid)   # 잠금모드: 내용 숨김
+            else:
+                self.notify.emit(self.room_title(rid), self.message_preview(m), rid)
+
+    def _on_msg_updated(self, p):
+        m = p['message']
+        self._decrypt(m)
+        rid = m['room_id']
+        self._messages.setdefault(rid, {})[m['msg_id']] = m
+        room = self.rooms.get(rid)
+        if room is not None:
+            if (room.get('last_message') or {}).get('msg_id') == m['msg_id']:
+                room['last_message'] = m
+                self.rooms_changed.emit()
+            if (room.get('notice') or {}).get('msg_id') == m['msg_id']:
+                room['notice'] = m
+                self.room_changed.emit(rid)
+        self.message_updated.emit(rid, m)
+
+    def _on_read_update(self, p):
+        rid = p['room_id']
+        room = self.rooms.get(rid)
+        if room is None:
+            return
+        pointers = room.setdefault('read_pointers', {})
+        pointers[p['username']] = max(pointers.get(p['username'], 0), p['last_read_msg_id'])
+        if p['username'] == self.me:
+            mine = pointers[self.me]
+            loaded = self._messages.get(rid, {})
+            room['unread_count'] = sum(
+                1 for m in loaded.values()
+                if m['msg_id'] > mine and m['sender'] != self.me and m['kind'] != 'system')
+            self.rooms_changed.emit()
+        self.read_changed.emit(rid)
+
+    def _on_search_result(self, p):
+        self.search_results.emit(p.get('query', ''), p.get('messages', []))
+
+    def _on_event_updated(self, p):
+        ev = p['event']
+        old = self.events.get(ev['event_id'])
+        self.events[ev['event_id']] = ev
+        self.events_changed.emit()
+        # 다른 사람이 일정의 제목/시간/장소를 바꾸면 알림 (톡캘린더 일정 변경 알림)
+        if old is not None and ev.get('creator') != self.me:
+            changed = [label for key, label in (('title', '제목'), ('start', '시간'), ('end', '시간'),
+                                                ('location', '장소')) if old.get(key) != ev.get(key)]
+            if changed:
+                start = parse_dt(ev['start'])
+                when = start.strftime('%m/%d %H:%M') if start else ''
+                self.notify.emit(f"📅 일정이 변경되었습니다: {ev['title']}",
+                                 f"{'·'.join(dict.fromkeys(changed))} 변경 · {when}", ev.get('room_id') or '')
+
+    def _on_event_deleted(self, p):
+        self.events.pop(p['event_id'], None)
+        self.events_changed.emit()
+
+    def _on_event_list(self, p):
+        for ev in p.get('events', []):
+            self.events[ev['event_id']] = ev
+        self.events_changed.emit()
+
+    def _on_event_reminder(self, p):
+        ev = p['event']
+        minutes = int(p.get('minutes_before') or ev.get('remind_minutes') or 0)
+        self.events[ev['event_id']] = ev
+        self.event_reminder.emit(ev, minutes)
+        start = parse_dt(ev['start'])
+        when = start.strftime('%m/%d %H:%M') if start else ''
+        body = f"{minutes}분 후 시작 · {when}" if minutes else f"지금 시작 · {when}"
+        self.notify.emit(f"📅 {ev['title']}", body, ev.get('room_id') or '')
+
+    def _on_todo_updated(self, p):
+        todo = p['todo']
+        self.todos[todo['todo_id']] = todo
+        self.todos_changed.emit()
+
+    def _on_todo_deleted(self, p):
+        self.todos.pop(p['todo_id'], None)
+        self.todos_changed.emit()
+
+    def _on_todo_list(self, p):
+        self.todos = {t['todo_id']: t for t in p.get('todos', [])}
+        self.todos_changed.emit()
+
+    def _on_attachment_data(self, p):
+        data = base64.b64decode(p.get('data_b64') or '')
+        aid = p['attachment_id']
+        self.attachments[aid] = (data, p.get('name', ''), p.get('mime', ''))
+        for name, user in self.users.items():
+            if user.get('avatar_id') == aid:
+                self.avatars[name] = (aid, data)
+                self.avatar_changed.emit(name)
+        self.attachment_loaded.emit(aid, data, p.get('name', ''), p.get('mime', ''))
+
+    def _on_rag_doc_list(self, p):
+        self.rag_docs = list(p.get('docs', []))
+        self.rag_docs_changed.emit(list(self.rag_docs))
+
+    def _on_rag_doc_added(self, p):
+        doc = p['doc']
+        self.rag_docs = [d for d in self.rag_docs if d['doc_id'] != doc['doc_id']] + [doc]
+        self.rag_docs_changed.emit(list(self.rag_docs))
+
+    def _on_rag_doc_deleted(self, p):
+        self.rag_docs = [d for d in self.rag_docs if d['doc_id'] != p['doc_id']]
+        self.rag_docs_changed.emit(list(self.rag_docs))
+
+    def _sync_avatar(self, username):
+        """사용자의 avatar_id가 바뀌었으면 사진을 요청하거나 캐시를 비운다"""
+        aid = self.users.get(username, {}).get('avatar_id')
+        cached = self.avatars.get(username)
+        if not aid:
+            if cached:
+                del self.avatars[username]
+                self.avatar_changed.emit(username)
+            return
+        if cached and cached[0] == aid:
+            return
+        if aid in self.attachments:
+            self.avatars[username] = (aid, self.attachments[aid][0])
+            self.avatar_changed.emit(username)
+        else:
+            self._send('attachment_get', attachment_id=aid)
+
+    def _on_scheduled_ok(self, p):
+        self.scheduled_ok.emit(p)
+
+    def _on_error(self, p):
+        self.error.emit(p.get('message', '알 수 없는 오류'))
+
+    # ================= 조회 =================
+    def user(self, username):
+        return self.users.get(username) or {
+            'username': username, 'display_name': username,
+            'status_message': '', 'birthday': None, 'online': False}
+
+    def display_name(self, username):
+        if not username:
+            return ''
+        return self.user(username).get('display_name') or username
+
+    def is_online(self, username):
+        return bool(self.user(username).get('online'))
+
+    def presence_of(self, username):
+        user = self.user(username)
+        if not user.get('online'):
+            return 'offline'
+        return user.get('presence') or 'online'
+
+    def avatar_bytes(self, username):
+        cached = self.avatars.get(username)
+        return cached[1] if cached else None
+
+    def is_bot(self, username):
+        return bool(self.user(username).get('is_bot'))
+
+    def company_of(self, username):
+        return self.user(username).get('company') or ''
+
+    def is_external(self, username):
+        """나와 다른 그룹사 소속인지"""
+        mine = self.company_of(self.me)
+        return bool(mine) and self.company_of(username) not in ('', mine)
+
+    def friends(self, include_bots=False, include_hidden=False):
+        """나를 제외한 사용자 (이름순). 숨김·차단한 친구는 기본적으로 제외"""
+        return sorted((u for name, u in self.users.items()
+                       if name != self.me and (include_bots or not u.get('is_bot'))
+                       and (include_hidden or (not self.is_hidden(name) and name not in self.blocked))),
+                      key=lambda u: self.display_name(u['username']))
+
+    def birthday_friends(self, on=None):
+        on = on or date.today()
+        key = on.strftime('%m-%d')
+        return [u for u in self.friends() if u.get('birthday') == key]
+
+    def room(self, room_id):
+        return self.rooms.get(room_id)
+
+    def room_title(self, room_id):
+        room = self.rooms.get(room_id)
+        if room is None:
+            return ''
+        if room.get('name'):
+            return room['name']
+        if room['type'] == 'self':
+            return self.display_name(self.me)
+        if room['type'] == 'secret':
+            others = [m for m in room.get('members', []) if m != self.me]
+            return '🔒 ' + (self.display_name(others[0]) if others else '비밀채팅')
+        others = [m for m in room.get('members', []) if m != self.me]
+        if not others:
+            return '대화상대 없음'
+        names = ', '.join(self.display_name(m) for m in others)
+        return names
+
+    def room_member_count(self, room_id):
+        room = self.rooms.get(room_id)
+        return len(room.get('members', [])) if room else 0
+
+    def direct_room_with(self, username):
+        for room in self.rooms.values():
+            members = set(room.get('members', []))
+            if username == self.me and room['type'] == 'self':
+                return room['room_id']
+            if room['type'] == 'direct' and members == {self.me, username}:
+                return room['room_id']
+        return None
+
+    # ---- 채팅방 폴더 (카카오톡 2025-09: 안읽음/즐겨찾기/직접 만든 폴더) ----
+    BUILTIN_FOLDERS = ('전체', '안읽음', '즐겨찾기', '통화')   # '통화': 카카오톡 v26.4.0 통화 기록 폴더
+
+    def chat_folders(self):
+        """[(이름, 방 개수)] 기본 폴더 + 사용자 폴더"""
+        custom = [f['name'] for f in (self.settings.get('chat_folders') if self.settings else []) or []]
+        return [(name, self.missed_call_count() if name == '통화' else len(self.rooms_in_folder(name)))
+                for name in list(self.BUILTIN_FOLDERS) + custom]
+
+    def rooms_in_folder(self, name):
+        rooms = self.sorted_rooms()
+        if name in ('', '전체'):
+            return rooms
+        if name == '안읽음':
+            return [r for r in rooms if self.room_unread(r['room_id']) > 0]
+        if name == '통화':   # 최근 통화 순, 방마다 한 번
+            seen = []
+            for c in self.call_history:
+                if c['room_id'] in self.rooms and c['room_id'] not in seen:
+                    seen.append(c['room_id'])
+            return [self.rooms[rid] for rid in seen]
+        if name == '즐겨찾기':
+            def fav(room):
+                if self.is_pinned(room['room_id']):
+                    return True
+                others = [m for m in room.get('members', []) if m != self.me]
+                return room['type'] == 'direct' and len(others) == 1 and self.is_favorite(others[0])
+            return [r for r in rooms if fav(r)]
+        for folder in (self.settings.get('chat_folders') if self.settings else []) or []:
+            if folder.get('name') == name:
+                ids = set(folder.get('room_ids') or [])
+                return [r for r in rooms if r['room_id'] in ids]
+        return []
+
+    def save_chat_folder(self, name, room_ids, old_name=None):
+        """사용자 폴더 생성/수정. 기본 폴더 이름은 쓸 수 없다. 오류 메시지 또는 None"""
+        name = (name or '').strip()
+        if not name:
+            return '폴더 이름을 입력해 주세요.'
+        if name in self.BUILTIN_FOLDERS:
+            return f"'{name}'은(는) 기본 폴더 이름입니다."
+        folders = [dict(f) for f in (self.settings.get('chat_folders') or [])]
+        if any(f['name'] == name for f in folders) and name != old_name:
+            return '같은 이름의 폴더가 있습니다.'
+        entry = {'name': name, 'room_ids': list(dict.fromkeys(room_ids))}
+        for i, f in enumerate(folders):
+            if f['name'] == (old_name or name):
+                folders[i] = entry
+                break
+        else:
+            folders.append(entry)
+        self.settings.set('chat_folders', folders)
+        return None
+
+    def delete_chat_folder(self, name):
+        folders = [f for f in (self.settings.get('chat_folders') or []) if f.get('name') != name]
+        self.settings.set('chat_folders', folders)
+
+    def toggle_room_in_folder(self, name, room_id):
+        folders = [dict(f) for f in (self.settings.get('chat_folders') or [])]
+        for f in folders:
+            if f['name'] == name:
+                ids = list(f.get('room_ids') or [])
+                if room_id in ids:
+                    ids.remove(room_id)
+                else:
+                    ids.append(room_id)
+                f['room_ids'] = ids
+        self.settings.set('chat_folders', folders)
+
+    def peek_messages(self, room_id, count=5):
+        """읽지 않고 미리보기: 안 읽은 최근 메시지(읽음 처리 요청을 보내지 않음)"""
+        room = self.rooms.get(room_id) or {}
+        mine = room.get('read_pointers', {}).get(self.me, 0)
+        msgs = [m for m in self.room_messages(room_id)
+                if m['msg_id'] > mine and m['sender'] != self.me and m['kind'] != 'system'
+                and not m.get('deleted')]
+        if not msgs and room.get('last_message') and room['last_message'].get('sender') != self.me:
+            msgs = [room['last_message']]
+        return msgs[-count:]
+
+    def events_in_room(self, room_id):
+        """채팅방 사이드(서랍) 일정 모아보기"""
+        return sorted((e for e in self.events.values() if e.get('room_id') == room_id),
+                      key=lambda e: e['start'])
+
+    def sorted_rooms(self):
+        """고정된 방 먼저, 그 다음 최근 메시지 순"""
+        pinned = set(self.settings.get('pinned_rooms')) if self.settings else set()
+
+        def key(room):
+            last = room.get('last_message') or {}
+            ts = last.get('timestamp') or room.get('created_at') or ''
+            return (room['room_id'] in pinned, ts)
+        return sorted(self.rooms.values(), key=key, reverse=True)
+
+    def room_messages(self, room_id):
+        """로드된 메시지(오래된→최신, 나에게서 삭제한 것 제외)"""
+        hidden = set(self.settings.get('hidden_messages')) if self.settings else set()
+        store = self._messages.get(room_id, {})
+        # 보내지 못한 메시지는 서버 메시지 저장소와 따로 두고, 화면에는 항상 맨 아래에 붙인다
+        return [store[k] for k in sorted(store) if k not in hidden] + self.failed_messages(room_id)
+
+    def find_message(self, room_id, msg_id):
+        found = self._messages.get(room_id, {}).get(msg_id)
+        if found is None and msg_id >= FAILED_ID_BASE:
+            found = next((m for m in self.failed_messages(room_id) if m['msg_id'] == msg_id), None)
+        return found
+
+    def message_unread(self, room_id, message):
+        """메시지 옆에 표시할 '안 읽은 사람 수'"""
+        if message.get('kind') == 'system' or message.get('failed'):
+            return 0
+        room = self.rooms.get(room_id)
+        if room is None:
+            return 0
+        pointers = room.get('read_pointers', {})
+        return sum(1 for u in room.get('members', []) if pointers.get(u, 0) < message['msg_id'])
+
+    def room_unread(self, room_id):
+        room = self.rooms.get(room_id)
+        return int(room.get('unread_count', 0)) if room else 0
+
+    def total_unread(self):
+        return sum(self.room_unread(rid) for rid in self.rooms if not self.is_muted(rid))
+
+    def is_muted(self, room_id):
+        return bool(self.settings and self.settings.contains('muted_rooms', room_id))
+
+    def is_pinned(self, room_id):
+        return bool(self.settings and self.settings.contains('pinned_rooms', room_id))
+
+    def is_favorite(self, username):
+        return bool(self.settings and self.settings.contains('favorites', username))
+
+    def message_preview(self, m):
+        if not m:
+            return ''
+        if m.get('deleted'):
+            return '메시지가 삭제되었습니다'
+        kind = m.get('kind')
+        if kind == 'image':
+            return '사진'
+        if kind == 'file':
+            return f"파일: {(m.get('attachment') or {}).get('name', '')}"
+        if kind == 'emoticon':
+            return f"이모티콘 {m.get('content', '')}"
+        if kind == 'poll':
+            return f"투표: {(m.get('poll') or {}).get('question', '')}"
+        if kind == 'event':
+            return f"일정: {m.get('content', '')}"
+        if kind == 'secret':
+            return '🔒 비밀채팅 메시지'
+        if kind == 'call':
+            return {'voice': '📞 보이스톡', 'video': '📹 페이스톡', 'voiceroom': '🎙 보이스룸'}.get(
+                m.get('content'), '📞 통화')
+        if kind == 'ladder':
+            return '🪜 사다리 게임'
+        if kind == 'voice':
+            return f"음성메시지 {fmt_duration(m.get('content'))}"
+        if kind == 'contact':
+            return f"연락처: {self.display_name(m.get('content', ''))}"
+        if kind == 'board':
+            return f"📌 게시판: {m.get('content', '')}"
+        return m.get('content', '')
+
+    def drawer_items(self, room_id):
+        """채팅방 서랍: (사진, 파일, 링크) 리스트"""
+        photos, files, links = [], [], []
+        for m in self.room_messages(room_id):
+            if m.get('deleted'):
+                continue
+            if m['kind'] == 'image':
+                photos.append(m)
+            elif m['kind'] == 'file':
+                files.append(m)
+            elif m['kind'] == 'text':
+                for url in URL_RE.findall(m.get('content', '')):
+                    links.append((url, m))
+        return photos, files, links
+
+    def events_between(self, start, end):
+        """[start, end) 기간과 겹치는 일정, 시작 시각 순"""
+        result = []
+        for ev in self.events.values():
+            s, e = parse_dt(ev['start']), parse_dt(ev['end'])
+            if s is None:
+                continue
+            e = e or s
+            if s < end and e >= start:
+                result.append(ev)
+        return sorted(result, key=lambda ev: ev['start'])
+
+    def current_event_of(self, username, now=None):
+        """username 이 참석(또는 주최)하는, 지금 진행 중인 일정 (종일 일정 제외). 없으면 None"""
+        now = now or datetime.now()
+        for ev in self.events.values():
+            if ev.get('all_day'):
+                continue
+            s, e = parse_dt(ev['start']), parse_dt(ev['end'])
+            if not s or not e or not (s <= now < e):
+                continue
+            rsvp = (ev.get('attendees') or {}).get(username)
+            if ev.get('creator') == username or rsvp in ('yes', 'maybe', 'pending'):
+                return ev
+        return None
+
+    def team_of(self, username):
+        """(회사, 부서) - 조직 경로 첫 단계를 부서로 본다"""
+        u = self.user(username)
+        path = u.get('org_path') or ([u['department']] if u.get('department') else [])
+        return (u.get('company') or '', path[0] if path else '')
+
+    def events_on(self, day):
+        start = datetime(day.year, day.month, day.day)
+        return self.events_between(start, start + timedelta(days=1))
+
+    def my_rsvp(self, event):
+        return (event.get('attendees') or {}).get(self.me)
+
+    def sorted_todos(self):
+        return sorted(self.todos.values(),
+                      key=lambda t: (t.get('done', False), t.get('due') or '9999', t['todo_id']))
+
+    # ================= 액션 =================
+    def _send(self, msg_type, **payload):
+        if self.conn is None:
+            return None
+        return self.conn.send(msg_type, **payload)
+
+    def open_direct(self, username):
+        """1:1(또는 나와의) 채팅방 열기. 이미 있으면 바로 room_opened"""
+        existing = self.direct_room_with(username)
+        if existing:
+            self.room_opened.emit(existing)
+            return
+        self._pending_direct.add(username)
+        self._send('room_open_direct', target=username)
+
+    def create_group(self, members, name=''):
+        members = [m for m in members if m != self.me]
+        self._pending_groups.append(set(members) | {self.me})
+        self._send('room_create', name=name, members=members)
+
+    def invitable_users(self, room_id):
+        """초대 가능한 사용자(방에 없는 사람, AI 비서 포함) - 이름순"""
+        room = self.rooms.get(room_id) or {}
+        members = set(room.get('members', []))
+        return [u for u in self.friends(include_bots=True) if u['username'] not in members]
+
+    def invite(self, room_id, usernames):
+        """대화상대 초대. 그룹방이면 그 방에 추가하고,
+        1:1/나와의 채팅이면 카카오톡처럼 기존 멤버 + 초대한 사람으로 새 그룹방을 만든다
+        (새 방은 만들어지면 room_opened로 열린다). 새 방을 만들면 True."""
+        room = self.rooms.get(room_id)
+        usernames = [u for u in usernames if room is None or u not in room.get('members', [])]
+        if not usernames or room is None:
+            return False
+        if room['type'] == 'group':
+            self._send('room_invite', room_id=room_id, usernames=list(usernames))
+            return False
+        self.create_group(list(room.get('members', [])) + list(usernames))
+        return True
+
+    def leave_room(self, room_id):
+        self._send('room_leave', room_id=room_id)
+
+    def rename_room(self, room_id, name):
+        self._send('room_rename', room_id=room_id, name=name)
+
+    def load_history(self, room_id, older=False, limit=50):
+        """처음 열 때 한 번 최신 메시지 로드, older=True면 더 이전 메시지"""
+        if older:
+            loaded = self._messages.get(room_id) or {}
+            if not loaded or not self.has_more.get(room_id, True):
+                return
+            self._send('history', room_id=room_id, before_msg_id=min(loaded), limit=limit)
+        else:
+            if room_id in self.history_requested:
+                self.history_loaded.emit(room_id, [], self.has_more.get(room_id, False))
+                return
+            self.history_requested.add(room_id)
+            self._send('history', room_id=room_id, limit=limit)
+
+    def parse_mentions(self, room_id, text):
+        room = self.rooms.get(room_id) or {}
+        found = []
+        for member in room.get('members', []):
+            for name in {member, self.display_name(member)}:
+                if f'@{name}' in text and member not in found:
+                    found.append(member)
+        return found
+
+    def send_text(self, room_id, text, reply_to_id=None, send_at=None, silent=False):
+        text = text.strip()
+        if not text:
+            return
+        payload = {'room_id': room_id, 'kind': 'text', 'content': text,
+                   'mentions': self.parse_mentions(room_id, text)}
+        if reply_to_id:
+            payload['reply_to_id'] = reply_to_id
+        if send_at:
+            payload['send_at'] = send_at.isoformat(timespec='seconds')
+        if silent:
+            payload['silent'] = True
+        if self._send('send', **payload) is None:
+            self._record_failed(room_id, 'text', text)
+
+    def send_emoticon(self, room_id, emoticon):
+        if self._send('send', room_id=room_id, kind='emoticon', content=emoticon) is None:
+            self._record_failed(room_id, 'emoticon', emoticon)
+
+    def send_file(self, room_id, path):
+        """파일/사진 전송. 오류 메시지를 돌려주거나 성공 시 None"""
+        try:
+            size = os.path.getsize(path)
+        except OSError as e:
+            return f"파일을 열 수 없습니다: {e}"
+        if size > MAX_ATTACHMENT:
+            return "10MB 이하의 파일만 보낼 수 있습니다."
+        with open(path, 'rb') as f:
+            data = f.read()
+        name = os.path.basename(path)
+        mime = mimetypes.guess_type(name)[0] or 'application/octet-stream'
+        kind = 'image' if mime.startswith('image/') else 'file'
+        sent = self._send('send', room_id=room_id, kind=kind, content=name,
+                          attachment=attachment_payload(name, mime, data))
+        if sent is None:
+            return '서버 연결이 끊겨 파일을 보내지 못했습니다. 연결된 뒤 다시 보내 주세요.'
+        return None
+
+    def forward(self, message, room_id):
+        """메시지 전달: 텍스트/이모티콘은 그대로, 첨부는 데이터가 있으면 재전송"""
+        kind = message.get('kind')
+        if kind in ('text', 'emoticon', 'contact'):
+            self._send('send', room_id=room_id, kind=kind, content=message['content'])
+        elif kind in ('image', 'file'):
+            att = message.get('attachment') or {}
+            cached = self.attachments.get(att.get('attachment_id'))
+            if cached:
+                data, name, mime = cached
+                self._send('send', room_id=room_id, kind=kind, content=name,
+                           attachment={'name': name, 'mime': mime,
+                                       'data_b64': base64.b64encode(data).decode('ascii')})
+            else:
+                self.error.emit('첨부 파일을 먼저 열어본 뒤 전달해 주세요.')
+
+    def mark_read(self, room_id):
+        loaded = self._messages.get(room_id) or {}
+        room = self.rooms.get(room_id)
+        if not loaded or room is None:
+            return
+        last = max(loaded)
+        if room.get('read_pointers', {}).get(self.me, 0) >= last and not room.get('unread_count'):
+            return
+        self._send('read', room_id=room_id, last_msg_id=last)
+
+    def react(self, msg_id, emoji):
+        self._send('react', msg_id=msg_id, emoji=emoji)
+
+    def delete_for_all(self, msg_id):
+        self._send('delete', msg_id=msg_id)
+
+    def can_edit(self, message):
+        """메시지 수정 가능: 내가 보낸 텍스트, 삭제 안 됨, 24시간 이내 (카카오톡 2025-09)"""
+        if message.get('kind') != 'text':
+            return False
+        return self.can_delete_for_all(message)
+
+    def edit_message(self, msg_id, content):
+        content = (content or '').strip()
+        if content:
+            self._send('edit', msg_id=msg_id, content=content)
+
+    def can_delete_for_all(self, message):
+        if message.get('sender') != self.me or message.get('deleted'):
+            return False
+        ts = parse_dt(message.get('timestamp'))
+        return ts is not None and datetime.now() - ts < timedelta(hours=24)
+
+    def hide_for_me(self, room_id, msg_id):
+        if self.settings and not self.settings.contains('hidden_messages', msg_id):
+            self.settings.toggle_in('hidden_messages', msg_id)
+        m = self.find_message(room_id, msg_id)
+        if m:
+            self.message_updated.emit(room_id, m)
+
+    def set_notice(self, room_id, msg_id):
+        self._send('notice_set', room_id=room_id, msg_id=msg_id)
+
+    def search(self, query, room_id=None):
+        payload = {'query': query}
+        if room_id:
+            payload['room_id'] = room_id
+        self._send('search', **payload)
+
+    def create_poll(self, room_id, question, options, multiple=False):
+        self._send('poll_create', room_id=room_id, question=question,
+                   options=list(options), multiple=bool(multiple))
+
+    def vote_poll(self, poll_id, option_indexes):
+        self._send('poll_vote', poll_id=poll_id, option_indexes=list(option_indexes))
+
+    def close_poll(self, poll_id):
+        self._send('poll_close', poll_id=poll_id)
+
+    @staticmethod
+    def _event_payload(fields):
+        payload = {}
+        for key, value in fields.items():
+            if isinstance(value, datetime):
+                value = value.isoformat(timespec='seconds')
+            payload[key] = value
+        return payload
+
+    def create_event(self, **fields):
+        self._send('event_create', **self._event_payload(fields))
+
+    def update_event(self, event_id, **fields):
+        self._send('event_update', event_id=event_id, **self._event_payload(fields))
+
+    def delete_event(self, event_id):
+        self._send('event_delete', event_id=event_id)
+
+    def rsvp(self, event_id, response):
+        self._send('event_rsvp', event_id=event_id, response=response)
+
+    def request_events(self, start, end):
+        self._send('event_list', start=start.isoformat(timespec='seconds'),
+                   end=end.isoformat(timespec='seconds'))
+
+    def create_todo(self, title, due=None):
+        payload = {'title': title}
+        if due:
+            payload['due'] = due.isoformat() if isinstance(due, date) else due
+        self._send('todo_create', **payload)
+
+    def update_todo(self, todo_id, **fields):
+        if isinstance(fields.get('due'), date):
+            fields['due'] = fields['due'].isoformat()
+        self._send('todo_update', todo_id=todo_id, **fields)
+
+    def delete_todo(self, todo_id):
+        self._send('todo_delete', todo_id=todo_id)
+
+    def request_todos(self):
+        self._send('todo_list')
+
+    def update_profile(self, **fields):
+        self._send('profile_update', **fields)
+
+    def set_presence(self, presence):
+        if presence in PRESENCES:
+            self._send('presence_set', presence=presence)
+
+    def request_rag_docs(self):
+        self._send('rag_doc_list')
+
+    def add_rag_doc(self, path):
+        """AI 지식베이스에 문서 추가. 오류 메시지 또는 None"""
+        try:
+            size = os.path.getsize(path)
+        except OSError as e:
+            return f"파일을 열 수 없습니다: {e}"
+        if size > MAX_ATTACHMENT:
+            return "10MB 이하의 문서만 추가할 수 있습니다."
+        with open(path, 'rb') as f:
+            data = f.read()
+        self._send('rag_doc_add', name=os.path.basename(path),
+                   data_b64=base64.b64encode(data).decode('ascii'))
+        return None
+
+    def delete_rag_doc(self, doc_id):
+        self._send('rag_doc_delete', doc_id=doc_id)
+
+    # ================= v3: 알림 규칙 =================
+    def room_alert_mode(self, room_id):
+        """'all' | 'mention' | 'off' (off는 알림 끄기와 같다)"""
+        if self.is_muted(room_id):
+            return 'off'
+        modes = (self.settings.get('room_alert_modes') if self.settings else None) or {}
+        return modes.get(room_id, 'all')
+
+    def set_room_alert_mode(self, room_id, mode):
+        if not self.settings or mode not in ('all', 'mention', 'off'):
+            return
+        modes = self.settings.get('room_alert_modes') or {}
+        modes[room_id] = mode
+        self.settings.set('room_alert_modes', modes)
+        if (mode == 'off') != self.is_muted(room_id):
+            self.settings.toggle_in('muted_rooms', room_id)
+
+    def keyword_hit(self, message):
+        """키워드 알림에 걸린 키워드 (없으면 '')"""
+        if not self.settings or message.get('kind') != 'text':
+            return ''
+        text = (message.get('content') or '').lower()
+        for kw in self.settings.get('alert_keywords') or []:
+            if kw and kw.lower() in text:
+                return kw
+        return ''
+
+    def should_alert(self, room_id, message):
+        if message.get('silent'):
+            return False   # 조용히 보내기: 알림 없이 안 읽은 수에만 반영
+        if self.keyword_hit(message):
+            return True    # 키워드 알림은 알림 끈 방에서도 울린다
+        mode = self.room_alert_mode(room_id)
+        if mode == 'off':
+            return False
+        if mode == 'mention':
+            return self.me in (message.get('mentions') or [])
+        return True
+
+    # ================= v3: 비밀채팅 (§8.1) =================
+    def _init_keyring(self):
+        try:
+            from client.kakao.secret import SecretKeyring
+            self.keyring = SecretKeyring(self.me)
+        except Exception:
+            self.keyring = None
+            return
+        if self.user(self.me).get('public_key') != self.keyring.public_key_b64:
+            self._send('key_publish', public_key_b64=self.keyring.public_key_b64)
+
+    def secret_peer(self, room_id):
+        room = self.rooms.get(room_id) or {}
+        others = [m for m in room.get('members', []) if m != self.me]
+        return others[0] if others else None
+
+    def _decrypt(self, m):
+        if m.get('kind') != 'secret' or m.get('deleted') or 'secret_text' in m:
+            return
+        peer = self.secret_peer(m['room_id'])
+        key = self.user(peer).get('public_key') if peer else None
+        text = self.keyring.decrypt(m['room_id'], key, m.get('content', '')) if (self.keyring and key) else None
+        m['secret_text'] = text if text is not None else '🔒 이 기기에서는 읽을 수 없는 비밀 메시지입니다'
+        m['secret_ok'] = text is not None
+
+    def open_secret(self, username):
+        for room in self.rooms.values():
+            if room['type'] == 'secret' and set(room.get('members', [])) == {self.me, username}:
+                self.room_opened.emit(room['room_id'])
+                return
+        self._pending_direct.add(username)
+        self._send('room_open_secret', target=username)
+
+    def send_secret(self, room_id, text):
+        """비밀채팅 전송. 오류 메시지 또는 None"""
+        text = (text or '').strip()
+        if not text:
+            return None
+        peer = self.secret_peer(room_id)
+        key = self.user(peer).get('public_key') if peer else None
+        if not (self.keyring and key):
+            return '상대방이 아직 비밀채팅을 사용할 수 없습니다.'
+        if self._send('send', room_id=room_id, kind='secret', content=self.keyring.encrypt(room_id, key, text)) is None:
+            return '서버 연결이 끊겨 비밀 메시지를 보내지 못했습니다. 연결된 뒤 다시 보내 주세요.'
+        return None
+
+    # ================= v3: 통화 (§8.2) =================
+    def _on_call_updated(self, p):
+        call = p['call']
+        self.calls[call['call_id']] = call
+        self.calls_changed.emit()
+
+    def _on_call_ended(self, p):
+        self.calls.pop(p.get('call_id'), None)
+        self.calls_changed.emit()
+        self.call_ended.emit(dict(p))
+        self.request_call_history()
+
+    def _on_call_list(self, p):
+        self.calls = {c['call_id']: c for c in p.get('calls', [])}
+        self.calls_changed.emit()
+
+    def _on_call_media(self, p):
+        extra = {k: v for k, v in p.items() if k not in ('type', 'call_id', 'from', 'kind', 'seq', 'data_b64')}
+        self.call_media.emit(int(p['call_id']), p.get('from', ''), p.get('kind', ''), int(p.get('seq', 0)),
+                             p.get('data_b64', ''), extra)
+
+    def call_for_room(self, room_id):
+        return next((c for c in self.calls.values() if c.get('room_id') == room_id), None)
+
+    def my_call(self):
+        return next((c for c in self.calls.values() if self.me in (c.get('participants') or {})), None)
+
+    def start_call(self, room_id, mode):
+        self._send('call_start', room_id=room_id, mode=mode)
+
+    def join_call(self, call_id):
+        self._send('call_join', call_id=call_id)
+
+    def leave_call(self, call_id):
+        self._send('call_leave', call_id=call_id)
+
+    def raise_hand(self, call_id, raised=True):
+        self._send('call_hand', call_id=call_id, raised=bool(raised))
+
+    def set_call_role(self, call_id, username, role):
+        self._send('call_role', call_id=call_id, username=username, role=role)
+
+    def set_call_state(self, call_id, **fields):
+        self._send('call_state', call_id=call_id, **{k: bool(v) for k, v in fields.items()})
+
+    def send_media(self, call_id, kind, seq, data_b64, **extra):
+        self._send('call_media', call_id=call_id, kind=kind, seq=seq, data_b64=data_b64, **extra)
+
+    def request_calls(self):
+        self._send('call_list')
+
+    # ================= v3: 펑 (§8.3) =================
+    def _on_story_new(self, p):
+        story = p['story']
+        self.stories[story['story_id']] = story
+        self.stories_changed.emit()
+
+    _on_story_updated = _on_story_new
+
+    def _on_story_list(self, p):
+        self.stories = {s['story_id']: s for s in p.get('stories', [])}
+        self.stories_changed.emit()
+
+    def _on_story_deleted(self, p):
+        self.stories.pop(p.get('story_id'), None)
+        self.stories_changed.emit()
+
+    def stories_of(self, username):
+        return sorted((s for s in self.stories.values() if s['owner'] == username), key=lambda s: s['created_at'])
+
+    def story_owners(self):
+        """펑을 올린 사람들 (안 본 펑 있는 사람 먼저)"""
+        owners = {s['owner'] for s in self.stories.values()
+                  if s['owner'] not in self.blocked and not self.is_story_hidden(s['owner'])}
+        return sorted(owners, key=lambda u: (u != self.me, not self.has_unseen_story(u), self.display_name(u)))
+
+    def has_unseen_story(self, username):
+        return any(s['story_id'] not in self.seen_stories for s in self.stories_of(username)
+                   if username != self.me)
+
+    def post_story(self, kind='text', content='', path=None, bg_color='#2A386C'):
+        payload = {'kind': kind, 'content': content, 'bg_color': bg_color}
+        if path:
+            if os.path.getsize(path) > MAX_ATTACHMENT:
+                return '10MB 이하의 사진만 올릴 수 있습니다.'
+            with open(path, 'rb') as f:
+                data = f.read()
+            name = os.path.basename(path)
+            payload['attachment'] = {'name': name, 'mime': mimetypes.guess_type(name)[0] or 'image/png',
+                                     'data_b64': base64.b64encode(data).decode('ascii')}
+            payload['kind'] = 'image'
+        self._send('story_post', **payload)
+        return None
+
+    def view_story(self, story_id):
+        if story_id not in self.seen_stories:
+            self.seen_stories.add(story_id)
+            story = self.stories.get(story_id)
+            if story and story['owner'] != self.me:
+                self._send('story_view', story_id=story_id)
+            self.stories_changed.emit()
+
+    def delete_story(self, story_id):
+        self._send('story_delete', story_id=story_id)
+
+    def request_stories(self):
+        self._send('story_list')
+
+    # ================= v3: 멀티프로필 (§8.5) =================
+    def request_multi_profiles(self):
+        self._send('multi_profile_list')
+
+    def set_multi_profiles(self, profiles):
+        self._send('multi_profile_set', profiles=list(profiles))
+
+    def _on_multi_profile_list(self, p):
+        self.multi_profiles = list(p.get('profiles', []))
+        self.multi_profiles_changed.emit(list(self.multi_profiles))
+
+    # ================= v3: 차단 / 숨김 (§8.6) =================
+    def block_user(self, username, blocked=True):
+        self._send('block_set', username=username, blocked=bool(blocked))
+
+    def _on_block_list(self, p):
+        self.blocked = set(p.get('blocked', []))
+        self.blocked_changed.emit()
+        self.users_changed.emit()
+        self.rooms_changed.emit()
+
+    def is_blocked(self, username):
+        return username in self.blocked
+
+    def is_hidden(self, username):
+        return bool(self.settings and self.settings.contains('hidden_friends', username))
+
+    def set_hidden(self, username, hidden=True):
+        if self.settings and self.is_hidden(username) != hidden:
+            self.settings.toggle_in('hidden_friends', username)
+            self.users_changed.emit()
+
+    # ================= v3: 사다리 / 게시판 / 오픈채팅 / 톡서랍 =================
+    def create_ladder(self, room_id, participants, results):
+        self._send('ladder_create', room_id=room_id, participants=list(participants), results=list(results))
+
+    def post_board(self, room_id, title, content):
+        self._send('board_post', room_id=room_id, title=title, content=content)
+
+    def request_board(self, room_id):
+        self._send('board_list', room_id=room_id)
+
+    def comment_board(self, post_id, content):
+        self._send('board_comment', post_id=post_id, content=content)
+
+    def delete_board(self, post_id):
+        self._send('board_delete', post_id=post_id)
+
+    def board_posts(self, room_id):
+        return sorted(self.boards.get(room_id, {}).values(), key=lambda b: b['created_at'], reverse=True)
+
+    def _on_board_list(self, p):
+        self.boards[p['room_id']] = {b['post_id']: b for b in p.get('posts', [])}
+        self.board_changed.emit(p['room_id'])
+
+    def _on_board_updated(self, p):
+        post = p['post']
+        self.boards.setdefault(post['room_id'], {})[post['post_id']] = post
+        self.board_changed.emit(post['room_id'])
+
+    def _on_board_deleted(self, p):
+        self.boards.get(p['room_id'], {}).pop(p['post_id'], None)
+        self.board_changed.emit(p['room_id'])
+
+    def create_open_room(self, name, description='', tags=()):
+        self._pending_groups.append({self.me})
+        self._send('open_room_create', name=name, description=description, tags=list(tags))
+
+    def search_open_rooms(self, query=''):
+        self._send('open_room_search', query=query)
+
+    def _on_open_room_search(self, p):
+        self.open_rooms_found.emit(list(p.get('rooms', [])))
+
+    def join_open_room(self, room_id, nickname):
+        self._pending_groups.append({self.me})
+        self._send('open_room_join', room_id=room_id, nickname=nickname)
+
+    def member_name(self, room_id, username):
+        """오픈채팅에서는 닉네임, 그 외에는 표시 이름"""
+        room = self.rooms.get(room_id) or {}
+        nick = (room.get('nicknames') or {}).get(username)
+        return nick or self.display_name(username)
+
+    def query_drawer(self, kind, limit=200):
+        self._send('drawer_query', kind=kind, limit=limit)
+
+    def _on_drawer_result(self, p):
+        msgs = list(p.get('messages', []))
+        for m in msgs:
+            self._decrypt(m)
+        self.drawer_loaded.emit(p.get('kind', ''), msgs)
+
+    # ================= 친구 등록 (전화번호 / 이메일) =================
+    EMAIL_RE = re.compile(r'[^@\s]+@[^@\s]+\.[^@\s]+')
+
+    @staticmethod
+    def contact_kind(text):
+        """'email' | 'phone' | '' (형식이 맞지 않음)"""
+        text = (text or '').strip()
+        if '@' in text:
+            return 'email' if AppState.EMAIL_RE.fullmatch(text) else ''
+        digits = ''.join(ch for ch in text if ch.isdigit())
+        return 'phone' if 9 <= len(digits) <= 13 and not re.search(r'[^\d\s+\-()]', text) else ''
+
+    def add_friend(self, query):
+        """전화번호 또는 이메일로 친구 추가 요청. 형식 오류 메시지 또는 None"""
+        kind = self.contact_kind(query)
+        if not kind:
+            return '전화번호(예: 010-1234-5678) 또는 이메일(예: name@company.com)을 정확히 입력해 주세요.'
+        self._send('friend_add', query=query.strip())
+        return None
+
+    def remove_friend(self, username):
+        self._send('friend_remove', username=username)
+
+    def is_registered_friend(self, username):
+        return username in self.my_friends
+
+    def _on_friend_added(self, p):
+        user = p['user']
+        if user['username'] not in self.users:
+            self.users[user['username']] = user
+            self.users_changed.emit()
+        self.friend_added.emit(user, bool(p.get('already')))
+
+    def _on_friend_list(self, p):
+        self.my_friends = list(p.get('friends', []))
+        self.my_friends_changed.emit()
+        self.users_changed.emit()
+
+    def request_attachment(self, attachment_id):
+        cached = self.attachments.get(attachment_id)
+        if cached:
+            self.attachment_loaded.emit(attachment_id, *cached)
+            return
+        self._send('attachment_get', attachment_id=attachment_id)
+
+
+    # ================= v4: 카카오톡 2026 업데이트 반영 (명세 §9) =================
+    def request_summary(self, room_id, unread_only=False, since_msg_id=None):
+        """채팅방 대화 요약 요청 → room_summary_ready.
+        since_msg_id: 그 이후 메시지만 (채팅방을 열 때 안 읽었던 부분 요약)"""
+        payload = {'room_id': room_id, 'unread_only': bool(unread_only)}
+        if since_msg_id is not None:
+            payload['since_msg_id'] = int(since_msg_id)
+        self._send('room_summary', **payload)
+
+    def _on_room_summary(self, p):
+        self.room_summary_ready.emit(p.get('room_id', ''), dict(p))
+
+    def request_call_history(self):
+        self._send('call_history', limit=100)
+
+    def _on_call_history(self, p):
+        self.call_history = list(p.get('calls', []))
+        self.call_history_changed.emit()
+
+    def missed_call_count(self):
+        return sum(1 for c in self.call_history if c.get('missed'))
+
+    def send_contact(self, room_id, username):
+        """연락처(프로필 카드) 보내기"""
+        self._send('send', room_id=room_id, kind='contact', content=username)
+
+    def send_voice(self, room_id, wav_bytes, seconds):
+        """음성메시지 전송. 오류 메시지 또는 None"""
+        seconds = int(round(seconds))
+        if seconds < 1:
+            return '1초 이상 녹음해 주세요.'
+        if seconds > MAX_VOICE_SECONDS:
+            return f'음성메시지는 최대 {MAX_VOICE_SECONDS // 60}분까지 보낼 수 있습니다.'
+        if len(wav_bytes) > MAX_ATTACHMENT:
+            return '음성메시지가 너무 깁니다.'
+        name = datetime.now().strftime('voice_%Y%m%d_%H%M%S.wav')
+        if self._send('send', room_id=room_id, kind='voice', content=str(seconds),
+                      attachment=attachment_payload(name, 'audio/wav', wav_bytes)) is None:
+            return '서버 연결이 끊겨 음성메시지를 보내지 못했습니다. 연결된 뒤 다시 보내 주세요.'
+        return None
+
+    def request_export(self, room_id):
+        """대화 내보내기용 전체 기록 요청 → room_export_ready"""
+        self._send('room_export', room_id=room_id)
+
+    def _on_room_export(self, p):
+        """조각(part)을 모아 done 이면 한 번에 알린다 (조각이 없는 예전 서버 응답도 그대로 처리)"""
+        rid = p.get('room_id', '')
+        parts = self._export_parts.setdefault(rid, [])
+        parts.extend(p.get('messages', []))
+        if not p.get('done', True):
+            return
+        msgs = self._export_parts.pop(rid, [])
+        for m in msgs:
+            self._decrypt(m)
+        hidden = set(self.settings.get('hidden_messages') or []) if self.settings is not None else set()
+        msgs = [m for m in msgs if m.get('msg_id') not in hidden]
+        self.room_export_ready.emit(rid, msgs, bool(p.get('truncated')))
+
+    def export_text(self, room_id, messages, saved_at=None):
+        """카카오톡 PC '대화 내보내기' 형식의 텍스트"""
+        saved_at = saved_at or datetime.now()
+        lines = [f'{self.room_title(room_id)} 님과 카카오톡 대화',
+                 f"저장한 날짜 : {saved_at.strftime('%Y-%m-%d %H:%M:%S')}", '']
+        day = None
+        for m in messages:
+            ts = parse_dt(m.get('timestamp'))
+            if ts is None:
+                continue
+            if ts.date() != day:
+                day = ts.date()
+                lines.append(f'--------------- {fmt_day(day)} ---------------')
+            if m.get('kind') == 'system':
+                lines.append(m.get('content', ''))
+                continue
+            when = fmt_ampm(ts)
+            if m.get('deleted'):
+                body = '삭제된 메시지입니다.'
+            elif m.get('kind') == 'secret':
+                body = m.get('secret_text', '')
+            elif m.get('kind') in ('text', 'emoticon'):
+                body = m.get('content', '')
+            else:
+                body = self.message_preview(m)
+            name = self.member_name(room_id, m.get('sender'))
+            lines.append(f'[{name}] [{when}] {body}')
+        return '\n'.join(lines) + '\n'
+
+    def org_text(self, username, sep=' · '):
+        """'회사 · 부서 · 직함' (비어 있으면 '')"""
+        u = self.user(username) or {}
+        return sep.join(x for x in (u.get('company'), u.get('department'), u.get('title')) if x)
+
+    def is_story_hidden(self, username):
+        return bool(self.settings and self.settings.contains('hidden_story_users', username))
+
+    def set_story_hidden(self, username, hidden=True):
+        """친구 소식 숨기기: 친구 관계는 유지하고 내 화면에서만 펑을 감춘다"""
+        if self.settings and username != self.me and self.is_story_hidden(username) != hidden:
+            self.settings.toggle_in('hidden_story_users', username)
+            self.stories_changed.emit()
+
+    # ================= 보내지 못한 메시지 (shape 09: 카카오톡처럼 빨간 ! + 재전송/삭제, 앱을 꺼도 보존) =================
+    def is_connected(self):
+        return self.conn is not None and bool(self.conn.is_connected)
+
+    def _failed_list(self):
+        """메모리 사본 (설정에서 한 번만 읽는다)"""
+        if self._failed is None:
+            self._failed = [dict(m) for m in ((self.settings.get('failed_messages') or []) if self.settings else [])]
+            self._recount_failed()
+        return self._failed
+
+    def _recount_failed(self):
+        counts = {}
+        for m in self._failed or []:
+            counts[m['room_id']] = counts.get(m['room_id'], 0) + 1
+        self._failed_rooms = counts
+
+    SAVE_THROTTLE_MS = 500
+
+    def _save_failed(self):
+        """첫 변경은 바로 저장(앱이 바로 꺼져도 남게), 0.5초 안에 이어지는 변경은 모아서 한 번 저장"""
+        if self.settings is None:
+            return
+        import time
+        now = time.monotonic()
+        if now - self._failed_saved_at >= self.SAVE_THROTTLE_MS / 1000:
+            self._flush_failed()
+            return
+        if self._failed_save_timer is None:
+            from PyQt5.QtCore import QTimer, QCoreApplication
+            self._failed_save_timer = QTimer(self)
+            self._failed_save_timer.setSingleShot(True)
+            self._failed_save_timer.timeout.connect(self._flush_failed)
+            app = QCoreApplication.instance()
+            if app is not None:
+                app.aboutToQuit.connect(self._flush_failed)   # 끄기 직전 남은 저장
+        self._failed_save_timer.start(self.SAVE_THROTTLE_MS)
+
+    def _flush_failed(self):
+        import time
+        if self._failed_save_timer is not None:
+            self._failed_save_timer.stop()
+        self._failed_saved_at = time.monotonic()
+        if self.settings is not None and self._failed is not None:
+            self.settings.set('failed_messages', [dict(m) for m in self._failed])
+
+    def _record_failed(self, room_id, kind, content):
+        """서버로 나가지 못한 메시지를 로컬 말풍선으로 남기고 저장"""
+        failed = self._failed_list()
+        m = {'msg_id': max([x['msg_id'] for x in failed] + [FAILED_ID_BASE]) + 1, 'room_id': room_id,
+             'sender': self.me, 'kind': kind, 'content': content,
+             'timestamp': datetime.now().isoformat(timespec='seconds'), 'failed': True,
+             'reactions': {}, 'mentions': [], 'deleted': False}
+        failed.append(dict(m))
+        self._recount_failed()
+        self._save_failed()
+        m['fresh'] = True      # 이번에 막 실패함 → 말풍선 옆 ! 가 한 번 알린다 (저장본에는 없음)
+        self.message_added.emit(room_id, m)
+        self.send_failed.emit(room_id, m)
+        self.room_changed.emit(room_id)
+        return m
+
+    def _restore_failed(self):
+        """접속 직후: 저장해 둔 실패 메시지를 읽어 둔다 (room_messages 가 맨 아래에 붙인다)"""
+        self._failed_list()
+
+    def failed_messages(self, room_id=None):
+        return [dict(m) for m in self._failed_list() if room_id is None or m.get('room_id') == room_id]
+
+    def room_has_failed(self, room_id):
+        self._failed_list()
+        return self._failed_rooms.get(room_id, 0) > 0
+
+    def _forget_failed(self, room_id, msg_id):
+        self._failed = [m for m in self._failed_list() if m['msg_id'] != msg_id]
+        self._recount_failed()
+        self._save_failed()
+        self.message_removed.emit(room_id, msg_id)
+        self.room_changed.emit(room_id)
+
+    def delete_failed(self, room_id, msg_id):
+        """보내지 못한 메시지 삭제 (내 PC에만 있던 글)"""
+        self._forget_failed(room_id, msg_id)
+
+    def resend_failed(self, room_id, msg_id):
+        """재전송. 아직 연결이 없거나 다시 실패하면 오류 문구(실패 말풍선은 그대로), 보냈으면 None"""
+        m = next((x for x in self._failed_list() if x['msg_id'] == msg_id), None)
+        if m is None:
+            return '메시지를 찾을 수 없습니다.'
+        if not self.is_connected():
+            return '아직 서버에 연결되지 않았습니다. 연결이 돌아오면 다시 눌러 주세요.'
+        payload = {'room_id': room_id, 'kind': m['kind'], 'content': m['content']}
+        if m['kind'] == 'text':
+            payload['mentions'] = self.parse_mentions(room_id, m['content'])
+        if self._send('send', **payload) is None:
+            return '전송에 실패했습니다. 연결 상태를 확인해 주세요.'
+        self._forget_failed(room_id, msg_id)
+        return None

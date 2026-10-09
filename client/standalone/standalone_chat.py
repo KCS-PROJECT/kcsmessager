@@ -292,7 +292,7 @@ class KakaoTalkFixedWindow(QMainWindow):
     
     def init_ui(self):
         """Initialize UI with proper settings"""
-        self.setWindowTitle("KakaoTalk - Fixed Version")
+        self.setWindowTitle("KCS Talk - Fixed Version")
         
         # Responsive window sizing
         screen = QApplication.primaryScreen().geometry()

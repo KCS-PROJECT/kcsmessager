@@ -1,0 +1,193 @@
+# -*- coding: utf-8 -*-
+"""
+회사 CI(㈜케이씨에스) 로고 - assets/brand/ci_horizontal.png, ci_vertical.png
+- logo_pixmap('horizontal'|'vertical'|'mark', height, color): 원본/단색(흰색 등) 버전, HiDPI
+- app_icon_pixmap(size): 네이비 둥근 사각형 + 흰 말풍선 안 KCS 마크 (창·트레이·exe 아이콘)
+- paint_app_icon(painter, size): 같은 아이콘을 임의 크기로 그리기 (scripts/make_app_icon.py)
+로고 파일이 없으면 'KCS' 글자로 대체 렌더링한다.
+"""
+
+import os
+
+from PyQt5.QtCore import Qt, QRect, QRectF, QPointF
+from PyQt5.QtGui import QPixmap, QPainter, QColor, QImage, QIcon, QLinearGradient, QPainterPath
+
+from client.kakao import theme
+
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+BRAND_DIR = os.path.join(ROOT, 'assets', 'brand')
+COMPANY_NAME = '(주)케이씨에스'
+# 세로형 로고에서 'KCS' 심볼 마크가 차지하는 영역(원본 413x231 기준, 가로형보다 2배 해상도)
+MARK_RECT = QRect(76, 27, 248, 123)
+
+_cache = {}
+
+
+def _source(kind):
+    key = ('src', kind)
+    if key not in _cache:
+        name = 'ci_vertical.png' if kind in ('vertical', 'mark') else 'ci_horizontal.png'
+        img = QImage(os.path.join(BRAND_DIR, name))
+        if not img.isNull() and kind == 'mark':
+            img = img.copy(MARK_RECT)
+        if not img.isNull():
+            img = _trim(img.convertToFormat(QImage.Format_ARGB32))
+        _cache[key] = img
+    return _cache[key]
+
+
+def _trim(img):
+    """투명 여백 제거"""
+    w, h = img.width(), img.height()
+    xs, ys = [], []
+    for y in range(0, h, 1):
+        for x in range(0, w, 2):
+            if img.pixelColor(x, y).alpha() > 24:
+                xs.append(x)
+                ys.append(y)
+    if not xs:
+        return img
+    return img.copy(QRect(min(xs), min(ys), max(xs) - min(xs) + 2, max(ys) - min(ys) + 1))
+
+
+def has_logo():
+    return not _source('horizontal').isNull()
+
+
+def logo_pixmap(kind='horizontal', height=32, color=None):
+    """로고 픽스맵. color를 주면 형태(알파)는 유지하고 단색으로 칠한다(예: 네이비 배경 위 흰색)."""
+    key = (kind, height, color, theme.brand())
+    if key in _cache:
+        return _cache[key]
+    src = _source(kind)
+    ratio = 2.0
+    if src.isNull():
+        pm = _fallback(kind, height, color or theme.BRAND_NAVY)
+    else:
+        width = max(1, round(src.width() * height / src.height()))
+        img = src.scaled(int(width * ratio), int(height * ratio), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        if color:
+            tinted = QImage(img.size(), QImage.Format_ARGB32_Premultiplied)
+            tinted.fill(Qt.transparent)
+            p = QPainter(tinted)
+            p.drawImage(0, 0, img)
+            p.setCompositionMode(QPainter.CompositionMode_SourceIn)
+            p.fillRect(tinted.rect(), QColor(color))
+            p.end()
+            img = tinted
+        pm = QPixmap.fromImage(img)
+        pm.setDevicePixelRatio(ratio)
+    _cache[key] = pm
+    return pm
+
+
+def _fallback(kind, height, color):
+    """로고 파일이 없을 때: 굵은 'KCS' (+ 회사명) 텍스트"""
+    text = 'KCS' if kind == 'mark' else f'KCS {COMPANY_NAME}'
+    f = theme.font('micro', bold=True)
+    f.setPixelSize(max(8, int(height * 0.8)))
+    f.setItalic(True)
+    from PyQt5.QtGui import QFontMetrics
+    width = QFontMetrics(f).horizontalAdvance(text) + 4
+    pm = QPixmap(width * 2, height * 2)
+    pm.setDevicePixelRatio(2.0)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.TextAntialiasing)
+    p.setFont(f)
+    p.setPen(QColor(color))
+    p.drawText(QRectF(0, 0, width, height), Qt.AlignCenter, text)
+    p.end()
+    return pm
+
+
+def _bubble_path(size):
+    """둥근 말풍선 + 왼쪽 아래 꼬리 (아이콘 좌표계 0..size)"""
+    u = size / 100.0
+    body = QPainterPath()
+    body.addRoundedRect(QRectF(16 * u, 22 * u, 68 * u, 50 * u), 20 * u, 20 * u)
+    tail = QPainterPath()
+    tail.moveTo(QPointF(27 * u, 62 * u))
+    tail.lineTo(QPointF(22 * u, 84 * u))
+    tail.quadTo(QPointF(36 * u, 76 * u), QPointF(46 * u, 66 * u))
+    tail.closeSubpath()
+    return body.united(tail).simplified()
+
+
+def paint_app_icon(p, size):
+    """앱 아이콘: 네이비 그라데이션 둥근 사각형 + 흰 말풍선 + 말풍선 안 네이비 KCS 마크.
+    48px 이하에서는 마크가 뭉개지므로 말풍선 안에 점 세 개(메신저 기호)를 그린다."""
+    u = size / 100.0
+    p.setRenderHint(QPainter.Antialiasing)
+    p.setRenderHint(QPainter.SmoothPixmapTransform)
+    grad = QLinearGradient(0, 0, 0, size)
+    grad.setColorAt(0, QColor('#3D52A6'))
+    grad.setColorAt(1, QColor('#1E2853'))
+    p.setPen(Qt.NoPen)
+    p.setBrush(grad)
+    p.drawRoundedRect(QRectF(0, 0, size, size), 22.5 * u, 22.5 * u)
+    p.setBrush(QColor('#FFFFFF'))
+    p.drawPath(_bubble_path(size))
+    navy = QColor(theme.BRAND_NAVY)
+    if size <= 48:
+        p.setBrush(navy)
+        r = 5.2 * u
+        for cx in (35, 50, 65):
+            p.drawEllipse(QPointF(cx * u, 47 * u), r, r)
+        return
+    src = _source('mark')
+    target_w, cy = 42 * u, 47 * u
+    if src.isNull():
+        mark = _fallback('mark', max(8, int(20 * u)), theme.BRAND_NAVY)
+        sw, sh = mark.width() / mark.devicePixelRatio(), mark.height() / mark.devicePixelRatio()
+    else:
+        mark = logo_pixmap('mark', max(8, round(target_w * src.height() / src.width())), theme.BRAND_NAVY)
+        sw = target_w
+        sh = target_w * src.height() / src.width()
+    p.drawPixmap(QRectF(50 * u - sw / 2, cy - sh / 2, sw, sh), mark, QRectF(mark.rect()))
+
+
+def app_icon_pixmap(size=64):
+    """앱 아이콘 (HiDPI 2배 픽스맵)"""
+    key = ('icon', size)
+    if key in _cache:
+        return _cache[key]
+    pm = QPixmap(size * 2, size * 2)
+    pm.setDevicePixelRatio(2.0)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    paint_app_icon(p, size)
+    p.end()
+    _cache[key] = pm
+    return pm
+
+
+def badge_pixmap(width=46, height=34, bg='#FFFFFF', fg=None):
+    """둥근 타일 위 KCS 마크 (사이드바 상단 로고용)"""
+    fg = fg or theme.BRAND_NAVY
+    key = ('badge', width, height, bg, fg)
+    if key in _cache:
+        return _cache[key]
+    pm = QPixmap(width * 2, height * 2)
+    pm.setDevicePixelRatio(2.0)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing)
+    p.setRenderHint(QPainter.SmoothPixmapTransform)
+    p.setPen(Qt.NoPen)
+    p.setBrush(QColor(bg))
+    p.drawRoundedRect(QRectF(0, 0, width, height), 10, 10)
+    mark = logo_pixmap('mark', int(height * 0.5), fg)
+    mw = mark.width() / mark.devicePixelRatio()
+    mh = mark.height() / mark.devicePixelRatio()
+    p.drawPixmap(QRectF((width - mw) / 2, (height - mh) / 2, mw, mh), mark, QRectF(mark.rect()))
+    p.end()
+    _cache[key] = pm
+    return pm
+
+
+def app_icon():
+    icon = QIcon()
+    for s in (16, 32, 64, 128, 256):
+        icon.addPixmap(app_icon_pixmap(s))
+    return icon
