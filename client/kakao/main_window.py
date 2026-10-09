@@ -857,6 +857,12 @@ class MainWindow(QMainWindow):
         self.banner.button.setEnabled(self.reconnect_cb is not None)
         self.banner.show()
 
+    def show_reconnecting(self, seconds):
+        """자동 재연결 대기 중 안내 (지금 다시 시도 버튼은 그대로)"""
+        self.banner.label.setText(f'서버 연결이 끊어졌습니다 · {seconds}초 뒤 자동으로 다시 연결합니다')
+        self.banner.button.setEnabled(self.reconnect_cb is not None)
+        self.banner.show()
+
     def _on_welcomed(self):
         self.banner.hide()
         self.sidebar.refresh_me()

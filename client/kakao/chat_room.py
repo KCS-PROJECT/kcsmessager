@@ -116,6 +116,7 @@ MORE_REACTIONS = [
     '📌', '📎', '📅', '⏰', '☕', '🍀', '🎂', '🎁', '🚀', '💡', '📢', '🆗']
 SUMMARY_CHIP_MIN = 20     # 이만큼 안 읽고 들어오면 '안 읽은 대화 요약' 칩 표시
 REACTION_BAR_MAX = 6      # 말풍선 아래에 바로 보이는 공감 종류 (나머지는 +N)
+RENDER_PAGE = 150         # 한 번에 화면에 만드는 메시지 수 (위로 올리면 150개씩 더, 오래 쓴 큰 방도 바로 열림)
 EMOTICONS = ['😀', '😂', '🤣', '😊', '😍', '🥰', '😘', '😎', '🤔', '😮',
              '😢', '😭', '😡', '🥳', '😴', '🤗', '🙄', '😅', '🙏', '👏',
              '👍', '👎', '👌', '✌️', '💪', '❤️', '💔', '🔥', '🎉', '🎂',
@@ -3156,6 +3157,7 @@ class ChatRoomWindow(QWidget):
         self._revealed_ladders = set()    # 결과를 본 사다리 메시지 (행을 다시 만들어도 유지)
         self._board_dialog = None
         self._pending_play = {}           # attachment_id → VoiceCard (받으면 재생)
+        self._render_count = RENDER_PAGE  # 화면에 만드는 최근 메시지 수 (받아 둔 메시지가 더 많으면 위로 올릴 때 더)
         self._summary_dialog = None
         self._export_path = None          # 내보내기 저장 경로 (None 이면 저장 창)
         self._export_requested = False
@@ -3972,8 +3974,10 @@ class ChatRoomWindow(QWidget):
         return dt.date() if dt else None
 
     def _rebuild(self):
-        """로드된 메시지 전체로 목록을 다시 배치(기존 행 위젯은 재사용)"""
-        msgs = self.state.room_messages(self.room_id)
+        """받아 둔 메시지 중 최근 _render_count 개로 목록을 다시 배치(기존 행 위젯은 재사용)"""
+        all_msgs = self.state.room_messages(self.room_id)
+        msgs = all_msgs[-self._render_count:] if self._render_count < len(all_msgs) else all_msgs
+        self._hidden_older = len(all_msgs) - len(msgs)
         lay = self.list_layout
         while lay.count():
             lay.takeAt(0)
@@ -4041,6 +4045,7 @@ class ChatRoomWindow(QWidget):
         self.list_layout.addWidget(row)
         self.rows[m['msg_id']] = row
         self._order = self._order + [m]
+        self._render_count += 1
         self._apply_runs(len(self._order) - 2)
 
     def _on_message_removed(self, rid, msg_id):
@@ -4078,6 +4083,7 @@ class ChatRoomWindow(QWidget):
         self.list_layout.insertWidget(pos, row)
         self.rows[m['msg_id']] = row
         self._order = self._order[:k] + [m] + self._order[k:]
+        self._render_count += 1
         self._apply_runs(k - 1)
         return True
 
@@ -4126,6 +4132,16 @@ class ChatRoomWindow(QWidget):
             self._load_older()
 
     def _load_older(self):
+        if getattr(self, '_hidden_older', 0) > 0 and self._order:
+            # 이미 받아 둔 더 오래된 메시지를 150개 더 그린다 (서버 요청 없음)
+            sb = self.scroll.verticalScrollBar()
+            self._stick_bottom = False
+            self._anchor = sb.maximum() - sb.value()
+            self._render_count += RENDER_PAGE
+            self._rebuild()
+            self.container.layout().activate()
+            QTimer.singleShot(150, self._clear_anchor)
+            return True
         if self._loading_older or not self.state.has_more.get(self.room_id) or not self._order:
             return False
         sb = self.scroll.verticalScrollBar()
@@ -4163,6 +4179,13 @@ class ChatRoomWindow(QWidget):
         if msg_id is None:
             return False
         row = self.rows.get(msg_id)
+        if row is None:
+            # 받아 두었지만 아직 그리지 않은 오래된 메시지면 거기까지 그린다
+            all_ids = [m['msg_id'] for m in self.state.room_messages(self.room_id)]
+            if msg_id in all_ids:
+                self._render_count = max(self._render_count, len(all_ids) - all_ids.index(msg_id))
+                self._rebuild()
+                row = self.rows.get(msg_id)
         if row is not None:
             self._pending_focus = None
             self._scroll_to_row(row)
@@ -4183,6 +4206,8 @@ class ChatRoomWindow(QWidget):
     def _on_history_loaded(self, rid, batch, has_more):
         if rid != self.room_id:
             return
+        if self._loading_older:
+            self._render_count += len(batch)   # 서버에서 더 받은 오래된 메시지도 보이게
         self._loading_older = False
         self._rebuild()
         if self._anchor is not None:

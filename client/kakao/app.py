@@ -72,6 +72,37 @@ class Session:
         self.conn = ChatConnection()
         self.state = AppState(self.conn, self.settings)
         self.window = None
+        # 자동 재연결: 예기치 않게 끊기면 1·2·4·8·10초… 간격으로 다시 붙는다 (직접 닫은 연결은 제외)
+        from PyQt5.QtCore import QTimer
+        self._closing = False
+        self._retry = 0
+        self._retry_timer = QTimer()
+        self._retry_timer.setSingleShot(True)
+        self._retry_timer.timeout.connect(self._auto_reconnect)
+        self.state.connection_lost.connect(self._schedule_reconnect)
+
+    RETRY_DELAYS = (1, 2, 4, 8, 10)
+
+    def retry_delay(self):
+        return self.RETRY_DELAYS[min(self._retry, len(self.RETRY_DELAYS) - 1)]
+
+    def _schedule_reconnect(self, _reason=''):
+        if self._closing or self._retry_timer.isActive():
+            return
+        delay = self.retry_delay()
+        if self.window is not None:
+            self.window.show_reconnecting(delay)
+        self._retry_timer.start(delay * 1000)
+
+    def _auto_reconnect(self):
+        if self._closing:
+            return
+        ok, _msg = self.reconnect()
+        if ok:
+            self._retry = 0
+        else:
+            self._retry += 1
+            self._schedule_reconnect()
 
     def connect(self):
         self.conn.connect_to(self.host, self.port, self.username)
@@ -98,6 +129,8 @@ class Session:
         return True, ''
 
     def close(self):
+        self._closing = True
+        self._retry_timer.stop()
         try:
             self.conn.close()
         except Exception:

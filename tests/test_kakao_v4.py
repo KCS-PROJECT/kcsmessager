@@ -1061,5 +1061,29 @@ class EfficiencyFollowupTest(unittest.TestCase):
         self.assertIsInstance(after['r2'], RoomRow)
 
 
+class AutoReconnectTest(unittest.TestCase):
+    """연결이 예기치 않게 끊기면 1·2·4·8·10초 간격으로 자동 재연결, 직접 닫은 연결은 그대로"""
+
+    def test_backoff_and_reset(self):
+        from client.kakao.app import Session
+        app()
+        s = Session('127.0.0.1', 1, '재연결시험')
+        calls = []
+        s.reconnect = lambda: (calls.append(1), (len(calls) >= 3, ''))[1]
+        delays = []
+        s._retry_timer.start = lambda ms: (delays.append(ms // 1000), None)[1]
+        s._retry_timer.isActive = lambda: False
+        s._schedule_reconnect('끊김')
+        for _ in range(3):
+            s._auto_reconnect()
+        self.assertEqual(delays, [1, 2, 4])            # 실패할수록 간격이 늘어남
+        self.assertEqual(s._retry, 0)                   # 붙으면 처음부터
+        s.close()
+        delays.clear()
+        s._schedule_reconnect('끊김')
+        self.assertEqual(delays, [])                    # 직접 닫으면 다시 붙지 않음
+        self.assertEqual(Session.RETRY_DELAYS[-1], 10)
+
+
 if __name__ == '__main__':
     unittest.main()

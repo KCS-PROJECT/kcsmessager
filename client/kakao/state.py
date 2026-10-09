@@ -159,6 +159,7 @@ class AppState(QObject):
             handler(p)
 
     def _on_welcome(self, p):
+        reconnected = bool(self.me)            # 두 번째 welcome = 다시 붙음
         self.me = p['me']['username']
         self.users = {u['username']: u for u in p.get('users', [])}
         self.users[self.me] = p['me']
@@ -179,6 +180,11 @@ class AppState(QObject):
         self.request_stories()
         self.request_call_history()
         self._restore_failed()
+        if reconnected:
+            # 끊긴 사이 온 메시지: 받아 둔 방마다 최근 대화를 다시 받아 합친다 (열린 채팅방은 history_loaded 로 갱신)
+            for rid in list(self._messages):
+                if rid in self.rooms:
+                    self._send('history', room_id=rid, limit=50)
         self.calls_changed.emit()
 
     def _on_user_status_changed(self, p):

@@ -32,6 +32,7 @@ The maintained implementation is `client/kakao/` (PyQt5 client) + `server/kakao/
 - Product name shown to users is **KCS Talk**. Company CI (㈜케이씨에스) assets live in `assets/brand/`; render them only via `client/kakao/brand.py`. Default accent theme is `kcs` (navy #2A386C); `theme.c('yellow')` means "primary accent" and text on it must use `theme.c('on_accent')`, my-bubble text `theme.c('bubble_mine_text')` — never hardcode `#191919` on accent colors.
 - Run: `python3 server/chat/chat_server.py` then `python3 client/kakao/app.py`. User guide: `docs/KCS_TALK_GUIDE.md`.
 - Tests: `python3 scripts/verify_features.py` (all tests → per-feature table in claudedocs/FEATURE_VERIFICATION.md; add new tests to its mapping) or `QT_QPA_PLATFORM=offscreen python3 -m unittest discover -s tests -p 'test_*.py'`. `python3 scripts/demo.py --headless-check` exercises the real server end to end. `tests/kakao_fakes.py` provides `make_demo_state()` for UI tests without a server. `tests/__init__.py` must stay (a site-packages `tests` package shadows it otherwise).
+- Quality harness: `python3 scripts/harness/score_messenger.py` (real server + real `Session` clients; 10 areas: messaging, read counts, message ops, reconnect, 12-client load, performance, persistence, server fuzzing, UI stability, regression) → score /10 and `claudedocs/HARNESS_SCORE.md`. Keep it at 10.0; `--quick` skips the slow regression area.
 - Avoid fixed window sizes (`setFixedSize`/`setMinimumSize` with literals) — they clipped widgets before; size from layouts.
 
 ## Core Components

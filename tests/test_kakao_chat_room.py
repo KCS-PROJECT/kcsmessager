@@ -143,9 +143,15 @@ class BuildTests(ChatRoomTestBase):
         w.show()
         flush()
         elapsed = time.perf_counter() - t0
-        self.assertGreaterEqual(len(w.rows), 300)
-        w.close()
+        from client.kakao.chat_room import RENDER_PAGE
+        # 처음에는 최근 RENDER_PAGE 개만 만든다 (받아 둔 300개 + 데모 메시지)
+        self.assertLessEqual(len([m for m in w.rows if m >= 1000]), RENDER_PAGE)
         self.assertLess(elapsed, 1.5, f'300 messages took {elapsed:.2f}s')
+        while w._load_older():                    # 위로 올리면 받아 둔 메시지를 150개씩 더
+            flush()
+        self.assertEqual(len([m for m in w.rows if m >= 1000]), 300)
+        self.assertTrue(w.focus_message(1000))    # 가장 오래된 메시지로 이동
+        w.close()
 
 
 class SendTests(ChatRoomTestBase):
