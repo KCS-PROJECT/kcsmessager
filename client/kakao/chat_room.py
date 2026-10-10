@@ -1549,6 +1549,9 @@ class MessageRow(QWidget):
         self.unread_label.setToolTip('안 읽은 사람 보기')
         self.unread_label.clicked.connect(lambda: self.win.show_unread_members(self.msg))
         self.time_label = _label(fmt_time(msg.get('timestamp')), 'timeLabel', self)
+        # 아주 좁은 창 + 큰 글자(200%)에서만 '오후' / '4:30' 두 줄로 접혀 대화 영역이 옆으로 넘치지 않게
+        # (평소에는 한 줄 - 자리가 있으면 레이아웃이 원래 폭을 준다)
+        self.time_label.setWordWrap(True)
         # 시간 줄: [조용히 보낸 표시][수정됨][시간] (내 메시지) / [시간][수정됨] (상대 메시지)
         self.meta_line = QWidget(self)
         ml = QHBoxLayout(self.meta_line)

@@ -15,6 +15,27 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
+
+def _attach_log_when_no_console():
+    """콘솔 없이 실행된 빌드 앱(Windows 창 모드 exe 등)은 sys.stdout/stderr 가 None 이라 출력 · 오류가 사라진다.
+    그럴 때는 데이터 폴더의 logs/kcs_talk.log 에 남긴다 (문제가 생긴 PC 에서 원인을 찾을 수 있게)"""
+    if sys.stdout is not None and sys.stderr is not None:
+        return None
+    from client.kakao import osenv as _osenv           # (PyQt 를 부르지 않는 가벼운 모듈)
+    try:
+        os.makedirs(_osenv.app_path('logs'), exist_ok=True)
+        log = open(_osenv.app_path('logs', 'kcs_talk.log'), 'a', encoding='utf-8', buffering=1)
+    except OSError:
+        return None
+    if sys.stdout is None:
+        sys.stdout = log
+    if sys.stderr is None:
+        sys.stderr = log
+    return log
+
+
+_LOG = _attach_log_when_no_console()
+
 # High DPI 설정은 QApplication 생성 전에 해야 한다 (자세한 OS 별 보정은 osenv.prepare_process)
 os.environ.setdefault('QT_AUTO_SCREEN_SCALE_FACTOR', '1')
 
@@ -286,7 +307,12 @@ def main(argv=None):
     app = QApplication.instance() or QApplication(sys.argv[:1])
     osenv.configure_app(app)          # 이름 · Fusion 스타일 · macOS Dock 이름 · Linux .desktop 연결
     if args.self_check:
-        return self_check()
+        try:
+            return self_check()
+        except Exception:                 # noqa: BLE001 - 점검 모드는 오류 창 없이 기록만 하고 끝낸다
+            import traceback
+            traceback.print_exc()
+            return 1
     install_korean_qt_translation(app)
 
     from client.kakao.login import LoginDialog, talk_icon

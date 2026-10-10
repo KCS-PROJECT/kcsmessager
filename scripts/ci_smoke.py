@@ -92,9 +92,17 @@ def built(dist):
            'linux': os.path.join(dist, NAME, NAME)}[osenv.current()]
     results = [check('빌드한 메신저 파일', os.path.exists(exe), exe)]
     if results[0]:
-        r = subprocess.run([exe, '--self-check'], env=env, capture_output=True, timeout=180)
-        print((r.stdout + r.stderr).decode('utf-8', 'replace'))
-        results.append(check('빌드한 메신저 --self-check', r.returncode == 0))
+        log = os.path.join(env['KCS_MESSENGER_HOME'], 'logs', 'kcs_talk.log')   # 콘솔 없는 창 모드 앱의 출력
+        try:
+            r = subprocess.run([exe, '--self-check'], env=env, capture_output=True, timeout=120)
+            code, out = r.returncode, (r.stdout + r.stderr).decode('utf-8', 'replace')
+        except subprocess.TimeoutExpired:
+            code, out = None, '(120초 안에 끝나지 않음)'
+        if os.path.exists(log):
+            with open(log, encoding='utf-8', errors='replace') as f:
+                out += '\n[logs/kcs_talk.log]\n' + f.read()
+        print(out)
+        results.append(check('빌드한 메신저 --self-check', code == 0, f'종료 코드 {code}'))
     server_dir = os.path.join(dist, f'{NAME} Server')
     server = os.path.join(server_dir, f'{NAME} Server' + ('.exe' if osenv.is_windows() else ''))
     results.append(check('빌드한 서버 파일', os.path.exists(server), server))

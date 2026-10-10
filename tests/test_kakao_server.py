@@ -1705,8 +1705,9 @@ class TestMultiProfile(ServerTestBase):
             {'profile_id': prof['profile_id'], 'name': '회사용', 'display_name': '김과장', 'status_message': '',
              'viewers': [c.username]}]}, 'multi_profile_list')['profiles']
         self.assertEqual((lst[0]['profile_id'], lst[0]['avatar_id']), (prof['profile_id'], prof['avatar_id']))
-        self.assertEqual(c.wait_for('user_updated', lambda m: m['user']['username'] == a_name)['user']
-                         ['display_name'], '김과장')
+        # clear() 뒤에도 앞선 변경 알림이 늦게 도착할 수 있다 → 바뀐 이름이 담긴 알림을 기다린다
+        self.assertEqual(c.wait_for('user_updated', lambda m: m['user']['username'] == a_name
+                                    and m['user']['display_name'] == '김과장')['user']['display_name'], '김과장')
         self.assertEqual(b.wait_for('user_updated', lambda m: m['user']['username'] == a_name)['user']
                          ['display_name'], a_name)
         self.assertEqual(a.request({'type': 'multi_profile_list'}, 'multi_profile_list')['profiles'], lst)
