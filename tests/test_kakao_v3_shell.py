@@ -16,7 +16,7 @@ from unittest import mock
 
 from tests.kakao_fakes import make_demo_state, app
 
-from PyQt5.QtCore import Qt, QPoint
+from PyQt5.QtCore import QEvent, Qt, QPoint
 from PyQt5.QtGui import QImage, QColor
 from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import QMessageBox, QApplication, QWidget, QDialog
@@ -67,8 +67,10 @@ class V3TestBase(unittest.TestCase):
         for w in self._windows:
             w.hide()
             w.deleteLater()
+        QApplication.processEvents()                              # 지연 삭제를 먼저 끝내고
+        QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
         theme.set_dark(False)
-        apply_app_theme(None)
+        apply_app_theme(None)                                      # 그다음 앱 스타일 다시 입히기
         QApplication.processEvents()
 
     def keep(self, w):

@@ -43,13 +43,15 @@ jobs:
         run: python -X faulthandler -m unittest discover -s tests -p "test_*.py" -v
 
       - name: 소스 실행 점검 (서버 접속 · 클라이언트 self-check)
+        if: ${{ !cancelled() }}
         run: python scripts/ci_smoke.py source
 
       - name: 실제 서버 + 클라이언트 세션 끝까지 (demo --headless-check)
+        if: ${{ !cancelled() }}
         run: python scripts/demo.py --headless-check
 
       - name: Windows - 설치 배치 파일 실행 (pip · doctor · 바탕화면/시작 메뉴 바로가기)
-        if: runner.os == 'Windows'
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
         shell: cmd
         run: |
           call launch\windows\install.bat < NUL
@@ -58,7 +60,7 @@ jobs:
           echo shortcuts OK
 
       - name: Linux - 설치 스크립트 실행 (앱 목록 .desktop)
-        if: runner.os == 'Linux'
+        if: ${{ !cancelled() && runner.os == 'Linux' }}
         run: |
           sh launch/linux/install.sh
           test -f ~/.local/share/applications/kr.co.kcs.talk.desktop
@@ -66,22 +68,25 @@ jobs:
           cat ~/.local/share/applications/kr.co.kcs.talk.desktop
 
       - name: macOS - 설치 스크립트 실행 (바탕화면 .command)
-        if: runner.os == 'macOS'
+        if: ${{ !cancelled() && runner.os == 'macOS' }}
         run: |
           mkdir -p ~/Desktop
           bash launch/macos/install.command
           test -x ~/Desktop/"KCS Talk.command"
 
       - name: 실행 파일 만들기 (메신저 + 서버)
+        if: ${{ !cancelled() }}
         run: |
           python -m pip install pyinstaller
           python kcs.py build
           python kcs.py build --server
 
       - name: 빌드한 메신저 · 서버 실행 점검
+        if: ${{ !cancelled() }}
         run: python scripts/ci_smoke.py built dist
 
       - name: 빌드 결과 올리기
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
           name: kcs-talk-${{ runner.os }}

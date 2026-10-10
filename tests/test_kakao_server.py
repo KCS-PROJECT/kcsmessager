@@ -1047,7 +1047,8 @@ class TestPresenceAvatar(ServerTestBase):
         org_id = self.server.store.save_attachment('avatar.png', 'image/png', PNG_1PX, a.username)
         self.server.store.set_org_avatar(a.username, org_id)
         a.send({'type': 'profile_update', 'avatar_b64': base64.b64encode(PNG_1PX).decode()})
-        u = stranger.wait_for('user_updated', lambda m: m['user']['username'] == a.username)['user']
+        u = stranger.wait_for('user_updated', lambda m: m['user']['username'] == a.username
+                              and m['user'].get('avatar_id'))['user']
         self.assertNotEqual(u['avatar_id'], org_id)
         a.send({'type': 'profile_update', 'avatar_clear': True})
         u = stranger.wait_for('user_updated', lambda m: m['user']['username'] == a.username
@@ -1672,7 +1673,8 @@ class TestMultiProfile(ServerTestBase):
         prof = lst[0]
         self.assertEqual(set(prof), {'profile_id', 'name', 'display_name', 'status_message', 'avatar_id', 'viewers'})
         self.assertEqual((prof['display_name'], prof['viewers']), ('김대리', [b.username]))
-        ub = b.wait_for('user_updated', lambda m: m['user']['username'] == a_name)['user']
+        ub = b.wait_for('user_updated', lambda m: m['user']['username'] == a_name
+                        and m['user']['display_name'] == '김대리')['user']   # 접속 알림이 먼저 올 수 있다
         self.assertEqual((ub['display_name'], ub['status_message'], ub['avatar_id']),
                          ('김대리', '근무 중', prof['avatar_id']))
         uc = c.wait_for('user_updated', lambda m: m['user']['username'] == a_name)['user']

@@ -264,6 +264,16 @@ class LockScreen(QWidget):
         self.raise_()
         self.setFocus(Qt.OtherFocusReason)
 
+    def hideEvent(self, event):
+        """가려지면(창을 숨기거나 최소화) 흔들림 · 지우기 타이머를 멈춘다 - 보이지 않는 위젯을 계속 다시 그리지 않게.
+        (macOS CI 에서 흔들림 도중 창을 숨기고 앱 스타일을 다시 입히면 Qt 안에서 Bus error 가 났다)"""
+        self._shake.stop()
+        self.dots.shift = 0.0
+        if self._clear_timer.isActive():
+            self._clear_timer.stop()
+            self._reset_after_error()
+        super().hideEvent(event)
+
     def eventFilter(self, obj, event):
         if obj is self.parentWidget() and event.type() == QEvent.Resize and self.isVisible():
             self.setGeometry(obj.rect())
