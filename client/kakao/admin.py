@@ -507,19 +507,60 @@ class NoticeDialog(QDialog):
         self.send_button.setEnabled(0 < n <= NOTICE_MAX)
 
 
+class AdminNoticeDialog(QDialog):
+    """받은 관리자 공지 창 - 시스템 메시지 상자(QMessageBox) 대신 앱이 직접 그린다.
+    QMessageBox 의 시스템 아이콘은 Windows 에서 창을 띄울 때 접근 위반으로 앱을 멈춘 적이 있다 (CI windows-latest).
+    세 OS 에서 같은 모양 · 같은 동작이 되도록 아이콘은 widgets.make_icon 으로 그린다."""
+
+    def __init__(self, parent, notice):
+        super().__init__(parent)
+        from client.kakao.widgets import make_icon
+        self.setWindowTitle('관리자 공지')
+        self.setWindowModality(Qt.NonModal)
+        self.setAttribute(Qt.WA_DeleteOnClose)
+        when = (notice.get('timestamp') or '').replace('T', ' ')[:16]
+        self._title = '관리자 공지'                    # macOS 는 창 제목을 보이지 않으므로 본문 첫 줄에도 쓴다
+        body = html.escape(notice.get('content', '')).replace('\n', '<br>')   # 공지 글자는 서식으로 해석하지 않는다
+        sender = html.escape(f"보낸 사람: {notice.get('sender', '')}  ·  {when}")
+        self._info = f'{body}<br><br><span style="color:{theme.c("text_hint")}">{sender}</span>'
+        col = QVBoxLayout(self)
+        col.setContentsMargins(20, 18, 20, 16)
+        col.setSpacing(10)
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        icon = QLabel()
+        icon.setPixmap(make_icon('notice', theme.c('yellow'), 20).pixmap(20, 20))
+        head.addWidget(icon, 0, Qt.AlignVCenter)
+        title = QLabel(self._title)
+        title.setStyleSheet(f"font-size: {theme.fs('title')}px; font-weight: bold; color: {theme.c('text')};")
+        head.addWidget(title, 1)
+        col.addLayout(head)
+        self.body_label = QLabel(self._info)
+        self.body_label.setTextFormat(Qt.RichText)
+        self.body_label.setWordWrap(True)
+        self.body_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.body_label.setStyleSheet(f"font-size: {theme.fs('body')}px; color: {theme.c('text')};")
+        col.addWidget(self.body_label)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        ok = QPushButton('확인')
+        ok.setProperty('primary', True)
+        ok.setDefault(True)
+        ok.clicked.connect(self.close)
+        row.addWidget(ok)
+        col.addLayout(row)
+        self.resize(theme.px(360), self.sizeHint().height())   # 글자 크기 배율을 따르는 기본 폭 (고정 크기 아님)
+
+    # QMessageBox 와 같은 이름 (호출하던 코드 · 테스트 호환)
+    def text(self):
+        return self._title
+
+    def informativeText(self):
+        return self._info
+
+
 def show_admin_notice(parent, notice):
     """받은 관리자 공지: 닫을 수 있는 비모달 창 (여러 개가 와도 각각)"""
-    box = QMessageBox(parent)
-    box.setWindowTitle('관리자 공지')            # macOS 는 창 제목을 보이지 않으므로 본문 첫 줄에도 쓴다
-    box.setIcon(QMessageBox.Information)
-    box.setTextFormat(Qt.PlainText)
-    box.setText('관리자 공지')
-    when = (notice.get('timestamp') or '').replace('T', ' ')[:16]
-    body = html.escape(notice.get('content', '')).replace('\n', '<br>')   # 공지 글자는 서식으로 해석하지 않는다
-    sender = html.escape(f"보낸 사람: {notice.get('sender', '')}  ·  {when}")
-    box.setInformativeText(f'{body}<br><br><span style="color:{theme.c("text_hint")}">{sender}</span>')
-    box.setStandardButtons(QMessageBox.Ok)
-    box.setWindowModality(Qt.NonModal)
-    box.setAttribute(Qt.WA_DeleteOnClose)
+    box = AdminNoticeDialog(parent, notice)
     box.show()
     return box
