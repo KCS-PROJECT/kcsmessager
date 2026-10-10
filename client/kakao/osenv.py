@@ -85,6 +85,14 @@ def user_dir(kind):
     return path if os.path.isdir(path) else home
 
 
+def display_path(path, start=None):
+    """보여 줄 경로: 저장소(또는 start) 안이면 상대 경로, 다른 드라이브(Windows C: / D:)면 그대로"""
+    try:
+        return os.path.relpath(path, start or ROOT)
+    except ValueError:                                   # Windows: 드라이브가 다르면 상대 경로가 없다
+        return os.path.abspath(path)
+
+
 def resource_path(*parts):
     """앱에 든 파일(assets/…) 경로 - 소스 실행이면 저장소, PyInstaller 로 빌드한 앱이면 풀린 임시 폴더"""
     base = getattr(sys, '_MEIPASS', None) or ROOT

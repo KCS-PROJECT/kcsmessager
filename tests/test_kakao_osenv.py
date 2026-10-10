@@ -96,6 +96,12 @@ class PathTest(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(theme.FONT_DIR, 'Pretendard-Regular.otf')))
         self.assertTrue(os.path.isdir(brand.BRAND_DIR))
 
+    def test_display_path_other_drive(self):
+        """Windows: 저장소(D:)와 다른 드라이브(C:) 경로도 오류 없이 보여 준다"""
+        self.assertEqual(osenv.display_path(os.path.join(ROOT, 'claudedocs', 'x.md')), os.path.join('claudedocs', 'x.md'))
+        with mock.patch('os.path.relpath', side_effect=ValueError('path is on mount C:, start on mount D:')):
+            self.assertEqual(osenv.display_path('/tmp/x.md'), os.path.abspath('/tmp/x.md'))
+
     def test_secure_file(self):
         with tempfile.NamedTemporaryFile(delete=False) as f:
             path = f.name
@@ -219,7 +225,8 @@ class StartupTest(unittest.TestCase):
         with mock.patch.object(sys, 'frozen', True, create=True), \
                 mock.patch.object(sys, 'executable', os.path.join(os.sep, 'opt', 'kcs', 'KCS Talk Server')):
             reloaded = importlib.reload(srv)
-            self.assertEqual(reloaded.DEFAULT_DB_PATH, os.path.join(os.sep, 'opt', 'kcs', 'server_data', 'kakao.db'))
+            self.assertEqual(reloaded.DEFAULT_DB_PATH,
+                             os.path.join(os.path.abspath(os.path.join(os.sep, 'opt', 'kcs')), 'server_data', 'kakao.db'))
         importlib.reload(srv)
         self.assertEqual(srv.DEFAULT_DB_PATH, os.path.join(ROOT, 'server_data', 'kakao.db'))
 
@@ -266,10 +273,11 @@ class ShortcutTest(unittest.TestCase):
     def test_plan_per_os(self):
         with mock.patch.object(self.sc, 'built_executable', return_value=None):
             linux = self.sc.plan('linux', home='/home/u')
-            self.assertEqual(linux[0][0], '/home/u/.local/share/applications/kr.co.kcs.talk.desktop')
+            self.assertEqual(linux[0][0], os.path.join('/home/u', '.local', 'share', 'applications',
+                                                       'kr.co.kcs.talk.desktop'))
             self.assertIn('kcs.py" client', linux[0][1])
             mac = self.sc.plan('mac', home='/Users/u')
-            self.assertEqual(mac[0][0], '/Users/u/Desktop/KCS Talk.command')
+            self.assertEqual(mac[0][0], os.path.join('/Users/u', 'Desktop', 'KCS Talk.command'))
             self.assertTrue(mac[0][1].startswith('#!/bin/bash'))
             with mock.patch.dict(os.environ, {'APPDATA': r'C:\Users\u\AppData\Roaming'}):
                 win = self.sc.plan('windows', home=r'C:\Users\u')

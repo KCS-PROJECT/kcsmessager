@@ -32,6 +32,7 @@ DEPENDENCIES = [
     ('numpy', False, '통화 소리 처리 (보이스톡 품질)'),
     ('pypdf', False, 'AI 비서의 PDF 학습 (서버)'),
     ('anthropic', False, 'AI 비서 답변 (서버, ANTHROPIC_API_KEY 필요)'),
+    ('openpyxl', False, '조직도 엑셀 가져오기 (관리자)'),
 ]
 
 

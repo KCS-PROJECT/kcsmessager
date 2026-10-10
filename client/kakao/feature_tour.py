@@ -418,7 +418,7 @@ class FeatureTourDialog(QDialog):
         if md:
             self.verify_view.setMarkdown(md)
             passed = sum(1 for v in verdicts.values() if v == 'PASS')
-            self.verify_hint.setText(f'기능 {len(verdicts)}개 중 {passed}개 통과 · {os.path.relpath(VERIFICATION_PATH, ROOT)}')
+            self.verify_hint.setText(f'기능 {len(verdicts)}개 중 {passed}개 통과 · {osenv.display_path(VERIFICATION_PATH, ROOT)}')
         else:
             self.verify_view.setMarkdown(
                 '## 아직 검증 결과가 없습니다\n\n터미널에서 다음을 실행하면 기능별 테스트 결과가 여기에 표시됩니다.\n\n'

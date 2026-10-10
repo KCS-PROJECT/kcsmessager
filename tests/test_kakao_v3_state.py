@@ -2,6 +2,7 @@
 """v3 클라이언트 상태 테스트 - 비밀채팅 암호화, 알림 규칙, 통화·펑·게시판·오픈채팅·차단 상태 처리"""
 
 import os
+import sys
 import tempfile
 import unittest
 
@@ -36,7 +37,8 @@ class SecretCryptoTest(unittest.TestCase):
         k1 = SecretKeyring('carol', d)
         k2 = SecretKeyring('carol', d)
         self.assertEqual(k1.public_key_b64, k2.public_key_b64)
-        self.assertEqual(os.stat(k1.path).st_mode & 0o777, 0o600)
+        if not sys.platform.startswith('win'):              # POSIX 권한 (Windows 는 프로필 폴더 권한)
+            self.assertEqual(os.stat(k1.path).st_mode & 0o777, 0o600)
 
 
 class V3StateTest(unittest.TestCase):

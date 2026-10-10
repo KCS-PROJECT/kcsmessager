@@ -6,6 +6,7 @@ E2E 통합 테스트 - 실제 KakaoServer + 실제 클라이언트 스택(ChatCo
 
 import base64
 import os
+import sys
 import shutil
 import tempfile
 import time
@@ -197,11 +198,12 @@ class E2ETest(unittest.TestCase):
         start = datetime.now() + timedelta(minutes=10, seconds=1)
         hong.create_event(title='코드 리뷰', start=start, end=start + timedelta(hours=1),
                           all_day=False, remind_minutes=10, room_id=rid)
-        self.assertTrue(pump(lambda: any(e['title'] == '코드 리뷰' for e in kim.events.values())))
+        # 만든 사람 쪽에도 도착할 때까지 (느린 PC 에서는 받는 사람 쪽이 먼저 받는다)
+        self.assertTrue(pump(lambda: all(any(e['title'] == '코드 리뷰' for e in s.events.values()) for s in (hong, kim))))
         ev = [e for e in kim.events.values() if e['title'] == '코드 리뷰'][0]
         self.assertEqual(ev['attendees']['김철수'], 'pending')
         kim.rsvp(ev['event_id'], 'yes')
-        self.assertTrue(pump(lambda: hong.events[ev['event_id']]['attendees']['김철수'] == 'yes'))
+        self.assertTrue(pump(lambda: hong.events.get(ev['event_id'], {}).get('attendees', {}).get('김철수') == 'yes'))
         self.assertTrue(pump(lambda: reminders == ['코드 리뷰'], 5))
         kim.load_history(rid)
         self.assertTrue(pump(lambda: any(m['kind'] == 'event' for m in kim.room_messages(rid))))
@@ -285,7 +287,7 @@ class E2E2025Test(E2ETest):
         rid = self.open_direct(hong, '김철수')
         start = datetime.now() + timedelta(days=2)
         hong.create_event(title='분기 리뷰', start=start, end=start + timedelta(hours=1), room_id=rid)
-        self.assertTrue(pump(lambda: any(e['title'] == '분기 리뷰' for e in kim.events.values())))
+        self.assertTrue(pump(lambda: all(any(e['title'] == '분기 리뷰' for e in s.events.values()) for s in (hong, kim))))
         ev = [e for e in hong.events.values() if e['title'] == '분기 리뷰'][0]
         notes = []
         kim.notify.connect(lambda *a: notes.append(a))
@@ -578,7 +580,8 @@ class LoginFlowTests(unittest.TestCase):
         remember_login(s, '자동로그인', True)
         saved = login.load_saved_login()
         self.assertEqual((saved['login_id'], saved['token'], saved['auto_login']), ('자동로그인', token, True))
-        self.assertEqual(os.stat(login.saved_path()).st_mode & 0o777, 0o600)
+        if not sys.platform.startswith('win'):              # POSIX 권한 (Windows 는 프로필 폴더 권한)
+            self.assertEqual(os.stat(login.saved_path()).st_mode & 0o777, 0o600)
         with open(login.saved_path(), encoding='utf-8') as f:
             self.assertNotIn('auto-pw', f.read())                        # 비밀번호 원문은 저장하지 않는다
         # 다음 실행: 비밀번호 없이 토큰으로

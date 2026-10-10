@@ -114,14 +114,17 @@ class MainWindowTitleBarTests(unittest.TestCase):
                 "img = w.body.grab().toImage()\n"
                 "x = w.room_pane.x() + w.room_pane.width() // 2\n"
                 "band = img.pixelColor(x * img.width() // w.body.width(), 4)\n"
-                "print(w.body.band, w.sidebar.layout().contentsMargins().top(), w.is_split(), band.name(), flush=True)\n"
+                "print(w.body.band, w.sidebar.layout().contentsMargins().top(), w.is_split(), band.name(),\n"
+                "      w.width(), flush=True)\n"
                 "os._exit(0)\n")
         env = dict(os.environ, QT_QPA_PLATFORM='cocoa')
         result = subprocess.run([sys.executable, '-c', code], cwd=root, env=env, capture_output=True,
                                 text=True, timeout=60)
         if result.returncode != 0 or not result.stdout.strip():
             self.skipTest(f'GUI 세션이 없어 cocoa 창을 띄울 수 없음: {result.stderr.strip()[-80:]}')
-        band, inset, split, color = result.stdout.split()
+        band, inset, split, color, width = result.stdout.split()
+        if int(width) < 1300:                     # 가상 화면이 좁은 환경(CI 러너)은 분할 화면 폭을 못 낸다
+            self.skipTest(f'화면이 좁아 창을 1300px 로 키울 수 없음 (실제 {width}px)')
         self.assertEqual((int(band), int(inset), split), (macos.TITLE_BAR_HEIGHT, 16 + macos.TITLE_BAR_HEIGHT, 'True'))
         self.assertNotEqual(color, '#000000')     # 반투명 헤더색(rgba)을 QColor 로 바로 쓰면 검게 칠해졌다
 
@@ -149,17 +152,20 @@ class ChatRoomWindowTitleBarTests(unittest.TestCase):
                 "w = MainWindow(state, state.settings); w.resize(1300, 680); w.show(); app().processEvents()\n"
                 "r = w.open_room(sorted(state.rooms)[0]); app().processEvents()\n"
                 "top = lambda: r.header.layout().contentsMargins().top()\n"
-                "embedded = (r.isWindow(), top())\n"
+                "embedded = (r.isWindow(), top(), w.width())\n"
                 "w.resize(400, 680); app().processEvents(); app().processEvents()\n"
-                "print(embedded[0], embedded[1], r.isWindow(), top(), flush=True)\n"
+                "print(embedded[0], embedded[1], r.isWindow(), top(), embedded[2], flush=True)\n"
                 "os._exit(0)\n")
         env = dict(os.environ, QT_QPA_PLATFORM='cocoa')
         result = subprocess.run([sys.executable, '-c', code], cwd=root, env=env, capture_output=True,
                                 text=True, timeout=60)
         if result.returncode != 0 or not result.stdout.strip():
             self.skipTest(f'GUI 세션이 없어 cocoa 창을 띄울 수 없음: {result.stderr.strip()[-80:]}')
+        *values, width = result.stdout.split()
+        if int(width) < 1300:                     # 가상 화면이 좁은 환경(CI 러너)은 분할 화면 폭을 못 낸다
+            self.skipTest(f'화면이 좁아 창을 1300px 로 키울 수 없음 (실제 {width}px)')
         # 분할 화면 안에서는 원래 여백, 별도 창으로 꺼내면 신호등 높이만큼 헤더를 내린다(헤더가 창 맨 위까지)
-        self.assertEqual(result.stdout.split(), ['False', '10', 'True', str(10 + macos.TITLE_BAR_HEIGHT)])
+        self.assertEqual(values, ['False', '10', 'True', str(10 + macos.TITLE_BAR_HEIGHT)])
 
 
 if __name__ == '__main__':

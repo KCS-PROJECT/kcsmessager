@@ -1026,7 +1026,8 @@ class TestPresenceAvatar(ServerTestBase):
     def test_avatar_upload_fetch_clear(self):
         a, stranger = self.connect(), self.connect()
         a.send({'type': 'profile_update', 'avatar_b64': base64.b64encode(PNG_1PX).decode()})
-        u = stranger.wait_for('user_updated', lambda m: m['user']['username'] == a.username)['user']
+        u = stranger.wait_for('user_updated', lambda m: m['user']['username'] == a.username
+                              and m['user'].get('avatar_id'))['user']   # 접속 알림이 먼저 올 수 있다
         self.assertIsInstance(u['avatar_id'], int)
         # 방 멤버가 아니어도 프로필 사진은 받을 수 있다
         got = stranger.request({'type': 'attachment_get', 'attachment_id': u['avatar_id']}, 'attachment_data')
@@ -1902,7 +1903,8 @@ class TestTimedExpiry(ServerTestBase):
         a, b = self.connect(), self.connect()
         rid = self.group(a, [b])['room_id']
         a.send({'type': 'profile_update', 'avatar_b64': base64.b64encode(PNG_1PX).decode()})
-        avatar_id = b.wait_for('user_updated', lambda m: m['user']['username'] == a.username)['user']['avatar_id']
+        avatar_id = b.wait_for('user_updated', lambda m: m['user']['username'] == a.username
+                               and m['user'].get('avatar_id'))['user']['avatar_id']
         a.send({'type': 'send', 'room_id': rid, 'kind': 'file', 'content': '', 'client_tmp_id': 'r1',
                 'attachment': {'name': 'old.txt', 'mime': 'text/plain', 'data_b64': base64.b64encode(b'x').decode()}})
         msg = a.wait_for('msg_new', lambda m: m['client_tmp_id'] == 'r1')['message']
