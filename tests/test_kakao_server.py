@@ -14,6 +14,7 @@ import socket
 import sys
 import tempfile
 import threading
+import uuid
 import time
 import unittest
 from datetime import datetime, timedelta
@@ -162,6 +163,14 @@ class ServerTestBase(unittest.TestCase):
         self.clients.append(c)
         return c
 
+    def register(self, name=None, password='pw-1234', company='KCS 홀딩스', email=None, employee_no=None, **extra):
+        """처음 사용 등록(명세 §4.1) → (client, welcome)"""
+        c = self.connect(name or uname('reg'), join=False)
+        w = c.request({'type': 'register', 'company': company, 'name': c.username,
+                       'employee_no': employee_no or f'E{uuid.uuid4().hex[:10]}',
+                       'email': email or f'{c.username}@kcs.test', 'password': password, **extra}, 'welcome')
+        return c, w
+
     def group(self, owner, others, name='테스트방'):
         """그룹 방 생성 후 모든 참여자가 room_updated 를 받을 때까지 대기. room 반환."""
         owner.send({'type': 'room_create', 'name': name, 'members': [o.username for o in others]})
@@ -183,12 +192,12 @@ class ServerTestBase(unittest.TestCase):
 
 MESSAGE_KEYS = {'msg_id', 'room_id', 'sender', 'kind', 'content', 'timestamp', 'reply_to', 'mentions',
                 'reactions', 'deleted', 'attachment', 'event_id', 'poll', 'edited', 'edited_at', 'silent',
-                'link_preview', 'call_id', 'ladder', 'post_id'}
+                'link_preview', 'call_id', 'ladder', 'post_id', 'thread_root', 'thread_count', 'thread_last_at'}
 ROOM_KEYS = {'room_id', 'type', 'name', 'members', 'created_at', 'notice', 'last_message',
-             'read_pointers', 'unread_count', 'description', 'tags', 'nicknames'}
+             'read_pointers', 'unread_count', 'description', 'tags', 'nicknames', 'owner'}
 USER_KEYS = {'username', 'display_name', 'status_message', 'birthday', 'online', 'avatar_id', 'presence',
-             'company', 'department', 'title', 'is_bot', 'org_path', 'account', 'extension', 'mobile', 'concurrent', 'email',
-             'public_key'}
+             'company', 'department', 'title', 'is_bot', 'org_path', 'account', 'employee_no', 'extension', 'mobile', 'concurrent', 'email',
+             'public_key', 'is_admin', 'admin_company'}
 BOT = 'AI 비서'
 MB = 1024 * 1024
 PNG_1PX = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGBgAAAABQABpfZFQAAAAABJRU5ErkJggg==')
@@ -388,6 +397,220 @@ class TestConnectionAndRooms(ServerTestBase):
                            lambda m: m['room']['type'] == 'direct')['room']
         a.expect_error({'type': 'room_invite', 'room_id': direct['room_id'], 'usernames': [c.username]})
         a.expect_error({'type': 'room_create', 'name': 'x', 'members': []})
+
+
+class LoginTests(ServerTestBase):
+    """아이디/비밀번호 로그인 (명세 §4.1)"""
+
+    def join(self, login_id, password=None):
+        c = self.connect(login_id, join=False)
+        payload = {'type': 'join', 'username': login_id}
+        if password is not None:
+            payload['password'] = password
+        return c, payload
+
+    def test_first_login_registers_password_then_checks_it(self):
+        name = uname('pw')
+        c, w = self.register(name, 'first-pass', company='KCS 물류', email=f'{name}@KCS.test')
+        self.assertEqual(w['me']['username'], name)
+        self.assertEqual((w['me']['company'], w['me']['email']), ('KCS 물류', f'{name}@KCS.test'))
+        self.assertEqual(set(w['me']), USER_KEYS)                       # 해시는 노출하지 않는다
+        stored = self.server.store.password_hash(name)
+        self.assertTrue(stored.startswith('pbkdf2_sha256$') and 'first-pass' not in stored)
+        c.close()
+        # 다음부터는 아이디(이름 또는 이메일, 대소문자 무시)/비밀번호만
+        by_email, payload = self.join(f'{name}@kcs.TEST', 'first-pass')
+        self.assertEqual(by_email.request(payload, 'welcome')['me']['username'], name)
+        bad, payload = self.join(name, 'wrong-pass')
+        err = bad.expect_error(payload)
+        self.assertEqual(err['message'], '아이디 또는 비밀번호가 올바르지 않습니다.')
+        bad.assert_no('welcome')
+        # 같은 연결에서 다시 시도할 수 있다
+        payload['password'] = 'first-pass'
+        self.assertEqual(bad.request(payload, 'welcome')['me']['username'], name)
+
+    def test_register_with_employee_no_then_login_by_employee_no(self):
+        name = uname('emp')
+        emp = f'K{uuid.uuid4().hex[:8]}'
+        c, w = self.register(name, 'emp-pass', email=f'{name}@kcs.test', employee_no=emp)
+        self.assertEqual(w['me']['employee_no'], emp)
+        c.close()
+        # 다음부터는 사번(대소문자 무시) + 비밀번호만
+        by_emp, payload = self.join(emp.lower(), 'emp-pass')
+        self.assertEqual(by_emp.request(payload, 'welcome')['me']['username'], name)
+        bad, payload = self.join(emp, 'wrong-pass')
+        self.assertEqual(bad.expect_error(payload)['message'], '아이디 또는 비밀번호가 올바르지 않습니다.')
+        # 같은 사번으로 다른 사람이 등록할 수 없다 (대소문자 무시)
+        other = self.connect(uname('emp'), join=False)
+        err = other.expect_error({'type': 'register', 'company': 'KCS 홀딩스', 'name': other.username,
+                                  'employee_no': emp.lower(), 'email': f'{other.username}@kcs.test',
+                                  'password': 'pw-1234'})
+        self.assertEqual(err['message'], '이미 등록된 사번입니다. 사번과 비밀번호로 로그인해 주세요.')
+        self.assertIsNone(self.server.store.resolve_login(other.username))
+        # 사번이 다른 사람의 이름·사내 계정과 같아도 안 된다 (로그인 아이디가 겹친다)
+        err = other.expect_error({'type': 'register', 'company': 'KCS 홀딩스', 'name': other.username,
+                                  'employee_no': 'kmkim' if self.server.store.resolve_login('kmkim') else name,
+                                  'email': f'{other.username}@kcs.test', 'password': 'pw-1234'})
+        self.assertIn('이미 등록된 사번', err['message'])
+        # 등록 안 된 사번으로 로그인하면 처음 사용 등록 안내 (소속·이름·사번·이메일·비밀번호)
+        new, payload = self.join(f'N{uuid.uuid4().hex[:8]}', 'some-pass')
+        self.assertIn('사번', new.expect_error(payload)['message'])
+
+    def test_passwordless_join_blocked_once_password_set(self):
+        name = uname('pw')
+        self.register(name, 'abcd')
+        legacy, payload = self.join(name)
+        self.assertEqual(legacy.expect_error(payload)['message'], '비밀번호를 입력해 주세요.')
+        # 비밀번호가 없는 계정은 예전처럼 이름만으로 로그인된다
+        self.connect(uname('nopw'))
+
+    def test_login_with_org_account(self):
+        name = uname('acct')
+        self.connect(name).close()
+        store = self.server.store
+        with store._lock:
+            store._db.execute('UPDATE users SET account=? WHERE username=?', (f'ID{name}', name))
+            store._db.commit()
+        c, payload = self.join(f'id{name}'.lower(), 'acct-pass')      # 대소문자 무시
+        self.assertIn('처음 사용 등록', c.expect_error(payload)['message'])  # 비밀번호 등록 전
+        self.register(name, 'acct-pass', company='KCS 커머스')          # 게스트 → 고른 회사로
+        me = c.request(payload, 'welcome')['me']
+        self.assertEqual((me['username'], me['company']), (name, 'KCS 커머스'))
+
+    def test_remember_token_login_and_revoke(self):
+        name = uname('tok')
+        _c, w = self.register(name, 'tok-pass', remember=True)
+        token = w['login_token']
+        self.assertGreaterEqual(len(token), 40)
+        self.assertNotIn(token, json.dumps(w['me']))
+        t, _ = self.join(name)
+        self.assertEqual(t.request({'type': 'join', 'username': name, 'token': token}, 'welcome')['me']['username'], name)
+        other, _ = self.join(uname('tok'))
+        err = other.expect_error({'type': 'join', 'username': uname('tok'), 'token': token})   # 다른 아이디
+        self.assertIn('만료', err['message'])
+        t.request({'type': 'login_token_revoke', 'token': token}, 'login_token_revoked')
+        again, _ = self.join(name)
+        again.expect_error({'type': 'join', 'username': name, 'token': token})
+        # 비밀번호 없이 remember 만으로는 토큰이 나오지 않는다
+        legacy = self.connect(uname('nopw'), join=False)
+        w = legacy.request({'type': 'join', 'username': legacy.username, 'remember': True}, 'welcome')
+        self.assertNotIn('login_token', w)
+
+    def test_login_tokens_expire_and_are_capped(self):
+        from datetime import datetime, timedelta
+        name = uname('tok')
+        self.connect(name).close()
+        store = self.server.store
+        tokens = [store.issue_login_token(name) for _ in range(store.LOGIN_TOKENS_PER_USER + 2)]
+        self.assertFalse(store.check_login_token(name, tokens[0]))             # 오래된 것부터 정리
+        self.assertTrue(store.check_login_token(name, tokens[-1]))
+        old = (datetime.now() - timedelta(days=store.LOGIN_TOKEN_DAYS + 1)).strftime('%Y-%m-%dT%H:%M:%S')
+        with store._lock:
+            store._db.execute('UPDATE login_tokens SET created_at=? WHERE token_hash=?',
+                              (old, store._token_hash(tokens[-1])))
+            store._db.commit()
+        self.assertFalse(store.check_login_token(name, tokens[-1]))
+
+    def test_join_with_password_needs_registration_first(self):
+        c, payload = self.join(uname('new'), 'some-pass')
+        err = c.expect_error(payload)
+        self.assertEqual(err['req_type'], 'join')
+        self.assertIn('처음 사용 등록', err['message'])
+        c.assert_no('welcome')
+        self.assertFalse(self.server._login_failures.get(f"id:{payload['username'].lower()}"))  # 실패로 세지 않음
+
+    def test_org_companies_before_login(self):
+        c = self.connect(join=False)
+        companies = c.request({'type': 'org_companies'}, 'org_companies')['companies']
+        self.assertTrue({'KCS 홀딩스', 'KCS 물류', 'KCS 커머스'} <= set(companies))
+        self.assertNotIn('게스트', companies)
+        self.assertNotIn('KCS AI', companies)                            # 봇 소속은 빼기
+        c.request({'type': 'join', 'username': c.username}, 'welcome')   # 같은 연결로 이어서 로그인
+
+    def test_register_validation(self):
+        c = self.connect(uname('reg'), join=False)
+        base = {'type': 'register', 'company': 'KCS 물류', 'name': c.username,
+                'employee_no': f'V{uuid.uuid4().hex[:8]}', 'email': f'{c.username}@kcs.test', 'password': 'pw-1234'}
+        for change, message in (({'company': ''}, '소속 회사를 선택해 주세요.'),
+                                ({'company': '없는회사'}, '소속 회사를 선택해 주세요.'),
+                                ({'company': '게스트'}, '소속 회사를 선택해 주세요.'),
+                                ({'email': 'no-at-sign'}, '이메일 주소 형식이 올바르지 않습니다.'),
+                                ({'password': '12'}, '4~64자'),
+                                ({'name': 'a@b'}, '사용할 수 없는 문자'),
+                                ({'name': BOT}, '봇'),
+                                ({'employee_no': ''}, '사번을 입력해 주세요.'),
+                                ({'employee_no': '12 34'}, '사번은 영문·숫자'),
+                                ({'employee_no': 'x' * 21}, '사번은 영문·숫자')):
+            err = c.expect_error({**base, **change})
+            self.assertEqual(err['req_type'], 'register')
+            self.assertIn(message, err['message'])
+        self.assertIsNone(self.server.store.resolve_login(c.username))  # 아무것도 만들지 않았다
+        c.request(base, 'welcome')
+        # 같은 이름 / 같은 이메일로 다시 등록할 수 없다
+        again = self.connect(c.username, join=False)
+        self.assertIn('이미 등록된 이름', again.expect_error(base)['message'])
+        other = self.connect(uname('reg'), join=False)
+        err = other.expect_error({**base, 'name': other.username, 'employee_no': f'W{uuid.uuid4().hex[:8]}',
+                                  'email': f'{c.username}@KCS.test'})
+        self.assertEqual(err['message'], '이미 가입된 이메일입니다.')
+
+    def test_register_existing_org_member_keeps_company(self):
+        member = '정하늘'                                               # 시드: KCS 커머스 개발팀
+        store = self.server.store
+        if store.password_hash(member):
+            store.clear_password(member)
+        c = self.connect(uname('reg'), join=False)
+        err = c.expect_error({'type': 'register', 'company': 'KCS 물류', 'name': member, 'employee_no': 'S20260001',
+                              'email': 'sky@kcs.test', 'password': 'pw-1234'})
+        self.assertIn('선택한 소속에 같은 이름의 구성원이 없습니다', err['message'])
+        w = c.request({'type': 'register', 'company': 'KCS 커머스', 'name': member, 'employee_no': 'S20260001',
+                       'email': 'sky@kcs.test', 'password': 'pw-1234'}, 'welcome')
+        self.assertEqual((w['me']['company'], w['me']['department']), ('KCS 커머스', '개발팀'))
+        self.assertEqual(w['me']['employee_no'], 'S20260001')          # 시드 계정에도 사번 등록
+        self.assertEqual(store.resolve_login('s20260001'), member)
+        store.clear_password(member)
+
+    def test_password_reset_with_registered_email(self):
+        name = uname('rst')
+        _c, w = self.register(name, 'old-pass', email=f'{name}@kcs.test', remember=True)
+        token = w['login_token']
+        c = self.connect(join=False)
+        base = {'type': 'password_reset', 'username': name, 'email': f'{name}@KCS.test', 'new_password': 'new-pass'}
+        ok = c.request(base, 'password_reset_ok')                             # 이메일은 대소문자 무시
+        self.assertEqual(ok['username'], name)
+        c.assert_no('welcome')                                                # 재설정은 로그인하지 않는다
+        store = self.server.store
+        self.assertTrue(store.check_password('new-pass', store.password_hash(name)))
+        self.assertFalse(store.check_login_token(name, token))                # 자동 로그인 토큰 폐기
+        login, payload = self.join(name, 'new-pass')
+        self.assertEqual(login.request(payload, 'welcome')['me']['username'], name)
+        # 이메일·아이디가 틀리면 같은 문구 (계정이 있는지 드러내지 않는다) + 실패 횟수에 센다
+        for bad in ({'email': 'other@kcs.test'}, {'username': uname('없는')}):
+            err = c.expect_error({**base, **bad})
+            self.assertEqual((err['req_type'], err['message']), ('password_reset', '아이디 또는 가입한 이메일이 일치하지 않습니다.'))
+        self.assertTrue(store.check_password('new-pass', store.password_hash(name)))   # 그대로
+        self.assertTrue(self.server._login_failures.get(f'id:{name.lower()}'))
+        self.assertIn('4~64자', c.expect_error({**base, 'new_password': '12'})['message'])
+
+    def test_password_reset_throttled_and_needs_registration(self):
+        name = uname('rst')
+        self.register(name, 'old-pass', email=f'{name}@kcs.test')
+        c = self.connect(join=False)
+        base = {'type': 'password_reset', 'username': name, 'email': 'wrong@kcs.test', 'new_password': 'new-pass'}
+        for _ in range(self.server.LOGIN_MAX_FAILURES['id']):
+            c.expect_error(base)
+        err = c.expect_error({**base, 'email': f'{name}@kcs.test'})
+        self.assertIn('너무 많습니다', err['message'])                           # 맞는 이메일도 잠시 막힘
+        self.server._login_failures.clear()
+        guest = self.connect(uname('nopw'))                                   # 비밀번호를 등록한 적 없는 계정
+        err = c.expect_error({**base, 'username': guest.username})
+        self.assertIn('처음 사용 등록', err['message'])
+
+    def test_password_length_and_bot(self):
+        c, payload = self.join(uname('pw'), '12')
+        self.assertIn('4~64자', c.expect_error(payload)['message'])
+        c.expect_error({'type': 'join', 'username': uname('pw'), 'password': 1234})
+        c.expect_error({'type': 'join', 'username': BOT, 'password': 'abcd'})
 
 
 class TestMessaging(ServerTestBase):
@@ -816,6 +1039,24 @@ class TestPresenceAvatar(ServerTestBase):
         a.send({'type': 'profile_update', 'avatar_clear': True})
         u = stranger.wait_for('user_updated', lambda m: m['user']['username'] == a.username)['user']
         self.assertIsNone(u['avatar_id'])
+
+    def test_avatar_clear_restores_org_photo(self):
+        """[기본 이미지] = 조직도 엑셀 사진(org_avatar_id). 없으면 사진 없음 (명세 §7.2)"""
+        a, stranger = self.connect(), self.connect()
+        org_id = self.server.store.save_attachment('avatar.png', 'image/png', PNG_1PX, a.username)
+        self.server.store.set_org_avatar(a.username, org_id)
+        a.send({'type': 'profile_update', 'avatar_b64': base64.b64encode(PNG_1PX).decode()})
+        u = stranger.wait_for('user_updated', lambda m: m['user']['username'] == a.username)['user']
+        self.assertNotEqual(u['avatar_id'], org_id)
+        a.send({'type': 'profile_update', 'avatar_clear': True})
+        u = stranger.wait_for('user_updated', lambda m: m['user']['username'] == a.username
+                              and m['user']['avatar_id'] == org_id)['user']
+        got = stranger.request({'type': 'attachment_get', 'attachment_id': u['avatar_id']}, 'attachment_data')
+        self.assertEqual(base64.b64decode(got['data_b64']), PNG_1PX)
+        a.send({'type': 'multi_profile_set', 'profiles': [{'name': '회사', 'display_name': '회사',
+                                                            'avatar_clear': True, 'viewers': []}]})
+        profiles = a.wait_for('multi_profile_list')['profiles']
+        self.assertEqual(profiles[0]['avatar_id'], org_id)
 
 
 class TestRagBot(ServerTestBase):

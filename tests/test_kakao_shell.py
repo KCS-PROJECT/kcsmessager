@@ -7,17 +7,19 @@
 
 import base64
 import importlib.util
+import json
 import os
 import tempfile
 import unittest
+
 from datetime import datetime, timedelta
 from unittest import mock
 
 from tests.kakao_fakes import make_demo_state, app
 
-from PyQt5.QtCore import Qt, QEvent
+from PyQt5.QtCore import Qt, QEvent, QPoint
 from PyQt5.QtGui import QImage, QColor
-from PyQt5.QtWidgets import QMessageBox, QApplication
+from PyQt5.QtWidgets import QMessageBox, QApplication, QLineEdit
 
 from client.kakao import theme
 from client.kakao.main_window import MainWindow, IdleWatcher, apply_app_theme
@@ -217,7 +219,7 @@ class IdleTests(ShellTestBase):
     def test_presence_menu_sends(self):
         menu = presence_menu(self.state)
         labels = [a.text() for a in menu.actions()]
-        self.assertEqual(labels, ['온라인', '자리비움', '다른 용무 중', '회의 중'])
+        self.assertEqual(labels, ['온라인', '자리비움', '다른 용무 중', '회의 중', '휴가 중'])
         menu.actions()[2].trigger()
         self.assertEqual(self.conn.last('presence_set'), {'presence': 'busy'})
 
@@ -416,7 +418,7 @@ class ChatsTabTests(ShellTestBase):
         menu = self.tab.context_menu_for('r2')
         texts = [a.text() for a in menu.actions() if a.text()]
         self.assertEqual(texts, ['채팅방 열기', '읽지 않고 미리보기', '채팅방 상단 고정', '채팅방 알림 끄기',
-                                 '폴더에 추가', '대화상대 초대…', '나가기'])
+                                 '폴더에 추가', '대화상대 초대…', '대화 내용 저장…', '나가기'])
         next(a for a in menu.actions() if a.text() == '채팅방 상단 고정').trigger()
         self.assertTrue(self.state.is_pinned('r2'))
         next(a for a in menu.actions() if a.text() == '채팅방 알림 끄기').trigger()
@@ -718,8 +720,11 @@ class DialogTests(ShellTestBase):
     def test_login_dialog_values(self):
         dlg = LoginDialog('10.0.0.1', 6000)
         self.assertFalse(dlg.login_button.isEnabled())
-        dlg.preset_buttons[2].click()
-        self.assertEqual(dlg.name_edit.text(), '이영희')
+        self.assertFalse(hasattr(dlg, 'preset_buttons'))         # 최근 로그인 칩 영역 없음
+        dlg.name_edit.setText('이영희')
+        self.assertFalse(dlg.login_button.isEnabled())          # 비밀번호가 있어야 로그인
+        self.assertEqual(dlg.password_edit.echoMode(), QLineEdit.Password)
+        dlg.password_edit.setText('pw1234')
         self.assertTrue(dlg.login_button.isEnabled())
         self.assertFalse(dlg.server_box.isVisibleTo(dlg))
         dlg.server_toggle.click()
@@ -727,9 +732,256 @@ class DialogTests(ShellTestBase):
         dlg.host_edit.setText('192.168.0.5')
         dlg.port_edit.setText('5556')
         self.assertEqual(dlg.values(), ('이영희', '192.168.0.5', 5556))
+        self.assertEqual(dlg.password(), 'pw1234')
         self.assertEqual(dlg.windowTitle(), 'KCS Talk 로그인')
         dlg.accept()
         self.assertEqual(dlg.result(), LoginDialog.Accepted)
+
+    def test_login_dialog_rejects_short_password(self):
+        dlg = LoginDialog()
+        dlg.name_edit.setText('kmkim')
+        dlg.password_edit.setText('12')
+        dlg.accept()
+        self.assertNotEqual(dlg.result(), LoginDialog.Accepted)
+        self.assertIn('비밀번호', dlg.error_label.text())
+
+    def test_login_dialog_password_reveal_toggle(self):
+        dlg = LoginDialog()
+        dlg.password_edit.setText('pw1234')
+        self.assertEqual(dlg.password_edit.echoMode(), QLineEdit.Password)   # 기본은 가림
+        self.assertEqual(dlg.reveal_action.toolTip(), '비밀번호 보기')
+        self.assertFalse(dlg.reveal_action.icon().isNull())
+        dlg.reveal_action.trigger()
+        self.assertEqual(dlg.password_edit.echoMode(), QLineEdit.Normal)
+        self.assertEqual(dlg.reveal_action.toolTip(), '비밀번호 숨기기')
+        self.assertEqual(dlg.password(), 'pw1234')                          # 값은 그대로
+        dlg.reveal_action.trigger()
+        self.assertEqual(dlg.password_edit.echoMode(), QLineEdit.Password)
+
+    def test_login_dialog_first_use_registration(self):
+        from client.kakao import login
+        with mock.patch.object(login, 'fetch_companies', return_value=['KCS 홀딩스', 'KCS 물류']) as fetch:
+            dlg = LoginDialog('10.0.0.9', 6000)
+            self.assertFalse(dlg.is_register())
+            self.assertIsNone(dlg.registration())
+            dlg.mode_toggle.click()
+            self.assertTrue(dlg.is_register())
+            fetch.assert_called_once_with('10.0.0.9', 6000)
+            self.assertTrue(dlg.register_form.isVisibleTo(dlg) and not dlg.login_form.isVisibleTo(dlg))
+            self.assertEqual([dlg.company_combo.itemText(i) for i in range(dlg.company_combo.count())],
+                             ['소속 회사 선택', 'KCS 홀딩스', 'KCS 물류'])
+            dlg.reg_name_edit.setText('도승현')
+            dlg.reg_employee_edit.setText('20261009')
+            dlg.reg_email_edit.setText('do@kcs.test')
+            dlg.reg_password_edit.setText('pw1234')
+            self.assertFalse(dlg.login_button.isEnabled())               # 소속 회사는 반드시 선택
+            dlg.accept()
+            self.assertNotEqual(dlg.result(), LoginDialog.Accepted)
+            dlg.company_combo.setCurrentIndex(2)
+            self.assertTrue(dlg.login_button.isEnabled())
+            dlg.reg_employee_edit.clear()
+            self.assertFalse(dlg.login_button.isEnabled())               # 사번도 필수
+            dlg.reg_employee_edit.setText('2026 1009')
+            dlg.accept()
+            self.assertIn('사번은 영문·숫자', dlg.error_label.text())
+            dlg.reg_employee_edit.setText('20261009')
+            dlg.reg_email_edit.setText('not-an-email')
+            dlg.accept()
+            self.assertIn('이메일', dlg.error_label.text())
+            dlg.reg_email_edit.setText('do@kcs.test')
+            self.assertEqual(dlg.reg_password_edit.echoMode(), QLineEdit.Password)
+            dlg.reg_password_edit.reveal_action.trigger()                # 등록 화면 비밀번호도 눈 아이콘
+            self.assertEqual(dlg.reg_password_edit.echoMode(), QLineEdit.Normal)
+            dlg.accept()
+            self.assertEqual(dlg.result(), LoginDialog.Accepted)
+            self.assertEqual(dlg.registration(), {'company': 'KCS 물류', 'name': '도승현', 'employee_no': '20261009',
+                                                  'email': 'do@kcs.test', 'password': 'pw1234'})
+            self.assertEqual(dlg.values()[0], '20261009')                # 다음부터의 로그인 아이디 = 사번
+            self.assertEqual(dlg.saved_token(), '')
+            # 등록이 거절돼 다시 띄운 창은 입력값 그대로 등록 화면
+            again = LoginDialog('10.0.0.9', 6000, registration=dlg.registration())
+            self.assertTrue(again.is_register())
+            self.assertEqual(again.registration(), dlg.registration())
+
+    def test_company_list_opens_below_and_placeholder_not_pickable(self):
+        from client.kakao import login
+        with mock.patch.object(login, 'fetch_companies', return_value=['한국지주', '케이씨에스']):
+            dlg = LoginDialog(fresh=True)
+            dlg.show()
+            dlg.set_mode('register')
+            QApplication.processEvents()
+            combo = dlg.company_combo
+            self.assertFalse(combo.model().item(0).isEnabled())          # '소속 회사 선택' 은 고를 수 없음
+            self.assertTrue(combo.model().item(2).isEnabled())
+            combo.showPopup()
+            popup = combo.view().window()
+            self.assertTrue(combo.view().isVisible())
+            # 콤보 위에 겹치지 않는다 (겹치면 누른 채 떼는 순간 손 밑 항목이 골라져 바로 닫힌 것처럼 보였다)
+            combo_top, combo_bottom = combo.mapToGlobal(QPoint(0, 0)).y(), combo.mapToGlobal(QPoint(0, combo.height())).y()
+            self.assertTrue(popup.geometry().top() >= combo_bottom or popup.geometry().bottom() <= combo_top)
+            self.assertGreaterEqual(popup.width(), combo.width())
+            combo.hidePopup()
+            dlg.close()
+
+    def test_login_dialog_asks_for_employee_no(self):
+        dlg = LoginDialog(fresh=True)
+        self.assertEqual(dlg.name_edit.placeholderText(), '사번')
+        self.assertIn('사번', dlg.subtitle.text())
+        dlg.name_edit.setText('20261009')
+        self.assertFalse(dlg.login_button.isEnabled())                  # 비밀번호도 있어야
+        dlg.password_edit.setText('pw1234')
+        self.assertTrue(dlg.login_button.isEnabled())
+        dlg.accept()
+        self.assertEqual(dlg.result(), LoginDialog.Accepted)
+        self.assertEqual((dlg.values()[0], dlg.password(), dlg.registration()), ('20261009', 'pw1234', None))
+        from client.kakao import login
+        with mock.patch.object(login, 'fetch_companies', side_effect=OSError('down')):
+            new = LoginDialog(fresh=True)
+            new.name_edit.setText('K-2026')
+            new.show_error('처음 사용하는 아이디입니다. [처음 사용 등록]에서 소속 회사·이름·사번·이메일·비밀번호를 등록해 주세요.')
+        self.assertTrue(new.is_register())
+        self.assertEqual((new.reg_employee_edit.text(), new.reg_name_edit.text()), ('K-2026', ''))
+
+    def test_login_dialog_switches_to_registration_when_server_asks(self):
+        from client.kakao import login
+        with mock.patch.object(login, 'fetch_companies', side_effect=OSError('down')):
+            dlg = LoginDialog()
+            dlg.name_edit.setText('newbie@kcs.test')
+            dlg.show_error('처음 사용하는 아이디입니다. [처음 사용 등록]에서 소속 회사·이름·이메일·비밀번호를 등록해 주세요.')
+            self.assertTrue(dlg.is_register())
+            self.assertEqual(dlg.reg_email_edit.text(), 'newbie@kcs.test')
+            self.assertIn('처음 사용 등록', dlg.error_label.text())
+            dlg.accept()                                                # 회사 목록을 못 받으면 진행 불가
+            self.assertNotEqual(dlg.result(), LoginDialog.Accepted)
+            self.assertIn('소속 회사', dlg.error_label.text())
+
+    def test_logout_is_right_under_profile_and_asks_first(self):
+        from client.kakao.main_window import MainWindow
+        calls = []
+        win = MainWindow(self.state, self.state.settings, logout=lambda: calls.append(1))
+        more = win.tabs['more']
+        sections = [label.text() for label in more.section_labels]
+        self.assertEqual(sections[0], '계정')                                 # 탭 맨 위 (프로필 카드 바로 아래)
+        self.assertIn('로그아웃', more.logout_button.text())
+        from client.kakao.logout_dialog import LogoutDialog
+        with mock.patch.object(LogoutDialog, 'exec_', return_value=LogoutDialog.Rejected):
+            more.logout_button.click()
+        self.assertEqual(calls, [])                                           # 취소하면 그대로
+        with mock.patch.object(LogoutDialog, 'exec_', return_value=LogoutDialog.Accepted):
+            more.logout_button.click()
+            win.request_logout()                                              # 트레이 메뉴 '로그아웃…'
+        self.assertEqual(calls, [1, 1])
+        win.close()
+
+    def test_logout_dialog_says_what_changes_and_what_stays(self):
+        from client.kakao.logout_dialog import LogoutDialog, logout_effects
+        auto = {'login_id': 'hgd', 'token': 't', 'auto_login': True, 'host': '', 'port': 0}
+        self.assertIn('자동 로그인', logout_effects(auto)[0])
+        self.assertIn('저장된 로그인 정보가 지워', logout_effects(dict(auto, auto_login=False))[0])
+        self.assertIn('다시 입력', logout_effects(None)[0])
+        self.assertIn('서버에 그대로', logout_effects(None)[1])
+        dlg = LogoutDialog(self.state, auto)
+        self.assertEqual(dlg.title_label.text(), '로그아웃할까요?')
+        self.assertTrue(dlg.name_label.text().startswith(self.state.display_name(self.state.me)))
+        self.assertIn('hgd', dlg.org_label.text())                            # 어떤 아이디에서 나가는지
+        self.assertEqual((dlg.cancel_button.text(), dlg.logout_button.text()), ('취소', '로그아웃'))
+        self.assertTrue(dlg.logout_button.isDefault())                        # Enter = 로그아웃
+        dlg.cancel_button.click()
+        self.assertEqual(dlg.result(), LogoutDialog.Rejected)
+        dlg = LogoutDialog(self.state, None)
+        dlg.logout_button.click()
+        self.assertEqual(dlg.result(), LogoutDialog.Accepted)
+
+    def test_no_auto_login_shows_login_dialog_despite_saved_auto_login(self):
+        """런처는 --no-auto-login 으로 창을 연다: 저장된 자동 로그인(김명수)이 있어도 로그인 창 → 다른 사람으로"""
+        from client.kakao import app as kapp, login
+        saved = {'login_id': '김명수', 'token': 'tok', 'auto_login': True, 'host': '', 'port': 0}
+        shown, sessions, tokens = [], [], []
+
+        class FakeSession:
+            def __init__(self, *args, **kwargs):
+                sessions.append((args, kwargs))
+
+            def connect(self):
+                raise OSError('테스트: 연결 안 함')
+
+        with mock.patch.object(login, 'load_saved_login', return_value=saved), \
+                mock.patch.object(login.LoginDialog, 'exec_',
+                                  lambda dlg: shown.append(dlg.name_edit.text()) or tokens.append(dlg.saved_token()) or 0), \
+                mock.patch.object(kapp, 'Session', FakeSession), \
+                mock.patch.object(kapp, 'ask_connection_failure', return_value='quit'):
+            self.assertEqual(kapp.main(['--no-auto-login']), 0)
+            self.assertEqual(shown, [''])                # 처음 로그인 상태: 아이디도 비어 있다
+            self.assertEqual(tokens, [''])               # 저장된 비밀번호(토큰)로 [로그인]만 눌러 들어가지 않는다
+            self.assertEqual(sessions, [])               # 저장된 토큰으로 바로 접속하지 않았다
+            self.assertEqual(kapp.main([]), 1)            # 옵션이 없으면 예전처럼 자동 로그인 시도
+            self.assertEqual(sessions[0][1].get('token'), 'tok')
+            self.assertEqual(shown, [''])
+
+    def test_fresh_login_dialog_needs_id_and_password(self):
+        """런처로 연 로그인 창: 최근 아이디·저장된 로그인이 있어도 비어 있고, 아이디·비밀번호를 넣어야 [로그인]이 켜진다"""
+        from client.kakao import login
+        saved = {'login_id': '김명수', 'token': 'tok', 'auto_login': True, 'host': '', 'port': 0}
+        with mock.patch.object(login, 'load_saved_login', return_value=saved), \
+                mock.patch.object(login, 'load_recent', return_value=['김명수', '도승현']):
+            dlg = login.LoginDialog(fresh=True)
+            self.assertEqual((dlg.name_edit.text(), dlg.password_edit.text()), ('', ''))
+            self.assertFalse(dlg.remember_check.isChecked() or dlg.auto_check.isChecked())
+            self.assertEqual(dlg.password_edit.placeholderText(), '비밀번호')     # '저장된 비밀번호' 아님
+            self.assertFalse(dlg.login_button.isEnabled())
+            dlg.name_edit.setText('김명수')
+            self.assertFalse(dlg.login_button.isEnabled())                      # 저장된 토큰으로 대신하지 않는다
+            self.assertEqual(dlg.saved_token(), '')
+            dlg.password_edit.setText('pw1234')
+            self.assertTrue(dlg.login_button.isEnabled())
+            self.assertEqual(login.LoginDialog().name_edit.text(), '김명수')      # 일반 실행은 예전처럼 채움
+
+    def test_login_dialog_password_reset_screen(self):
+        from client.kakao import login, net
+        with mock.patch.object(login, 'reset_password', return_value='김명수') as reset:
+            dlg = login.LoginDialog('10.0.0.9', 6000, fresh=True)
+            dlg.name_edit.setText('kms')
+            self.assertTrue(dlg.reset_link.isVisibleTo(dlg))
+            dlg.reset_link.click()
+            self.assertTrue(dlg.is_reset())
+            self.assertEqual(dlg.reset_id_edit.text(), 'kms')                     # 로그인 화면의 아이디를 옮김
+            self.assertFalse(dlg.options_box.isVisibleTo(dlg) or dlg.reset_link.isVisibleTo(dlg))
+            self.assertEqual(dlg.login_button.text(), '비밀번호 바꾸기')
+            self.assertFalse(dlg.login_button.isEnabled())
+            dlg.reset_email_edit.setText('not-email')
+            dlg.reset_password_edit.setText('new-pw')
+            dlg.accept()
+            self.assertIn('이메일', dlg.error_label.text())
+            reset.assert_not_called()
+            dlg.reset_email_edit.setText('kms@kcs.test')
+            self.assertEqual(dlg.reset_password_edit.echoMode(), QLineEdit.Password)   # 눈 아이콘 있는 칸
+            dlg.accept()
+            reset.assert_called_once_with('10.0.0.9', 6000, 'kms', 'kms@kcs.test', 'new-pw')
+            self.assertEqual(dlg._mode, 'login')                                  # 로그인 화면으로 돌아옴
+            self.assertEqual((dlg.name_edit.text(), dlg.password_edit.text()), ('kms', ''))
+            self.assertEqual(dlg.error_label.property('tone'), 'notice')
+            self.assertIn('비밀번호를 바꿨습니다', dlg.error_label.text())
+            self.assertNotEqual(dlg.result(), login.LoginDialog.Accepted)           # 창은 닫히지 않는다
+        with mock.patch.object(login, 'reset_password', side_effect=net.ResetRejected('아이디 또는 가입한 이메일이 일치하지 않습니다.')):
+            dlg.set_mode('reset')
+            dlg.reset_email_edit.setText('x@kcs.test')
+            dlg.reset_password_edit.setText('new-pw')
+            dlg.accept()
+            self.assertTrue(dlg.is_reset())
+            self.assertEqual(dlg.error_label.property('tone'), 'error')
+            self.assertIn('일치하지 않습니다', dlg.error_label.text())
+            dlg.mode_toggle.click()                                               # 로그인 화면으로 돌아가기
+            self.assertEqual(dlg._mode, 'login')
+
+    def test_launcher_opens_clients_without_auto_login(self):
+        import subprocess
+        from client.launcher import chat_launcher
+        launcher = chat_launcher.ChatLauncher()
+        with mock.patch.object(subprocess, 'Popen') as popen:
+            launcher.open_client()
+        self.assertIn('--no-auto-login', popen.call_args[0][0])
+        launcher.client_processes.clear()
+        launcher.close()
 
     def test_login_dialog_fits_content(self):
         dlg = LoginDialog()
@@ -769,7 +1021,7 @@ class OrgAndMoreTests(ShellTestBase):
     def test_org_tree(self):
         add_org(self.state, self.conn)
         tab = OrgTab(self.state, self.settings)
-        self.assertEqual(tab.companies()[0], 'KCS 홀딩스')
+        self.assertEqual(tab.companies()[:2], ['KCS AI', 'KCS 홀딩스'])        # 지식봇이 맨 위
         self.assertEqual(set(tab.companies()), {'KCS 홀딩스', 'KCS 물류', 'KCS 커머스', 'KCS AI'})
         self.assertEqual(tab.members_of('KCS 홀딩스', '경영지원팀'), ['홍길동', '김철수'])
         self.assertEqual(tab.members_of('KCS 물류'), ['이영희', '박민수'])
@@ -809,19 +1061,144 @@ class OrgAndMoreTests(ShellTestBase):
         ex.assert_called_once()
 
 
-class RecentLoginTests(unittest.TestCase):
-    def test_recent_logins_replace_presets(self):
+class UnreadBlinkTests(ShellTestBase):
+    """안 읽은 메시지가 있는 동안 앱 아이콘(트레이·Dock) 깜박임"""
+
+    def set_unread(self, win, counts):
+        for rid, room in self.state.rooms.items():
+            room['unread_count'] = counts.get(rid, 0)
+        self.state.rooms_changed.emit()
+
+    def test_blinks_while_unread_and_stops_when_read(self):
+        win = self.make_window()
+        rid = next(iter(self.state.rooms))
+        self.set_unread(win, {})
+        self.assertFalse(win.blinker.blinking)
+        self.assertTrue(win.blinker.lit)
+        self.set_unread(win, {rid: 3})
+        self.assertTrue(win.blinker.blinking)
+        self.assertFalse(win.blinker.lit)                       # 바로 '꺼짐'(흐린 아이콘) 프레임
+        frames = set()
+        for _ in range(4):
+            win.blinker._tick()
+            frames.add(win.blinker.lit)
+        self.assertEqual(frames, {True, False})                 # 켜짐/꺼짐을 번갈아
+        self.set_unread(win, {rid: 1})                          # 아직 남아 있으면 계속
+        self.assertTrue(win.blinker.blinking)
+        self.set_unread(win, {})                                # 다 읽음 → 멈추고 평소 아이콘
+        self.assertFalse(win.blinker.blinking)
+        self.assertTrue(win.blinker.lit)
+
+    def test_muted_rooms_and_setting_off_do_not_blink(self):
+        win = self.make_window()
+        rid = next(iter(self.state.rooms))
+        self.settings.set('muted_rooms', [rid])
+        self.set_unread(win, {rid: 5})
+        self.assertFalse(win.blinker.blinking)                  # 알림 끈 방은 제외
+        self.settings.set('muted_rooms', [])
+        self.assertTrue(win.blinker.blinking)
+        self.settings.set('blink_unread', False)
+        self.assertFalse(win.blinker.blinking)
+        self.assertTrue(win.blinker.lit)
+        self.settings.set('blink_unread', True)
+        self.assertTrue(win.blinker.blinking)
+
+    def test_reduce_motion_shows_steady_alert_icon(self):
+        win = self.make_window()
+        self.settings.set('reduce_motion', True)
+        self.set_unread(win, {next(iter(self.state.rooms)): 2})
+        self.assertFalse(win.blinker.blinking)
+        self.assertTrue(win.blinker.alerting and not win.blinker.lit)
+        self.settings.set('reduce_motion', False)
+        self.assertTrue(win.blinker.blinking)
+
+    def test_whole_icon_blinks_without_red_dot(self):
+        """빨간 점을 덧그리지 않고 아이콘 전체가 흐려졌다 돌아온다"""
+        from client.kakao.main_window import faded_icon, UnreadBlinker
+        from client.kakao.login import talk_icon_pixmap
+        normal = talk_icon_pixmap(64).toImage()
+        off = faded_icon(UnreadBlinker.OFF_OPACITY, (64,)).pixmap(64, 64).toImage()
+        for x, y in ((32, 32), (52, 12), (12, 52)):                 # 가운데 · 오른쪽 위(예전 빨간 점 자리) · 왼쪽 아래
+            a, b = normal.pixelColor(x, y), off.pixelColor(x, y)
+            self.assertLessEqual(b.alpha(), a.alpha() * UnreadBlinker.OFF_OPACITY + 2)   # 전체가 흐려짐
+            self.assertFalse(b.red() > 150 and b.green() < 100 and b.blue() < 100)     # 빨간 점 없음
+        win = self.make_window()
+        self.set_unread(win, {next(iter(self.state.rooms)): 1})
+        self.assertEqual(win.windowIcon().cacheKey(), win.blinker.off_icon.cacheKey())
+        win.blinker._tick()
+        self.assertEqual(win.windowIcon().cacheKey(), win.blinker.normal_icon.cacheKey())
+
+    def test_more_tab_toggle(self):
+        tab = MoreTab(self.state, self.settings)
+        self.assertTrue(tab.blink_toggle.isChecked())
+        tab.blink_toggle.setChecked(False)
+        self.assertFalse(self.settings.get('blink_unread'))
+
+
+class RecentIdLoginTests(unittest.TestCase):
+    def setUp(self):
+        app()
+
+    def test_last_login_id_prefilled(self):
         from client.kakao import login
         path = os.path.join(tempfile.mkdtemp(), 'recent.json')
         with mock.patch.object(login, 'RECENT_PATH', path):
             dlg = login.LoginDialog()
-            self.assertEqual([b.text() for b in dlg.preset_buttons], login.PRESET_USERS)
-            dlg.name_edit.setText('도승현')
-            dlg.accept()
-            login.save_recent('엄태식')
+            self.assertEqual(dlg.name_edit.text(), '')
+            login.save_recent('도승현')          # 로그인에 성공한 뒤에만 저장된다 (app.remember_login)
             dlg2 = login.LoginDialog()
-            self.assertEqual([b.text() for b in dlg2.preset_buttons][:2], ['엄태식', '도승현'])
-            self.assertEqual(dlg2.name_edit.text(), '엄태식')
+            self.assertEqual(dlg2.name_edit.text(), '도승현')          # 마지막 아이디만 채움
+            self.assertEqual(dlg2.password_edit.text(), '')
+            dlg3 = login.LoginDialog(username='kmkim')
+            self.assertEqual(dlg3.name_edit.text(), 'kmkim')
+
+
+class SavedLoginDialogTests(unittest.TestCase):
+    """사번·비밀번호 저장 / 자동 로그인 체크 (명세 §4.1)"""
+    def setUp(self):
+        app()
+
+
+    def test_saved_token_used_when_password_left_empty(self):
+        from client.kakao import login
+        d = tempfile.mkdtemp()
+        with mock.patch.object(login, 'RECENT_PATH', os.path.join(d, 'r.json')), \
+                mock.patch.object(login, 'SAVED_PATH', os.path.join(d, 's.json')):
+            dlg = login.LoginDialog()
+            self.assertFalse(dlg.remember_check.isChecked() or dlg.auto_check.isChecked())
+            dlg.auto_check.setChecked(True)
+            self.assertTrue(dlg.remember_check.isChecked())          # 자동 로그인 → 저장도 켬
+            dlg.remember_check.setChecked(False)
+            self.assertFalse(dlg.auto_check.isChecked())             # 저장 끄면 자동 로그인도 끔
+            login.save_saved_login('kmkim', 'tok123', False, '10.0.0.2', 6000)
+            dlg = login.LoginDialog()
+            self.assertEqual(dlg.name_edit.text(), 'kmkim')
+            self.assertTrue(dlg.remember_check.isChecked())
+            self.assertFalse(dlg.auto_check.isChecked())
+            self.assertTrue(dlg.login_button.isEnabled())            # 비밀번호 칸이 비어도 저장된 정보로
+            self.assertEqual(dlg.saved_token(), 'tok123')
+            self.assertIn('저장된', dlg.password_edit.placeholderText())
+            dlg.accept()
+            self.assertEqual(dlg.result(), login.LoginDialog.Accepted)
+            dlg = login.LoginDialog()
+            dlg.password_edit.setText('newpass')
+            self.assertEqual(dlg.saved_token(), '')                  # 새 비밀번호를 치면 그걸 쓴다
+            dlg.name_edit.setText('other')
+            dlg.password_edit.clear()
+            self.assertEqual(dlg.saved_token(), '')
+            self.assertFalse(dlg.login_button.isEnabled())
+            login.clear_saved_login()
+            self.assertIsNone(login.load_saved_login())
+
+    def test_broken_saved_file_ignored(self):
+        from client.kakao import login
+        path = os.path.join(tempfile.mkdtemp(), 's.json')
+        with open(path, 'w') as f:
+            f.write('[1,2')
+        self.assertIsNone(login.load_saved_login(path))
+        with open(path, 'w') as f:
+            json.dump({'login_id': 'a', 'token': 5}, f)
+        self.assertIsNone(login.load_saved_login(path))
 
 
 class OrgHierarchyTests(ShellTestBase):
@@ -845,9 +1222,9 @@ class OrgHierarchyTests(ShellTestBase):
     def test_holding_then_affiliates_in_order(self):
         tab = OrgTab(self.state, self.settings)
         data = rows(tab.list)
-        self.assertEqual(data[0], ('holding', '한국지주'))
+        self.assertEqual(data[:2], [('section', '그룹사'), ('company', '한국지주')])
         companies = [d[1] for d in data if d[0] == 'company']
-        self.assertEqual(companies[:3], ['한네트', '케이씨티', '케이씨에스'])
+        self.assertEqual(companies[:4], ['한국지주', '한네트', '케이씨티', '케이씨에스'])
         self.assertIn('지주회사', tab.header.subtitle.text() + '지주회사')
 
     def test_multilevel_units_and_concurrent(self):
@@ -874,7 +1251,11 @@ class OrgHierarchyTests(ShellTestBase):
             sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'scripts'))
             mod = importlib.import_module('import_org_xlsx')
         names = [a['name'] for a in mod.AFFILIATES]
-        self.assertEqual(names, ['한국컴퓨터', '한네트', '로지시스', '케이씨티', '케이씨에스'])
+        # 한국지주 사업보고서(DART) 계열회사 현황 13곳: 상장 5 → 비상장 국내 6 → 해외 현지법인 2
+        self.assertEqual(names, ['한국컴퓨터', '한네트', '로지시스', '케이씨티', '케이씨에스',
+                                 '한국문학사', '한국상역개발', '상화원', '제주상화원', '한상개발', '상화공익',
+                                 'KCI VINA', 'Pacom International'])
+        self.assertTrue(all(a.get('business') for a in mod.AFFILIATES))
         self.assertEqual(mod.HOLDING['name'], '한국지주')
         kct = mod.AFFILIATES[names.index('케이씨티')]
         self.state.org['companies'] = [kct if c['name'] == '케이씨티' else c for c in self.state.org['companies']]
@@ -882,6 +1263,7 @@ class OrgHierarchyTests(ShellTestBase):
         item = tab.list.find_data(('company', '케이씨티'))
         tip = tab.list.itemWidget(item).toolTip()
         self.assertIn('금융자동화 시스템 공급 사업', tip)
+        self.assertIn('02-6377-5622', tip)                                    # DART 대표전화
         self.assertIn('www.kctinc.co.kr', tip)
 
     def test_empty_affiliate_collapsed_then_expandable(self):

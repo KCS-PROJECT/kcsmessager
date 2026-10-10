@@ -19,6 +19,7 @@ from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QTabWidg
                              QStackedWidget)
 
 from client.kakao import theme
+from client.kakao import osenv
 from client.kakao.state import parse_dt, URL_RE
 from client.kakao.widgets import make_icon
 
@@ -307,7 +308,7 @@ class TalkDrawerDialog(QDialog):
             self.status_label.setText('보관 기간이 지난 파일입니다.')
             return False
         if path is None:
-            default = os.path.join(os.path.expanduser('~/Downloads'), att.get('name') or 'file')
+            default = os.path.join(osenv.user_dir('downloads'), osenv.safe_filename(att.get('name')))
             path, _ = QFileDialog.getSaveFileName(self, '파일 저장', default)
             if not path:
                 return False
@@ -331,7 +332,7 @@ class TalkDrawerDialog(QDialog):
         self.status_label.setText(f'저장했습니다: {os.path.basename(path)}')
 
     def open_link(self, url):
-        QDesktopServices.openUrl(QUrl(url))
+        osenv.open_url(url)
 
     def _find_main_window(self):
         if self.main_window is not None:

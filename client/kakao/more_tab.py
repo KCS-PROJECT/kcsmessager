@@ -4,7 +4,7 @@
 멀티프로필, 친구 관리(숨김·차단), 키워드 알림, 말풍선 꾸미기, 잠금모드, 기능 둘러보기, 정보
 """
 
-from PyQt5.QtCore import Qt, QSize, QRectF, pyqtProperty, QPropertyAnimation, QEasingCurve
+from PyQt5.QtCore import Qt, QSize, QRectF, pyqtProperty, QPropertyAnimation, QEasingCurve, pyqtSignal
 from PyQt5.QtGui import QPainter, QColor
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox,
                              QScrollArea, QFrame, QAbstractButton, QDialog, QListWidget,
@@ -230,6 +230,8 @@ class RagDocsDialog(QDialog):
 
 # ================================================================ 더보기 탭
 class MoreTab(QWidget):
+    logout_requested = pyqtSignal()
+
     def __init__(self, state, settings, server_address='', parent=None):
         super().__init__(parent)
         self.state = state
@@ -257,14 +259,15 @@ class MoreTab(QWidget):
         self.card = QFrame()
         self.card.setObjectName('profileCard')
         card_row = QHBoxLayout(self.card)
-        card_row.setContentsMargins(16, 14, 16, 14)
-        card_row.setSpacing(14)
-        self.avatar = Avatar(size=64)
+        card_row.setContentsMargins(16, 12, 16, 12)
+        card_row.setSpacing(12)
+        # 친구 탭 내 프로필과 같은 사진 크기 (예전 64px 은 이 화면에서만 커 보였다, 2026-10-10)
+        self.avatar = Avatar(size=theme.px(theme.AVATAR_ROW))
         card_row.addWidget(self.avatar, 0, Qt.AlignVCenter)
         info = QVBoxLayout()
         info.setSpacing(3)
         info.addStretch(1)
-        self.name_label = ElidedLabel('', 'lead', 'text', bold=True)
+        self.name_label = ElidedLabel('', 'emphasis', 'text', bold=True)
         self.status_label = ElidedLabel('', 'meta', 'text_sub')
         self.org_label = ElidedLabel('', 'meta', 'text_hint')
         info.addWidget(self.name_label)
@@ -280,8 +283,18 @@ class MoreTab(QWidget):
         card_wrap.addWidget(self.card)
         col.addLayout(card_wrap)
 
-        # ---- 설정 ----
+        # ---- 계정: 탭을 열자마자 보이도록 프로필 카드 바로 아래 ----
         self.section_labels = []
+        col.addWidget(self._section('계정'))
+        self.logout_button = ChevronButton('로그아웃')
+        self.logout_button.setToolTip('로그아웃하고 로그인 화면으로 돌아갑니다')
+        col.addWidget(SettingRow('현재 계정', self.logout_button, '로그아웃하면 저장된 로그인·자동 로그인도 해제'))
+        self.admin_button = ChevronButton('계정 관리')
+        self.admin_button.setToolTip('관리자: 계정 비밀번호 재설정 · 사용 중지 · 관리자 지정 · 전체 공지')
+        self.admin_row = SettingRow('관리자', self.admin_button, '계정 관리 · 전체 공지 (관리자에게만 보입니다)')
+        col.addWidget(self.admin_row)
+
+        # ---- 설정 ----
         col.addWidget(self._section('상태 · 화면'))
         self.presence_button = PresenceButton(state)
         col.addWidget(SettingRow('내 상태', self.presence_button, '10분간 입력이 없으면 자리비움으로 바뀝니다'))
@@ -297,13 +310,13 @@ class MoreTab(QWidget):
         col.addWidget(self._section('알림 · 채팅'))
         self.notify_toggle = ToggleSwitch(bool(settings.get('notifications')))
         col.addWidget(SettingRow('새 메시지 알림', self.notify_toggle, '데스크톱 알림 표시'))
+        self.blink_toggle = ToggleSwitch(bool(settings.get('blink_unread')))
+        col.addWidget(SettingRow('안 읽은 메시지 아이콘 깜박임', self.blink_toggle, '다 읽을 때까지 트레이·Dock 아이콘 깜박임'))
         self.record_toggle = ToggleSwitch(bool(settings.get('call_auto_record')))
         self.record_row = SettingRow('보이스톡 자동 녹음', self.record_toggle,
                                      '통화 녹음 파일은 recordings 폴더에 저장됩니다')
         self.record_row.description.setToolTip('통화 녹음 파일은 recordings 폴더에 저장됩니다')
         col.addWidget(self.record_row)
-        self.wallpaper_button = ChevronButton('변경')
-        col.addWidget(SettingRow('채팅방 배경화면', self.wallpaper_button))
         self.rag_button = ChevronButton('관리')
         col.addWidget(SettingRow('AI 지식베이스', self.rag_button, 'AI 비서가 참고할 문서'))
 
@@ -318,13 +331,18 @@ class MoreTab(QWidget):
         self.social_toggle.toggled.connect(lambda on: settings.set('social_features', bool(on)))
 
         # ---- 알림·꾸미기 ----
-        col.addWidget(self._section('키워드 · 꾸미기'))
+        col.addWidget(self._section('방해금지 · 키워드 · 꾸미기'))
+        self.dnd_button = ChevronButton('설정')
+        self.dnd_row = SettingRow('방해금지', self.dnd_button, '')
+        col.addWidget(self.dnd_row)
         self.keyword_button = ChevronButton('설정')
         self.keyword_row = SettingRow('키워드 알림', self.keyword_button, '')
         col.addWidget(self.keyword_row)
         self.bubble_button = ChevronButton('변경')
         self.bubble_row = SettingRow('말풍선 꾸미기', self.bubble_button, '')
         col.addWidget(self.bubble_row)
+        self.wallpaper_button = ChevronButton('변경')
+        col.addWidget(SettingRow('채팅방 배경화면', self.wallpaper_button))
 
         # ---- 보안·도움말 ----
         col.addWidget(self._section('보안 · 도움말'))
@@ -348,9 +366,15 @@ class MoreTab(QWidget):
         self._group_rows(col)
 
         self.edit_button.clicked.connect(self.edit_profile)
+        self.logout_button.clicked.connect(self._confirm_logout)
+        self.admin_button.clicked.connect(lambda: self.open_admin())
+        state.users_changed.connect(self._refresh_admin_row)
+        state.welcomed.connect(self._refresh_admin_row)
+        self._refresh_admin_row()
         self.avatar.clicked.connect(self.edit_profile)
         self.dark_toggle.toggled.connect(lambda on: settings.set('dark_mode', bool(on)))
         self.notify_toggle.toggled.connect(lambda on: settings.set('notifications', bool(on)))
+        self.blink_toggle.toggled.connect(lambda on: settings.set('blink_unread', bool(on)))
         self.motion_toggle.toggled.connect(self._motion_changed)
         self.record_toggle.toggled.connect(lambda on: settings.set('call_auto_record', bool(on)))
         self.font_combo.currentIndexChanged.connect(self._font_changed)
@@ -359,6 +383,7 @@ class MoreTab(QWidget):
         self.multi_profile_button.clicked.connect(self.open_multi_profile)
         self.friend_manage_button.clicked.connect(self.open_friend_manage)
         self.keyword_button.clicked.connect(self.open_keywords)
+        self.dnd_button.clicked.connect(self.open_dnd)
         self.bubble_button.clicked.connect(self.open_bubble_style)
         self.lock_button.clicked.connect(self.open_lock_settings)
         self.tour_button.clicked.connect(self.open_feature_tour)
@@ -399,6 +424,8 @@ class MoreTab(QWidget):
                     line.setObjectName('settingsDivider')
                     line.setFixedHeight(1)
                     group.addWidget(line)
+                    if w is getattr(self, 'admin_row', None):   # 관리자 줄과 함께 숨긴다
+                        self._admin_divider = line
                 group.addWidget(w)
             elif w is not None:
                 col.addWidget(w)
@@ -406,6 +433,29 @@ class MoreTab(QWidget):
                 col.addLayout(item.layout())
             else:
                 col.addItem(item)
+
+    def _confirm_logout(self):
+        from client.kakao import login
+        from client.kakao.logout_dialog import LogoutDialog
+        dlg = LogoutDialog(self.state, login.load_saved_login(), self.window())
+        if dlg.exec_() == LogoutDialog.Accepted:
+            self.logout_requested.emit()
+
+    def _refresh_admin_row(self):
+        """관리자에게만 '관리자' 줄을 보인다 (권한은 서버가 요청마다 다시 검사한다 - 명세 §4.2)"""
+        visible = self.state.is_admin()
+        self.admin_row.setVisible(visible)
+        divider = getattr(self, '_admin_divider', None)
+        if divider is not None:
+            divider.setVisible(visible)
+
+    def open_admin(self, exec_=True):
+        from client.kakao.admin import AdminDialog
+        dlg = AdminDialog(self.state, self.window())
+        self.admin_dialog = dlg
+        if exec_:
+            dlg.exec_()
+        return dlg
 
     def _section(self, title):
         label = QLabel(title)
@@ -422,9 +472,14 @@ class MoreTab(QWidget):
         self.font_combo.setCurrentIndex(index)
 
     def _sync_controls(self, _key=None):
+        if _key == 'reduce_motion':      # 기능 둘러보기 등 바깥에서 바꿔도 테마 동작에 반영
+            theme.set_reduce_motion(bool(self.settings.get('reduce_motion')))
         for widget, value in ((self.dark_toggle, bool(self.settings.get('dark_mode'))),
                               (self.notify_toggle, bool(self.settings.get('notifications'))),
-                              (self.record_toggle, bool(self.settings.get('call_auto_record')))):
+                              (self.blink_toggle, bool(self.settings.get('blink_unread'))),
+                              (self.record_toggle, bool(self.settings.get('call_auto_record'))),
+                              (self.motion_toggle, bool(self.settings.get('reduce_motion'))),
+                              (self.social_toggle, bool(self.settings.get('social_features')))):
             if widget.isChecked() != value:
                 widget.blockSignals(True)
                 widget.setChecked(value)
@@ -450,7 +505,8 @@ class MoreTab(QWidget):
         bubble_label = theme.BUBBLE_STYLES.get(style, theme.BUBBLE_STYLES['basic'])['label']
         lock_text = (f'사용 중 · {lock.lock_minutes(self.settings)}분 뒤 자동 잠금' if lock.has_pin(self.settings)
                      else '사용 안 함')
-        for row, text in ((self.keyword_row, keyword_text),
+        from client.kakao import dnd
+        for row, text in ((self.keyword_row, keyword_text), (self.dnd_row, dnd.status_text(self.settings)),
                           (self.bubble_row, bubble_label), (self.lock_row, lock_text)):
             row.set_description(text)
 
@@ -460,7 +516,7 @@ class MoreTab(QWidget):
             return
         me = state.user(state.me)
         self.header.set_subtitle(' · '.join(x for x in ('KCS Talk 2.0', me.get('company')) if x))
-        self.avatar.setPixmap(user_pixmap(state, state.me, 64))
+        self.avatar.setPixmap(user_pixmap(state, state.me, theme.px(theme.AVATAR_ROW)))
         self.name_label.setText(state.display_name(state.me))
         self.status_label.setText(me.get('status_message') or '상태메시지를 입력해 주세요')
         self.status_label.set_color_key('text_sub' if me.get('status_message') else 'text_hint')
@@ -491,6 +547,10 @@ class MoreTab(QWidget):
 
     def open_keywords(self):
         KeywordAlertDialog(self.settings, self.window()).exec_()
+
+    def open_dnd(self):
+        from client.kakao.dnd import DndDialog
+        DndDialog(self.state, self.settings, self.window()).exec_()
 
     def open_bubble_style(self):
         BubbleStyleDialog(self.settings, self.window()).exec_()
@@ -529,13 +589,14 @@ class MoreTab(QWidget):
         for value in (self.version_value, self.server_value):
             value.setStyleSheet(f"color: {theme.c('text_sub')}; font-size: {theme.fs('body')}px;")
         for btn in (self.wallpaper_button, self.rag_button, self.multi_profile_button, self.friend_manage_button,
-                    self.keyword_button, self.bubble_button, self.lock_button, self.tour_button):
+                    self.keyword_button, self.dnd_button, self.bubble_button, self.lock_button, self.tour_button):
             btn.setStyleSheet(f"color: {theme.c('text_sub')}; font-size: {theme.fs('body')}px;")
         for w in self.findChildren(ElidedLabel):
             w.refresh_theme()
         self.font_combo.setMinimumWidth(theme.px(96))
         self.dark_toggle.update()
         self.notify_toggle.update()
+        self.blink_toggle.update()
         self.record_toggle.update()
         self.refresh_profile()
 
@@ -594,6 +655,7 @@ class MultiProfileDialog(QDialog):
         photo_row.addWidget(self.avatar)
         self.photo_button = QPushButton('사진 선택')
         self.clear_photo_button = QPushButton('기본 이미지')
+        self.clear_photo_button.setToolTip('회사 조직도 사진으로 되돌립니다 (조직도 사진이 없으면 사진 없음)')
         photo_row.addWidget(self.photo_button)
         photo_row.addWidget(self.clear_photo_button)
         photo_row.addStretch(1)
@@ -1376,10 +1438,12 @@ class LockSettingsDialog(QDialog):
             return self._message('비밀번호는 숫자 4자리로 입력해 주세요.')
         if pin != confirm:
             return self._message('새 비밀번호가 서로 다릅니다.')
-        lock.set_pin(self.settings, pin)
+        saved = lock.set_pin(self.settings, pin)
         for edit in (self.current_edit, self.new_edit, self.confirm_edit):
             edit.clear()
         self.refresh()
+        if not saved:
+            return self._message('설정 파일에 저장하지 못했습니다. 앱을 다시 켜면 잠금이 풀릴 수 있습니다.')
         return self._message('잠금 비밀번호가 저장되었습니다.', error=False)
 
     def clear(self, current):

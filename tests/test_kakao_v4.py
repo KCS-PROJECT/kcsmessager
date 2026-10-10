@@ -171,6 +171,34 @@ class V4ServerTest(ServerTestBase):
         finally:
             srv_mod.EXPORT_CHUNK = old
 
+    def test_room_export_period(self):
+        a, b = self.connect(), self.connect()
+        rid = self.group(a, [b])['room_id']
+        days = ['2026-01-01', '2026-01-05', '2026-01-10']
+        for i, _day in enumerate(days):
+            a.send({'type': 'send', 'room_id': rid, 'kind': 'text', 'content': f'기간 {i}'})
+            b.wait_for('msg_new', lambda x, i=i: x['message']['content'] == f'기간 {i}')
+        store = self.server.store
+        with store._lock:                                    # 메시지 날짜를 과거로 옮겨 기간 필터를 확인
+            for i, day in enumerate(days):
+                store._db.execute("UPDATE messages SET timestamp=? WHERE room_id=? AND content=?",
+                                  (f'{day}T10:00:00', rid, f'기간 {i}'))
+            store._db.execute("UPDATE messages SET timestamp='2025-12-31T09:00:00' WHERE room_id=? AND kind='system'",
+                              (rid,))
+            store._db.commit()
+        texts = lambda res: [m['content'] for m in res['messages'] if m['kind'] == 'text']   # noqa: E731
+        res = b.request({'type': 'room_export', 'room_id': rid, 'since': '2026-01-04', 'until': '2026-01-06'},
+                        'room_export')
+        self.assertEqual((texts(res), res['since'], res['until']), (['기간 1'], '2026-01-04', '2026-01-06'))
+        res = b.request({'type': 'room_export', 'room_id': rid, 'since': '2026-01-05'}, 'room_export')
+        self.assertEqual(texts(res), ['기간 1', '기간 2'])                      # 그날 포함, 끝 없음
+        res = b.request({'type': 'room_export', 'room_id': rid, 'until': '2026-01-01'}, 'room_export')
+        self.assertEqual(texts(res), ['기간 0'])
+        for bad, message in (({'since': '2026/01/01'}, 'YYYY-MM-DD'), ({'since': '2026-02-30'}, 'YYYY-MM-DD'),
+                             ({'since': '2026-01-10', 'until': '2026-01-01'}, '시작 날짜')):
+            err = b.expect_error({'type': 'room_export', 'room_id': rid, **bad})
+            self.assertIn(message, err['message'])
+
 
 # ======================================================================== 클라이언트 (상태 · 화면)
 from datetime import datetime, timedelta  # noqa: E402
@@ -408,7 +436,7 @@ class V4ChatRoomUiTest(unittest.TestCase):
     def test_export_writes_txt(self):
         import tempfile
         win = self.open()
-        self.assertIn('대화 내보내기 (.txt)', [a.text() for a in win.build_room_menu().actions()])
+        self.assertIn('대화 내용 저장… (텍스트 · 엑셀 · 사진 포함)', [a.text() for a in win.build_room_menu().actions()])
         path = os.path.join(tempfile.mkdtemp(), 'chat.txt')
         win.export_chat(path)
         self.assertEqual(self.conn.last('room_export'), {'room_id': 'r1'})
@@ -419,7 +447,7 @@ class V4ChatRoomUiTest(unittest.TestCase):
         self.assertTrue(text.startswith('프로젝트 팀 님과 카카오톡 대화'))
         self.assertIn('[김철수]', text)
         self.assertIn('다들 내일 회의 시간 괜찮아요?', text)
-        self.assertIn('내보냈습니다', win.toast_label.text())
+        self.assertIn('저장했습니다', win.toast_label.text())
         self.assertTrue(win.default_export_name().startswith('KCS Talk_프로젝트 팀_'))
 
     def test_reaction_picker_and_overflow(self):

@@ -1,80 +1,95 @@
 # -*- coding: utf-8 -*-
 """
-테마 - 카카오톡 PC 색상 팔레트(라이트/다크), 한글 폰트 체인, 공용 QSS
+테마 - KCS Ink 팔레트(라이트/다크), 한글 폰트 체인, 공용 QSS
 모든 위젯은 색상을 하드코딩하지 말고 theme.c('키')로 가져온다.
+
+KCS Ink (2026-10-10): 회사 CI 네이비를 '잉크', 채팅 배경을 차가운 '종이'로 본다.
+중립색은 모두 네이비 쪽으로 살짝 기운 회색이고, 다크 모드는 검정이 아닌 깊은 남색이다.
+글꼴은 앱에 들어 있는 Pretendard(SIL OFL, assets/fonts) 를 먼저 쓴다.
 """
+
+import os
 
 from PyQt5.QtGui import QFont, QColor
 
-FONT_FAMILIES = ['맑은 고딕', 'Malgun Gothic', 'Apple SD Gothic Neo',
-                 'Nanum Gothic', 'Noto Sans CJK KR', 'Arial']
+from client.kakao import osenv
+
+FONT_DIR = osenv.resource_path('assets', 'fonts')
+BUNDLED_FONTS = ('Pretendard-Regular.otf', 'Pretendard-SemiBold.otf', 'Pretendard-Bold.otf')
+FONT_FAMILIES = osenv.ui_font_families()   # Pretendard → 이 OS 기본 한글 글꼴 → 다른 OS 글꼴
 
 LIGHT = {
     'bg': '#FFFFFF',
-    'bg_alt': '#F7F7F7',
-    'bg_hover': '#F2F2F2',
-    'bg_selected': '#EBEBEB',
-    'chat_bg': '#BACEE0',          # 카카오톡 채팅방 배경
+    'bg_alt': '#F5F7FB',
+    'bg_hover': '#EEF1F8',
+    'bg_selected': '#E4E9F5',
+    'chat_bg': '#BACEE0',          # 카카오톡 채팅방 배경 ('kakao' 강조색 전용, KCS 는 아래 덮어쓰기)
     'sidebar': '#ECECED',
     'sidebar_icon': '#A9A9AA',
     'sidebar_icon_active': '#1E1E1E',
-    'text': '#191919',
-    'text_sub': '#6B6B6B',
-    'text_hint': '#6A6A6A',        # AA 4.5:1 이상 (흰 배경 5.3)
-    'border': '#E5E5E5',
+    'text': '#171B2B',             # 잉크
+    'text_sub': '#586079',
+    'text_hint': '#626A80',        # AA 4.5:1 이상 (흰 배경 5.5)
+    'border': '#E3E7F0',
     'yellow': '#FEE500',           # 카카오 옐로
     'yellow_dark': '#F5D800',
     'bubble_mine': '#FEE500',
     'bubble_other': '#FFFFFF',
-    'bubble_text': '#191919',
+    'bubble_text': '#171B2B',
+    'bubble_shadow': 'rgba(23,32,72,0.10)',   # 받은 말풍선·카드의 그림자 (테두리 대신 높이 한 가지)
+    'avatar_ring': 'rgba(23,32,72,0.16)',     # 사진 아바타 가장자리 (흰 배경 사진도 칸 크기가 보이게)
     'unread_num': '#E5B800',       # 안 읽은 사람 수 숫자
     'badge': '#D93025',            # 안 읽은 메시지 배지 (흰 글자 4.6:1)
-    'danger_text': '#B3261E',      # 경고 글자(부재중·전송 실패) — 흰 배경·채팅 배경(#DCE3EE) 모두 4.5:1 이상
+    'on_badge': '#FFFFFF',         # 배지(빨강) 위 글자·아이콘
+    'danger_text': '#B3261E',      # 경고 글자(부재중·전송 실패) - 흰 배경·채팅 배경 모두 4.5:1 이상
     'link': '#2E6FD8',
     'notice_bg': '#FFFFFF',
-    'system_bg': 'rgba(28,36,64,0.56)',
-    'system_text': '#FFFFFF',
-    'date_chip_bg': 'rgba(28,36,64,0.56)',
+    'system_bg': 'rgba(42,56,108,0.08)',      # 시스템 안내 · 날짜 칩: 종이 위에 옅은 잉크
+    'system_text': '#3B4462',
+    'date_chip_bg': 'rgba(42,56,108,0.08)',
     'mention': '#2E6FD8',
     'reaction_bg': '#FFFFFF',
     'calendar_today': '#FEE500',
-    'calendar_sun': '#E64545',
+    'calendar_sun': '#D93B3B',
     'calendar_sat': '#3C78D8',
     'input_bg': '#FFFFFF',
 }
 
 DARK = {
-    'bg': '#1F1F1F',
-    'bg_alt': '#262626',
-    'bg_hover': '#2E2E2E',
-    'bg_selected': '#383838',
+    'bg': '#161A28',               # 깊은 남색 (중립 검정 대신)
+    'bg_alt': '#1B2030',
+    'bg_hover': '#222839',
+    'bg_selected': '#2A3147',
     'chat_bg': '#2B2F33',
     'sidebar': '#151515',
     'sidebar_icon': '#6E6E6E',
     'sidebar_icon_active': '#F2F2F2',
-    'text': '#EDEDED',
-    'text_sub': '#A6A6A6',
-    'text_hint': '#ABABAB',        # 다크 카드(#3A3D41) 위에서도 4.5:1
-    'border': '#333333',
+    'text': '#E9ECF5',
+    'text_sub': '#A5ACC2',
+    'text_hint': '#A0A7BD',        # 다크 말풍선(#242B40) 위에서도 4.5:1
+    'border': '#2A3145',
     'yellow': '#FEE500',
     'yellow_dark': '#F5D800',
     'bubble_mine': '#FEE500',
-    'bubble_other': '#3A3D41',
-    'bubble_text': '#EDEDED',
+    'bubble_other': '#242B40',
+    'bubble_text': '#E9ECF5',
+    'bubble_shadow': 'rgba(0,0,0,0.28)',
+    'avatar_ring': 'rgba(255,255,255,0.14)',
     'unread_num': '#FEE500',
     'badge': '#D93025',
+    'on_badge': '#FFFFFF',
     'danger_text': '#FF8A80',      # 다크 배경 위 경고 글자 4.5:1 이상
     'link': '#7AA7F0',
-    'notice_bg': '#2E2E2E',
-    'system_bg': 'rgba(255,255,255,0.12)',
-    'system_text': '#DDDDDD',
-    'date_chip_bg': 'rgba(255,255,255,0.10)',
-    'mention': '#7AA7F0',
-    'reaction_bg': '#3A3D41',
+    'notice_bg': '#20263A',
+    'system_bg': 'rgba(255,255,255,0.08)',
+    'system_text': '#C9CEDD',
+    'date_chip_bg': 'rgba(255,255,255,0.08)',
+    'mention': '#86AEF4',          # 다크 말풍선(#242B40) 위 4.5:1 이상
+    'reaction_bg': '#242B40',
     'calendar_today': '#FEE500',
     'calendar_sun': '#FF7070',
     'calendar_sat': '#7AA7F0',
-    'input_bg': '#2A2A2A',
+    'input_bg': '#1B2030',
 }
 
 # 간격 체계 (4px 단위). 묶음 안은 S/M, 묶음 사이는 L/XL, 화면 가장자리는 L(16)
@@ -100,6 +115,8 @@ TYPE_SCALE = {
     'display': 22,   # 로그인 · 통화 화면 큰 글자
     'numeral': 26,   # 큰 숫자 (녹음 시간 · 잠금 숫자판)
 }
+# 목록·카드의 사람 사진 크기 (친구 탭 행 · 내 프로필 · 더보기 프로필 카드가 모두 같은 크기, 2026-10-10)
+AVATAR_ROW = 44
 # 모서리 단계
 RADII = {'xs': 4, 's': 6, 'm': 8, 'card': 12, 'bubble': 16, 'pill': 15}
 
@@ -151,16 +168,16 @@ DARK.update({'on_accent': '#191919', 'bubble_mine_text': '#191919', 'bubble_mine
              'bubble_mine_line': 'rgba(0,0,0,0.12)', 'bubble_mine_link': '#1F4FB8', 'brand': '#8FA3E8',
              'sidebar_badge_ring': '#151515', 'sidebar_active_bg': 'rgba(255,255,255,0.08)',
              'sidebar_icon_hover': '#A6A6A6', 'sidebar_logo': '#8FA3E8',
-             'header_panel': 'rgba(31,31,31,0.86)', 'header_line': 'rgba(255,255,255,0.07)'})
+             'header_panel': 'rgba(22,26,40,0.88)', 'header_line': 'rgba(255,255,255,0.07)'})
 
 ACCENTS = {
     'kakao': {'light': {}, 'dark': {}},
     'kcs': {
         'light': {
             'yellow': BRAND_NAVY, 'yellow_dark': '#1E2955', 'on_accent': '#FFFFFF',
-            'bubble_mine': '#33478F', 'bubble_mine_text': '#FFFFFF', 'bubble_mine_sub': 'rgba(255,255,255,0.72)',
+            'bubble_mine': '#3450B4', 'bubble_mine_text': '#FFFFFF', 'bubble_mine_sub': 'rgba(255,255,255,0.72)',
             'bubble_mine_line': 'rgba(255,255,255,0.28)', 'bubble_mine_link': '#C9D6FF',
-            'unread_num': '#3F5BD9', 'calendar_today': BRAND_NAVY, 'chat_bg': '#DCE3EE',
+            'unread_num': '#3450B4', 'calendar_today': BRAND_NAVY, 'chat_bg': '#EBEFF6',
             'sidebar': BRAND_NAVY, 'sidebar_icon': '#C3CBE6', 'sidebar_icon_active': '#FFFFFF',
             'sidebar_badge_ring': BRAND_NAVY, 'link': '#2F55D4', 'mention': '#2F55D4',
             'sidebar_active_bg': 'rgba(255,255,255,0.14)', 'sidebar_icon_hover': '#D3DAF0', 'sidebar_logo': '#FFFFFF',
@@ -169,7 +186,7 @@ ACCENTS = {
             'yellow': '#536ED4', 'yellow_dark': '#4A62C2', 'on_accent': '#FFFFFF',
             'bubble_mine': '#3A4E9C', 'bubble_mine_text': '#FFFFFF', 'bubble_mine_sub': 'rgba(255,255,255,0.70)',
             'bubble_mine_line': 'rgba(255,255,255,0.25)', 'bubble_mine_link': '#C9D6FF',
-            'unread_num': '#8FA3E8', 'calendar_today': '#536ED4', 'chat_bg': '#1D2130',
+            'unread_num': '#8FA3E8', 'calendar_today': '#536ED4', 'chat_bg': '#10131D',
             'sidebar': '#141A30', 'sidebar_icon': '#9AA6CC', 'sidebar_icon_active': '#FFFFFF',
             'sidebar_badge_ring': '#141A30',
             'sidebar_active_bg': 'rgba(255,255,255,0.10)', 'sidebar_icon_hover': '#B4BEDF', 'sidebar_logo': '#FFFFFF',
@@ -180,7 +197,7 @@ BRANDS = {'kcs': 'KCS 블루', 'kakao': '옐로 (사용 안 함)'}   # 앱은 KC
 
 # 말풍선 꾸미기 (명세 §8.11) - 내 말풍선 배경/글자색/모서리. None 이면 현재 테마 값 사용
 BUBBLE_STYLES = {
-    'basic': {'label': '기본', 'bg': None, 'fg': None, 'radius': 13},
+    'basic': {'label': '기본', 'bg': None, 'fg': None, 'radius': 17},
     'round': {'label': '동글동글', 'bg': None, 'fg': None, 'radius': 20},
     'square': {'label': '반듯하게', 'bg': None, 'fg': None, 'radius': 5},
     'yellow': {'label': '옐로', 'bg': '#FEE500', 'fg': '#191919', 'radius': 13},
@@ -263,14 +280,28 @@ def px(size):
 _available = None
 
 
+def load_bundled_fonts():
+    """assets/fonts 의 Pretendard 를 앱 글꼴로 등록 (앱마다 한 번). 등록된 글꼴 이름 목록"""
+    from PyQt5.QtGui import QFontDatabase
+    names = []
+    for name in BUNDLED_FONTS:
+        path = os.path.join(FONT_DIR, name)
+        if os.path.exists(path):
+            fid = QFontDatabase.addApplicationFont(path)
+            if fid >= 0:
+                names += QFontDatabase.applicationFontFamilies(fid)
+    return names
+
+
 def _available_families():
-    """이 PC에 설치된 글꼴 이름 집합 (한 번만 조회). 앱이 없으면 None"""
+    """이 PC에 설치된 글꼴 이름 집합 (한 번만 조회, 앱에 든 글꼴 포함). 앱이 없으면 None"""
     global _available
     if _available is None:
         from PyQt5.QtWidgets import QApplication
         from PyQt5.QtGui import QFontDatabase
         if QApplication.instance() is None:
             return None
+        load_bundled_fonts()
         _available = set(QFontDatabase().families())
     return _available
 
@@ -312,11 +343,12 @@ def font_css():
 def scrollbar_qss():
     return f"""
         QScrollBar:vertical {{ background: transparent; width: 8px; margin: 0; }}
-        QScrollBar::handle:vertical {{ background: rgba(128,128,128,0.45); border-radius: 4px; min-height: 30px; }}
+        QScrollBar::handle:vertical {{ background: rgba(88,96,121,0.38); border-radius: 4px; min-height: 30px; }}
+        QScrollBar::handle:vertical:hover {{ background: rgba(88,96,121,0.60); }}
         QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
         QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
         QScrollBar:horizontal {{ background: transparent; height: 8px; margin: 0; }}
-        QScrollBar::handle:horizontal {{ background: rgba(128,128,128,0.45); border-radius: 4px; min-width: 30px; }}
+        QScrollBar::handle:horizontal {{ background: rgba(88,96,121,0.38); border-radius: 4px; min-width: 30px; }}
         QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
     """
 
@@ -327,12 +359,12 @@ def base_qss():
         QWidget {{ {font_css()} font-size: {fs('body')}px; color: {c('text')}; }}
         QMainWindow, QDialog {{ background: {c('bg')}; }}
         QLineEdit, QTextEdit, QPlainTextEdit, QDateTimeEdit, QDateEdit, QTimeEdit, QSpinBox, QComboBox {{
-            background: {c('input_bg')}; border: 1px solid {c('border')}; border-radius: 6px;
-            padding: 6px 8px; selection-background-color: {c('yellow')}; selection-color: {c('on_accent')};
+            background: {c('input_bg')}; border: 1px solid {c('border')}; border-radius: 8px;
+            padding: 7px 10px; selection-background-color: {c('yellow')}; selection-color: {c('on_accent')};
         }}
-        QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus {{ border: 1px solid {c('yellow_dark')}; }}
+        QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus {{ border: 1px solid {c('yellow')}; }}
         QPushButton {{
-            background: {c('bg_alt')}; border: 1px solid {c('border')}; border-radius: 6px;
+            background: {c('bg_alt')}; border: 1px solid {c('border')}; border-radius: 8px;
             padding: 7px 14px;
         }}
         QPushButton:hover {{ background: {c('bg_hover')}; }}
@@ -344,14 +376,15 @@ def base_qss():
         QPushButton[flat="true"]:hover {{ background: {c('bg_hover')}; }}
         QPushButton[flat="true"]:pressed {{ background: {c('bg_selected')}; }}
         QPushButton[flat="true"]:focus {{ border: 2px solid {c('yellow_dark')}; }}
-        QMenu {{ background: {c('bg')}; border: 1px solid {c('border')}; padding: 4px; }}
-        QMenu::item {{ padding: 6px 22px; border-radius: 4px; }}
+        QMenu {{ background: {c('bg')}; border: 1px solid {c('border')}; border-radius: 10px; padding: 6px; }}
+        QMenu::item {{ padding: 7px 22px; border-radius: 6px; }}
+        QMenu::separator {{ height: 1px; background: {c('border')}; margin: 5px 8px; }}
         QMenu::item:selected {{ background: {c('bg_hover')}; color: {c('text')}; }}
         QListWidget {{ background: {c('bg')}; border: none; outline: 0; }}
         QListWidget::item {{ border: none; }}
         QListWidget::item:selected {{ background: {c('bg_selected')}; }}
         QListWidget::item:hover {{ background: {c('bg_hover')}; }}
-        QToolTip {{ background: {c('bg')}; color: {c('text')}; border: 1px solid {c('border')}; }}
+        QToolTip {{ background: {c('text')}; color: {c('bg')}; border: none; border-radius: 6px; padding: 5px 8px; }}
         QCheckBox, QRadioButton {{ spacing: 6px; }}
         {scrollbar_qss()}
     """

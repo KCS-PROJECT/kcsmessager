@@ -406,7 +406,8 @@ class StoryViewer(QDialog):
         panel.addWidget(self.viewers_list)
         layout.addWidget(self.viewers_panel)
         self.viewers_panel.setVisible(self.mine)
-        self.delete_button.clicked.connect(self.delete_current)
+        # clicked 의 checked(False)가 confirm 으로 들어가 확인 없이 지우지 않도록 감싼다
+        self.delete_button.clicked.connect(lambda _checked=False: self.delete_current())
 
         self.timer = QTimer(self)
         self.timer.setInterval(50)

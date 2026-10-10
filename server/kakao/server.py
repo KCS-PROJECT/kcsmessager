@@ -16,6 +16,7 @@ import codecs
 import json
 import logging
 import os
+import sys
 import queue
 import random
 import re
@@ -32,7 +33,9 @@ from .store import BOT_USERNAME, ISO_FMT, PRESENCES, Store, now_iso
 logger = logging.getLogger('kakao.server')
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-DEFAULT_DB_PATH = os.path.join(PROJECT_ROOT, 'server_data', 'kakao.db')
+# 빌드한 서버(PyInstaller)는 소스가 임시 폴더에 풀리므로, 데이터는 실행 파일 옆 server_data 에 둔다 (모든 OS 공통)
+DATA_ROOT = os.path.dirname(os.path.abspath(sys.executable)) if getattr(sys, 'frozen', False) else PROJECT_ROOT
+DEFAULT_DB_PATH = os.path.join(DATA_ROOT, 'server_data', 'kakao.db')
 
 MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
 MAX_AVATAR_BYTES = 512 * 1024
@@ -58,6 +61,12 @@ MAX_SECRET_CONTENT = 64 * 1024               # base64(nonce12 + AES-GCM 암호�
 SECRET_MIN_BYTES = 12 + 16                   # nonce + GCM 태그
 SECRET_PEER_NO_KEY = '상대방이 아직 비밀채팅을 사용할 수 없습니다'
 SECRET_FORBIDDEN = '비밀채팅방에서는 사용할 수 없는 기능입니다.'
+LOGIN_FAILED = '아이디 또는 비밀번호가 올바르지 않습니다.'
+ACCOUNT_DISABLED = '사용이 중지된 계정입니다. 관리자에게 문의해 주세요.'
+ADMIN_ONLY = '관리자만 사용할 수 있습니다.'
+LOGIN_TOKEN_EXPIRED = '저장된 로그인 정보가 만료되었습니다. 비밀번호를 입력해 주세요.'
+RESET_MISMATCH = '아이디 또는 가입한 이메일이 일치하지 않습니다.'
+NEEDS_REGISTER = '처음 사용하는 아이디입니다. [처음 사용 등록]에서 소속 회사·이름·사번·이메일·비밀번호를 등록해 주세요.'
 
 CALL_MODES = ('voice', 'video', 'voiceroom')
 CALL_ROLES = ('host', 'speaker', 'listener')
@@ -87,6 +96,7 @@ RAG_FAILED = '답변을 생성하는 중 오류가 발생했습니다.'
 BOT_MENTION = '@' + BOT_USERNAME
 URL_RE = re.compile(r'https?://[^\s<>"]+')
 EMAIL_RE = re.compile(r'[^@\s]+@[^@\s]+\.[^@\s]+')
+EMPLOYEE_NO_RE = re.compile(r'[0-9A-Za-z][0-9A-Za-z_-]{0,19}')   # 사번: 영문·숫자(-, _) 1~20자
 PREVIEW_TIMEOUT = 3.0
 PREVIEW_MAX_BYTES = 256 * 1024
 
@@ -454,8 +464,13 @@ class KakaoServer:
                  link_preview: Optional[bool] = None, daily_briefing: bool = False,
                  preview_fetcher: Optional[Callable[[str], Optional[dict]]] = None,
                  retention_days: float = 90, story_ttl_seconds: float = DEFAULT_STORY_TTL,
-                 voiceroom_max_seconds: float = DEFAULT_VOICEROOM_MAX) -> None:
+                 voiceroom_max_seconds: float = DEFAULT_VOICEROOM_MAX,
+                 require_password: bool = False) -> None:
         self.host = host
+        # True 면 비밀번호(또는 자동 로그인 토큰) 없는 join 을 받지 않는다 (배포용 chat_server.py 기본값)
+        self.require_password = require_password
+        self._login_failures: dict[str, list[float]] = {}   # 아이디/IP → 최근 실패 시각
+        self._login_failures_lock = threading.Lock()
         self.retention_days = float(retention_days)          # 받은 파일 보관 기간 (§8.10)
         self.story_ttl_seconds = float(story_ttl_seconds)    # 펑 유지 시간 (§8.3)
         self.voiceroom_max_seconds = float(voiceroom_max_seconds)  # 보이스룸 자동 종료 (§8.2)
@@ -488,12 +503,32 @@ class KakaoServer:
         self._threads: list[threading.Thread] = []
         self._threads_lock = threading.Lock()
         self._handlers: dict[str, Callable[[Ctx, dict], None]] = {
+            # 관리자 (명세 §4.2)
+            'admin_users': self._h_admin_users,
+            'admin_reset_password': self._h_admin_reset_password,
+            'admin_clear_password': self._h_admin_clear_password,
+            'admin_set_disabled': self._h_admin_set_disabled,
+            'admin_set_admin': self._h_admin_set_admin,
+            'admin_notice': self._h_admin_notice,
+            'admin_member_create': self._h_admin_member_create,
+            'admin_member_update': self._h_admin_member_update,
+            'admin_member_delete': self._h_admin_member_delete,
+            'admin_member_restore': self._h_admin_member_restore,
+            'admin_group_create': self._h_admin_group_create,
+            'admin_group_update': self._h_admin_group_update,
+            'admin_group_delete': self._h_admin_group_delete,
+            'admin_group_reorder': self._h_admin_group_reorder,
+            'admin_org_order': self._h_admin_org_order,
             'message': self._h_legacy_message,
             'room_open_direct': self._h_room_open_direct,
             'room_create': self._h_room_create,
             'room_invite': self._h_room_invite,
             'room_leave': self._h_room_leave,
             'room_rename': self._h_room_rename,
+            'room_kick': self._h_room_kick,
+            'thread_get': self._h_thread_get,
+            'mention_list': self._h_mention_list,
+            'room_owner_set': self._h_room_owner_set,
             'history': self._h_history,
             'send': self._h_send,
             'read': self._h_read,
@@ -514,6 +549,7 @@ class KakaoServer:
             'todo_update': self._h_todo_update,
             'todo_delete': self._h_todo_delete,
             'todo_list': self._h_todo_list,
+            'login_token_revoke': self._h_login_token_revoke,
             'profile_update': self._h_profile_update,
             'attachment_get': self._h_attachment_get,
             'presence_set': self._h_presence_set,
@@ -766,6 +802,18 @@ class KakaoServer:
             if req_type == 'join':
                 self._h_join(conn, item)
                 return
+            if req_type == 'register':
+                self._h_register(conn, item)
+                return
+            if req_type == 'password_reset':   # 로그인 전에도 (로그인 창의 비밀번호 재설정)
+                self._h_password_reset(conn, item)
+                return
+            if req_type == 'org_companies':     # 로그인 전에도 (처음 사용 등록 화면)
+                payload = {'type': 'org_companies', 'companies': self.store.company_names()}
+                if 'req_id' in item:
+                    payload['req_id'] = item['req_id']
+                conn.send(payload)
+                return
             if req_type == 'leave':
                 conn.close()
                 return
@@ -873,32 +921,172 @@ class KakaoServer:
             raise ProtocolError(f'존재하지 않는 사용자입니다: {", ".join(missing)}')
 
     # ------------------------------------------------------------------ join / 구버전
+    LOGIN_MAX_FAILURES = {'id': 5, 'ip': 20}   # 아이디별 / IP별(사무실 공용 IP 고려) 허용 실패 횟수
+    LOGIN_LOCK_SECONDS = 300                   # 넘으면 이 시간 동안 그 아이디·IP 의 로그인을 막는다
+
+    def _login_keys(self, conn: Connection, login_id: str) -> list[str]:
+        ip = conn.address[0] if isinstance(conn.address, tuple) and conn.address else str(conn.address)
+        return [f'id:{login_id.lower()}', f'ip:{ip}']
+
+    def _check_login_throttle(self, keys: list[str]) -> None:
+        now = time.monotonic()
+        with self._login_failures_lock:
+            for key in keys:
+                recent = [t for t in self._login_failures.get(key, []) if now - t < self.LOGIN_LOCK_SECONDS]
+                self._login_failures[key] = recent
+                if len(recent) >= self.LOGIN_MAX_FAILURES[key.split(':', 1)[0]]:
+                    wait = int(self.LOGIN_LOCK_SECONDS - (now - recent[0])) // 60 + 1
+                    raise ProtocolError(f'로그인 실패가 너무 많습니다. {wait}분 뒤에 다시 시도해 주세요.')
+
+    def _record_login_failure(self, keys: list[str]) -> None:
+        now = time.monotonic()
+        with self._login_failures_lock:
+            for key in keys:
+                self._login_failures.setdefault(key, []).append(now)
+
+    def _clear_login_failures(self, keys: list[str]) -> None:
+        with self._login_failures_lock:
+            for key in keys:
+                self._login_failures.pop(key, None)
+
+    def _authenticate(self, login_id: str, password: Any, token: Any = None) -> tuple[str, bool]:
+        """아이디/비밀번호(또는 자동 로그인 토큰) 확인 (명세 §4.1) → (username, 새로 만든 계정인지)"""
+        if self.require_password and password is None and token is None:
+            raise ProtocolError('비밀번호를 입력해 주세요.')
+        if token is not None:
+            username = self.store.resolve_login(login_id)
+            if not isinstance(token, str) or not username or len(token) > 128 \
+                    or not self.store.check_login_token(username, token):
+                raise ProtocolError(LOGIN_TOKEN_EXPIRED)
+            self._check_not_disabled(username)
+            return username, False
+        if password is not None and (not isinstance(password, str) or not 4 <= len(password) <= 64):
+            raise ProtocolError('비밀번호는 4~64자로 입력해 주세요.')
+        username = self.store.resolve_login(login_id)
+        if username is not None and self.store.is_bot(username):
+            raise ProtocolError('봇 계정으로는 로그인할 수 없습니다.')
+        stored = self.store.password_hash(username) if username else None
+        if stored:
+            if password is None:
+                raise ProtocolError('비밀번호를 입력해 주세요.')
+            if not self.store.check_password(password, stored):
+                raise ProtocolError(LOGIN_FAILED)
+            self._check_not_disabled(username)      # 비밀번호가 맞을 때만 알린다 (계정 유무를 드러내지 않게)
+            return username, False
+        if password is not None:            # 비밀번호 등록은 [처음 사용 등록](register)에서 한 번만
+            raise ProtocolError(NEEDS_REGISTER)
+        if username is None and (len(login_id) > 20 or '@' in login_id):
+            raise ProtocolError('사용자 이름은 20자 이내로 입력해 주세요.')
+        if username is not None:
+            self._check_not_disabled(username)
+        created = self.store.ensure_user(username or login_id)   # 구버전·테스트 클라이언트 (비밀번호 없이)
+        return username or login_id, created
+
+    def _check_not_disabled(self, username: str) -> None:
+        if self.store.is_disabled(username):
+            raise ProtocolError(ACCOUNT_DISABLED)
+
     def _h_join(self, conn: Connection, msg: dict) -> None:
-        username = _req_str(msg, 'username', 20, label='사용자 이름')
+        username = _req_str(msg, 'username', 120, label='아이디')
         if any(ord(ch) < 32 for ch in username):
             raise ProtocolError('사용자 이름에 사용할 수 없는 문자가 있습니다.')
         if username == BOT_USERNAME or self.store.is_bot(username):
             raise ProtocolError('봇 계정으로는 로그인할 수 없습니다.')
         if conn.username is not None:
             raise ProtocolError('이미 로그인된 연결입니다.')
-        created = self.store.ensure_user(username)
+        keys = self._login_keys(conn, username)
+        self._check_login_throttle(keys)
+        try:
+            username, created = self._authenticate(username, msg.get('password'), msg.get('token'))
+        except ProtocolError as exc:
+            if str(exc) in (LOGIN_FAILED, LOGIN_TOKEN_EXPIRED):
+                self._record_login_failure(keys)
+            raise
+        self._clear_login_failures(keys[:1])
+        self._complete_login(conn, msg, 'join', username, created,
+                             remember=msg.get('remember') is True and msg.get('password') is not None)
+
+    def _h_register(self, conn: Connection, msg: dict) -> None:
+        """처음 사용 등록: 소속 회사 + 이름 + 사번 + 이메일 + 비밀번호 (명세 §4.1). 성공하면 join 과 같은 welcome.
+        다음부터는 사번과 비밀번호로 로그인한다"""
+        if conn.username is not None:
+            raise ProtocolError('이미 로그인된 연결입니다.')
+        company = msg.get('company')
+        if not isinstance(company, str) or company.strip() not in self.store.company_names():
+            raise ProtocolError('소속 회사를 선택해 주세요.')
+        name = _req_str(msg, 'name', 20, label='이름')
+        if any(ord(ch) < 32 for ch in name) or '@' in name:
+            raise ProtocolError('이름에 사용할 수 없는 문자가 있습니다.')
+        if name == BOT_USERNAME or self.store.is_bot(name):
+            raise ProtocolError('봇 계정으로는 등록할 수 없습니다.')
+        employee_no = msg.get('employee_no').strip() if isinstance(msg.get('employee_no'), str) else ''
+        if not employee_no:
+            raise ProtocolError('사번을 입력해 주세요.')
+        if not EMPLOYEE_NO_RE.fullmatch(employee_no):
+            raise ProtocolError('사번은 영문·숫자 20자 이내로 입력해 주세요.')
+        email = msg.get('email').strip() if isinstance(msg.get('email'), str) else ''
+        if len(email) > 120 or not EMAIL_RE.fullmatch(email):
+            raise ProtocolError('이메일 주소 형식이 올바르지 않습니다.')
+        password = msg.get('password')
+        if not isinstance(password, str) or not 4 <= len(password) <= 64:
+            raise ProtocolError('비밀번호는 4~64자로 입력해 주세요.')
+        self._check_login_throttle(self._login_keys(conn, name))
+        self._check_not_disabled(name)
+        try:
+            created = self.store.register_user(name, company.strip(), email, password, employee_no)
+        except ValueError as exc:
+            raise ProtocolError(str(exc)) from None
+        self._complete_login(conn, msg, 'register', name, created, remember=msg.get('remember') is True)
+
+    def _h_password_reset(self, conn: Connection, msg: dict) -> None:
+        """비밀번호 재설정: 로그인 아이디 + 가입 이메일이 맞으면 새 비밀번호 (명세 §4.1). 로그인은 하지 않는다"""
+        login_id = _req_str(msg, 'username', 120, label='아이디')
+        email = msg.get('email').strip() if isinstance(msg.get('email'), str) else ''
+        if not email or len(email) > 120:
+            raise ProtocolError('가입한 이메일을 입력해 주세요.')
+        password = msg.get('new_password')
+        if not isinstance(password, str) or not 4 <= len(password) <= 64:
+            raise ProtocolError('비밀번호는 4~64자로 입력해 주세요.')
+        keys = self._login_keys(conn, login_id)
+        self._check_login_throttle(keys)
+        username = self.store.resolve_login(login_id)
+        if username:
+            self._check_not_disabled(username)
+        changed = self.store.reset_password(username, email, password) if username else False
+        if changed is None:
+            raise ProtocolError(NEEDS_REGISTER)
+        if not changed:
+            self._record_login_failure(keys)   # 남의 계정을 이메일로 맞혀 보는 것을 막는다
+            raise ProtocolError(RESET_MISMATCH)
+        self._clear_login_failures(keys[:1])
+        payload = {'type': 'password_reset_ok', 'username': username}
+        if 'req_id' in msg:
+            payload['req_id'] = msg['req_id']
+        conn.send(payload)
+        logger.info('%s 비밀번호 재설정 (%s)', username, conn.address)
+
+    def _complete_login(self, conn: Connection, msg: dict, req_type: str, username: str, created: bool,
+                        remember: bool) -> None:
+        """join/register 성공 뒤: welcome + 접속 알림"""
+        login_token = self.store.issue_login_token(username) if remember else None   # 자동 로그인용 (명세 §4.1)
         with self._conns_lock:
             conns = self._by_user.setdefault(username, set())
             first_conn = not conns
             conns.add(conn)
             conn.username = username
         online = self._online_users()
-        ctx = Ctx(conn=conn, username=username, req_type='join', req_id=msg.get('req_id'),
+        ctx = Ctx(conn=conn, username=username, req_type=req_type, req_id=msg.get('req_id'),
                   has_req_id='req_id' in msg)
         self._reply(ctx, {
             'type': 'welcome',
             'me': self.store.get_user(username, online),
             'users': self._users_for(username, online),
             'rooms': self.store.rooms_for_user(username),
-            'org': self.store.org_meta,
+            'org': self.store.org_payload(),
             'calls': self._calls_for_user(username),
             'blocked': self.store.blocked_list(username),
             'friends': self.store.friends_of(username),
+            **({'login_token': login_token} if login_token else {}),
         })
         conn.send({'type': 'all_users_list',
                    'users': [u['username'] for u in self.store.list_users()],
@@ -964,8 +1152,56 @@ class KakaoServer:
         self._push([ctx.username], {'type': 'room_removed', 'room_id': room_id}, ctx)
         remaining = [u for u in meta['members'] if u != ctx.username]
         if remaining:
+            new_owner = None
+            if meta.get('owner') == ctx.username:   # 방장이 나가면 가장 먼저 들어온 멤버가 방장 (§10.3)
+                new_owner = self.store.room_meta(room_id).get('owner')
+                if new_owner:
+                    self.store.set_owner(room_id, new_owner)
             self._push_room_updated(room_id, remaining)
             self._post_system(room_id, f'{leaver}님이 나갔습니다.')
+            if new_owner:
+                self._post_system(room_id, f'{self._member_label(meta, new_owner)}님이 방장이 되었습니다.')
+
+    def _require_room_owner(self, msg: dict, username: str) -> dict:
+        meta = self._require_room_member(msg.get('room_id'), username)
+        if meta['type'] not in ('group', 'open'):
+            raise ProtocolError('그룹 채팅방과 오픈채팅방에서만 할 수 있습니다.')
+        if meta.get('owner') != username:
+            raise ProtocolError('방장만 할 수 있습니다.')
+        return meta
+
+    def _h_room_kick(self, ctx: Ctx, msg: dict) -> None:
+        """방장이 멤버를 내보낸다 (§10.3)"""
+        meta = self._require_room_owner(msg, ctx.username)
+        target = _req_str(msg, 'username', 20, label='대상')
+        if target == ctx.username:
+            raise ProtocolError('자기 자신은 내보낼 수 없습니다. 채팅방 나가기를 이용해 주세요.')
+        if target not in meta['members']:
+            raise ProtocolError('이 채팅방의 대화상대가 아닙니다.')
+        room_id = meta['room_id']
+        label = self._member_label(meta, target)
+        self.store.remove_member(room_id, target)
+        if meta['type'] == 'open':
+            self.store.ban_from_room(room_id, target)
+        self._leave_all_calls(target, room_id)
+        self._push([target], {'type': 'room_removed', 'room_id': room_id, 'kicked': True})
+        remaining = [u for u in meta['members'] if u != target]
+        self._push_room_updated(room_id, remaining, ctx)
+        self._post_system(room_id, f'{self._member_label(meta, ctx.username)}님이 {label}님을 내보냈습니다.')
+
+    def _h_room_owner_set(self, ctx: Ctx, msg: dict) -> None:
+        """방장 넘기기 (§10.3)"""
+        meta = self._require_room_owner(msg, ctx.username)
+        target = _req_str(msg, 'username', 20, label='대상')
+        if target == ctx.username:
+            raise ProtocolError('이미 방장입니다.')
+        if target not in meta['members']:
+            raise ProtocolError('이 채팅방의 대화상대가 아닙니다.')
+        if target == BOT_USERNAME:
+            raise ProtocolError('AI 비서에게는 방장을 넘길 수 없습니다.')
+        self.store.set_owner(meta['room_id'], target)
+        self._push_room_updated(meta['room_id'], meta['members'], ctx)
+        self._post_system(meta['room_id'], f'{self._member_label(meta, target)}님이 방장이 되었습니다.')
 
     def _h_room_rename(self, ctx: Ctx, msg: dict) -> None:
         meta = self._require_room_member(msg.get('room_id'), ctx.username)
@@ -1026,6 +1262,12 @@ class KakaoServer:
             if orig is None or orig['room_id'] != room_id:
                 raise ProtocolError('답장할 메시지를 찾을 수 없습니다.')
 
+        thread_root_id = _opt_int(msg, 'thread_root_id')
+        if thread_root_id is not None:
+            self._check_thread_root(thread_root_id, meta)
+            if msg.get('send_at') is not None:
+                raise ProtocolError('스레드 답글은 예약해서 보낼 수 없습니다.')
+
         mentions = [m for m in _str_list(msg, 'mentions', required=False) if m in meta['members']]
 
         attachment_id = None
@@ -1056,7 +1298,33 @@ class KakaoServer:
             return
 
         self._deliver_message(room_id, ctx.username, kind, content, reply_to_id, mentions,
-                              attachment_id, client_tmp_id, ctx, silent=silent)
+                              attachment_id, client_tmp_id, ctx, silent=silent, thread_root_id=thread_root_id)
+
+    def _check_thread_root(self, root_id: int, meta: dict) -> dict:
+        """스레드를 달 수 있는 원글인지 (§10.4): 같은 방, 삭제·시스템·답글이 아님, 비밀채팅 아님"""
+        if meta['type'] == 'secret':
+            raise ProtocolError('비밀채팅방에서는 스레드를 쓸 수 없습니다.')
+        root = self.store.get_message(root_id)
+        if root is None or root['room_id'] != meta['room_id']:
+            raise ProtocolError('스레드 원글을 찾을 수 없습니다.')
+        if root.get('thread_root') is not None:
+            raise ProtocolError('스레드 답글에는 다시 스레드를 달 수 없습니다.')
+        if root['deleted'] or root['kind'] == 'system':
+            raise ProtocolError('이 메시지에는 스레드를 달 수 없습니다.')
+        return root
+
+    def _h_mention_list(self, ctx: Ctx, msg: dict) -> None:
+        """멘션 모아보기 (§10.5)"""
+        limit = _opt_int(msg, 'limit')
+        limit = 100 if limit is None else max(1, min(limit, 200))
+        self._reply(ctx, {'type': 'mention_list', 'messages': self.store.mentions_of(ctx.username, limit)})
+
+    def _h_thread_get(self, ctx: Ctx, msg: dict) -> None:
+        root = self._require_message_member(_req_int(msg, 'root_id'), ctx.username)
+        if root.get('thread_root') is not None:
+            root = self._require_message_member(root['thread_root'], ctx.username)
+        self._reply(ctx, {'type': 'thread', 'root_id': root['msg_id'], 'room_id': root['room_id'], 'root': root,
+                          'messages': self.store.thread_replies(root['msg_id'], viewer=ctx.username)})
 
     @staticmethod
     def _validate_secret_content(content: str) -> None:
@@ -1072,13 +1340,18 @@ class KakaoServer:
 
     def _deliver_message(self, room_id: str, sender: str, kind: str, content: str,
                          reply_to_id: Optional[int], mentions: list[str], attachment_id: Optional[int],
-                         client_tmp_id: Any, ctx: Optional[Ctx], silent: bool = False) -> None:
+                         client_tmp_id: Any, ctx: Optional[Ctx], silent: bool = False,
+                         thread_root_id: Optional[int] = None) -> None:
         restored = self.store.restore_direct_members(room_id)
         if restored:
             self._push_room_updated(room_id, restored)
         message = self.store.add_message(room_id, sender, kind, content, reply_to_id, mentions, attachment_id,
-                                         silent=silent)
+                                         silent=silent, thread_root=thread_root_id)
         self._publish_new_message(message, ctx, client_tmp_id)
+        if thread_root_id is not None:   # 원글의 답글 수·마지막 답글 시각 갱신 (§10.4)
+            root = self.store.get_message(thread_root_id)
+            if root is not None:
+                self._push_msg_updated(root)
         self._after_user_message(message)
 
     def _h_read(self, ctx: Ctx, msg: dict) -> None:
@@ -1110,6 +1383,8 @@ class KakaoServer:
             raise ProtocolError('보낸 지 24시간이 지난 메시지는 모두에게서 삭제할 수 없습니다. 나에게서 삭제는 할 수 있습니다.')
         updated = self.store.delete_message(message['msg_id'])
         self._push_msg_updated(updated, ctx)
+        for reply in self.store.refresh_reply_previews(updated['msg_id']):   # 답장에 남은 원문 미리보기도 지운다
+            self._push_msg_updated(reply)
         if self.rag is not None and hasattr(self.rag, 'remove_message'):
             self._rag_queue.put(lambda: self.rag.remove_message(updated['msg_id']))
 
@@ -1134,7 +1409,11 @@ class KakaoServer:
             self._reply(ctx, {'type': 'msg_updated', 'message': message})
             return
         updated = self.store.edit_message(message['msg_id'], content)
+        if updated is None:
+            raise ProtocolError('삭제된 메시지는 수정할 수 없습니다.')
         self._push_msg_updated(updated, ctx)
+        for reply in self.store.refresh_reply_previews(updated['msg_id']):
+            self._push_msg_updated(reply)
         if self.rag is not None and hasattr(self.rag, 'remove_message'):
             self._rag_queue.put(lambda: (self.rag.remove_message(updated['msg_id']),
                                          self.rag.index_message(updated)))
@@ -1340,6 +1619,254 @@ class KakaoServer:
     def _h_todo_list(self, ctx: Ctx, msg: dict) -> None:
         self._reply(ctx, {'type': 'todo_list', 'todos': self.store.list_todos(ctx.username)})
 
+    # ------------------------------------------------------------------ 관리자 (명세 §4.2)
+    def _require_admin(self, ctx: Ctx) -> str:
+        """관리 범위 ('' = 그룹 전체, '회사' = 그 회사만 - 명세 §4.3). 관리자가 아니면 오류"""
+        scope = self.store.admin_scope(ctx.username)
+        if scope is None:
+            raise ProtocolError(ADMIN_ONLY)
+        return scope
+
+    def _require_group_admin(self, ctx: Ctx) -> None:
+        if self._require_admin(ctx):
+            raise ProtocolError('그룹 관리자만 할 수 있습니다.')
+
+    def _check_scope(self, scope: str, company: Optional[str]) -> None:
+        if scope and company != scope:
+            raise ProtocolError(f'관리 범위({scope}) 밖의 구성원입니다.')
+
+    def _admin_target(self, ctx: Ctx, msg: dict) -> str:
+        scope = self._require_admin(ctx)
+        username = _req_str(msg, 'username', 120, label='사용자')
+        if not self.store.user_exists(username):
+            raise ProtocolError('사용자를 찾을 수 없습니다.')
+        if self.store.is_bot(username):
+            raise ProtocolError('봇 계정은 관리할 수 없습니다.')
+        self._check_scope(scope, self.store.user_company(username))
+        return username
+
+    MEMBER_TEXT_LIMITS = {'department': 60, 'title': 60, 'account': 60, 'extension': 60, 'mobile': 60, 'email': 120}
+
+    def _member_fields(self, msg: dict, scope: str, creating: bool) -> dict:
+        """구성원 필드 검사 (명세 §4.3) → 바꿀 필드만"""
+        fields: dict = {}
+        if creating or 'company' in msg:
+            company = msg.get('company').strip() if isinstance(msg.get('company'), str) else ''
+            if company not in self.store.company_names():
+                raise ProtocolError('소속 회사를 선택해 주세요.')
+            self._check_scope(scope, company)
+            fields['company'] = company
+        for key, limit in self.MEMBER_TEXT_LIMITS.items():
+            if key in msg:
+                value = msg[key]
+                if value is None:
+                    value = ''
+                if not isinstance(value, str) or len(value.strip()) > limit or any(ord(ch) < 32 for ch in value):
+                    raise ProtocolError(f'{key} 값이 올바르지 않습니다.')
+                fields[key] = value.strip()
+        if fields.get('email') and not EMAIL_RE.fullmatch(fields['email']):
+            raise ProtocolError('이메일 주소 형식이 올바르지 않습니다.')
+        if 'employee_no' in msg:
+            number = msg['employee_no'].strip() if isinstance(msg['employee_no'], str) else ''
+            if number and not EMPLOYEE_NO_RE.fullmatch(number):
+                raise ProtocolError('사번은 영문·숫자 20자 이내로 입력해 주세요.')
+            fields['employee_no'] = number
+        return fields
+
+    def _h_admin_member_create(self, ctx: Ctx, msg: dict) -> None:
+        scope = self._require_admin(ctx)
+        name = _req_str(msg, 'username', 20, label='이름')
+        if any(ord(ch) < 32 for ch in name) or '@' in name or name == BOT_USERNAME:
+            raise ProtocolError('이름에 사용할 수 없는 문자가 있습니다.')
+        fields = self._member_fields(msg, scope, creating=True)
+        try:
+            self.store.member_create(name, fields)
+        except ValueError as exc:
+            raise ProtocolError(str(exc)) from None
+        self._broadcast_user(name)
+        self._admin_done(ctx, 'member_create', '구성원 등록', username=name)
+
+    def _h_admin_member_update(self, ctx: Ctx, msg: dict) -> None:
+        username = self._admin_target(ctx, msg)
+        fields = self._member_fields(msg, self._require_admin(ctx), creating=False)
+        try:
+            self.store.member_update(username, fields)
+        except ValueError as exc:
+            raise ProtocolError(str(exc)) from None
+        self._broadcast_user(username)
+        self._admin_done(ctx, 'member_update', '구성원 수정', username=username)
+
+    def _h_admin_member_delete(self, ctx: Ctx, msg: dict) -> None:
+        username = self._admin_target(ctx, msg)
+        if username == ctx.username:
+            raise ProtocolError('자기 계정은 삭제할 수 없습니다.')
+        self.store.member_set_removed(username, True)
+        for conn in self._user_conns([username]):
+            conn.send({'type': 'account_disabled', 'message': ACCOUNT_DISABLED})
+            self._disconnect(conn)
+        self._broadcast({'type': 'user_removed', 'username': username})
+        self._admin_done(ctx, 'member_delete', '구성원 삭제', username=username)
+
+    def _h_admin_member_restore(self, ctx: Ctx, msg: dict) -> None:
+        username = self._admin_target(ctx, msg)
+        self.store.member_set_removed(username, False)
+        self._broadcast_user(username)
+        self._admin_done(ctx, 'member_restore', '구성원 복원', username=username)
+
+    def _admin_done(self, ctx: Ctx, action: str, what: str, **fields: Any) -> None:
+        logger.info('관리자 %s: %s %s', ctx.username, what, fields.get('username', ''))
+        self._reply(ctx, {'type': 'admin_done', 'action': action, **fields})
+
+    def _h_admin_users(self, ctx: Ctx, msg: dict) -> None:
+        scope = self._require_admin(ctx)
+        users = [u for u in self.store.admin_user_list(self._online_users()) if not scope or u['company'] == scope]
+        self._reply(ctx, {'type': 'admin_users', 'users': users, 'scope': scope})
+
+    def _h_admin_reset_password(self, ctx: Ctx, msg: dict) -> None:
+        username = self._admin_target(ctx, msg)
+        password = msg.get('new_password')
+        if not isinstance(password, str) or not 4 <= len(password) <= 64:
+            raise ProtocolError('비밀번호는 4~64자로 입력해 주세요.')
+        self.store.set_password(username, password)
+        self.store.revoke_all_login_tokens(username)
+        self._admin_done(ctx, 'reset_password', '비밀번호 재설정', username=username)
+
+    def _h_admin_clear_password(self, ctx: Ctx, msg: dict) -> None:
+        username = self._admin_target(ctx, msg)
+        self.store.clear_password(username)
+        self._admin_done(ctx, 'clear_password', '등록 초기화', username=username)
+
+    def _h_admin_set_disabled(self, ctx: Ctx, msg: dict) -> None:
+        username = self._admin_target(ctx, msg)
+        disabled = msg.get('disabled')
+        if not isinstance(disabled, bool):
+            raise ProtocolError('disabled 는 true/false 여야 합니다.')
+        if disabled and username == ctx.username:
+            raise ProtocolError('자기 계정은 사용 중지할 수 없습니다.')
+        self.store.set_disabled(username, disabled)
+        self._admin_done(ctx, 'set_disabled', '사용 중지' if disabled else '사용 중지 해제',
+                         username=username, disabled=disabled)
+        if disabled:        # 접속 중이면 알리고 끊는다 (재연결해도 join 이 거절된다)
+            for conn in self._user_conns([username]):
+                conn.send({'type': 'account_disabled', 'message': ACCOUNT_DISABLED})
+                self._disconnect(conn)   # 읽기 스레드를 기다리지 않고 바로 접속 목록에서 뺀다 (두 번 불려도 안전)
+
+    def _h_admin_set_admin(self, ctx: Ctx, msg: dict) -> None:
+        self._require_group_admin(ctx)
+        username = self._admin_target(ctx, msg)
+        is_admin = msg.get('is_admin')
+        if not isinstance(is_admin, bool):
+            raise ProtocolError('is_admin 은 true/false 여야 합니다.')
+        company = msg.get('company') or ''
+        if not isinstance(company, str) or (company and company.strip() not in self.store.company_names()):
+            raise ProtocolError('소속 회사를 선택해 주세요.')
+        try:
+            self.store.set_admin(username, is_admin, company.strip())
+        except ValueError as exc:
+            raise ProtocolError(str(exc)) from None
+        self._broadcast_user(username)
+        self._admin_done(ctx, 'set_admin', '관리자 지정' if is_admin else '관리자 해제',
+                         username=username, is_admin=is_admin, company=company.strip() if is_admin else '')
+
+    def _h_admin_notice(self, ctx: Ctx, msg: dict) -> None:
+        self._require_group_admin(ctx)
+        content = _req_str(msg, 'content', 1000, label='공지 내용')
+        conns = self._all_joined_conns()
+        payload = {'type': 'admin_notice', 'sender': ctx.username, 'content': content, 'timestamp': now_iso()}
+        for conn in conns:
+            conn.send(payload)
+        self._admin_done(ctx, 'notice', '전체 공지', delivered=len({c.username for c in conns}))
+
+    # ---- 조직도 그룹 (명세 §4.4) ----
+    GROUP_MEMBERS_MAX = 500
+
+    def _group_fields(self, msg: dict) -> tuple[str, str, list[str]]:
+        name = _req_str(msg, 'name', 40, label='그룹 이름')
+        description = _opt_str(msg, 'description', 100)
+        if any(ord(ch) < 32 for ch in name + description):
+            raise ProtocolError('그룹 이름에 사용할 수 없는 문자가 있습니다.')
+        members = msg.get('members', [])
+        if not isinstance(members, list) or len(members) > self.GROUP_MEMBERS_MAX \
+                or not all(isinstance(m, str) and m.strip() for m in members):
+            raise ProtocolError('members 값이 올바르지 않습니다.')
+        return name, description, list(dict.fromkeys(m.strip() for m in members))
+
+    def _group_target(self, ctx: Ctx, msg: dict) -> int:
+        self._require_group_admin(ctx)
+        group_id = _req_int(msg, 'group_id')
+        if self.store.org_group(group_id) is None:
+            raise ProtocolError('그룹을 찾을 수 없습니다.')
+        return group_id
+
+    def _broadcast_org_groups(self) -> None:
+        self._broadcast({'type': 'org_groups', 'groups': self.store.org_groups(), 'order': self.store.org_order()})
+
+    ORG_ORDER_MAX = 600
+
+    def _h_admin_org_order(self, ctx: Ctx, msg: dict) -> None:
+        """조직도 아래쪽 덩어리(그룹 · 게스트 등) 순서 - 그룹 관리자만. KCS AI · 그룹사는 고정이라 목록에 없다"""
+        self._require_group_admin(ctx)
+        order = msg.get('order')
+        if not isinstance(order, list) or len(order) > self.ORG_ORDER_MAX or len(set(map(str, order))) != len(order):
+            raise ProtocolError('order 값이 올바르지 않습니다.')
+        for token in order:
+            kind, _, value = token.partition(':') if isinstance(token, str) else ('', '', '')
+            if not ((kind == 'group' and value.isdigit()) or
+                    (kind == 'company' and value.strip() and len(value) <= 60 and value == value.strip())):
+                raise ProtocolError('order 값이 올바르지 않습니다.')
+        try:
+            self.store.set_org_order(order)
+        except ValueError as exc:
+            self._broadcast_org_groups()          # 실패해도 요청한 사람 화면을 서버 순서로 되돌린다
+            raise ProtocolError(str(exc)) from None
+        self._broadcast_org_groups()
+        self._admin_done(ctx, 'org_order', '조직도 순서 변경', order=order)
+
+    def _h_admin_group_create(self, ctx: Ctx, msg: dict) -> None:
+        self._require_group_admin(ctx)
+        name, description, members = self._group_fields(msg)
+        try:
+            group_id = self.store.org_group_create(name, description, members, ctx.username)
+        except ValueError as exc:
+            raise ProtocolError(str(exc)) from None
+        self._broadcast_org_groups()
+        self._admin_done(ctx, 'group_create', '그룹 만들기', group_id=group_id, name=name)
+
+    def _h_admin_group_update(self, ctx: Ctx, msg: dict) -> None:
+        group_id = self._group_target(ctx, msg)
+        name, description, members = self._group_fields(msg)
+        try:
+            self.store.org_group_update(group_id, name, description, members)
+        except ValueError as exc:
+            raise ProtocolError(str(exc)) from None
+        self._broadcast_org_groups()
+        self._admin_done(ctx, 'group_update', '그룹 수정', group_id=group_id, name=name)
+
+    def _h_admin_group_reorder(self, ctx: Ctx, msg: dict) -> None:
+        self._require_group_admin(ctx)
+        ids = msg.get('group_ids')
+        if not isinstance(ids, list) or not all(isinstance(i, int) and not isinstance(i, bool) for i in ids):
+            raise ProtocolError('group_ids 값이 올바르지 않습니다.')
+        try:
+            self.store.org_group_reorder(ids)
+        except ValueError as exc:
+            self._broadcast_org_groups()          # 실패해도 요청한 사람 화면을 서버 순서로 되돌린다
+            raise ProtocolError(str(exc)) from None
+        self._broadcast_org_groups()
+        self._admin_done(ctx, 'group_reorder', '그룹 순서 변경', group_ids=ids)
+
+    def _h_admin_group_delete(self, ctx: Ctx, msg: dict) -> None:
+        group_id = self._group_target(ctx, msg)
+        self.store.org_group_delete(group_id)
+        self._broadcast_org_groups()
+        self._admin_done(ctx, 'group_delete', '그룹 삭제', group_id=group_id)
+
+    def _h_login_token_revoke(self, ctx: Ctx, msg: dict) -> None:
+        token = msg.get('token')
+        if isinstance(token, str) and token:
+            self.store.revoke_login_token(ctx.username, token)
+        self._reply(ctx, {'type': 'login_token_revoked'})
+
     # ------------------------------------------------------------------ 프로필 / 첨부
     def _h_profile_update(self, ctx: Ctx, msg: dict) -> None:
         fields: dict = {}
@@ -1350,8 +1877,8 @@ class KakaoServer:
                                                 label='상태메시지')
         if 'birthday' in msg:
             fields['birthday'] = _validate_birthday(msg.get('birthday'))
-        if _bool(msg, 'avatar_clear'):
-            fields['avatar_id'] = None
+        if _bool(msg, 'avatar_clear'):   # '기본 이미지' = 조직도 사진 (없으면 사진 없음)
+            fields['avatar_id'] = self.store.org_avatar(ctx.username)
         elif msg.get('avatar_b64') is not None:
             data = _decode_b64(msg.get('avatar_b64'), MAX_AVATAR_BYTES, '프로필 사진은 512KB를 초과할 수 없습니다.')
             sniffed = _sniff_image(data)
@@ -1403,7 +1930,7 @@ class KakaoServer:
     def _h_presence_set(self, ctx: Ctx, msg: dict) -> None:
         presence = msg.get('presence')
         if presence not in PRESENCES:
-            raise ProtocolError('상태는 online/away/busy/meeting 중 하나여야 합니다.')
+            raise ProtocolError('상태는 online/away/busy/meeting/vacation 중 하나여야 합니다.')
         self.store.update_profile(ctx.username, {'presence': presence})
         self._broadcast_user(ctx.username, ctx)
 
@@ -1433,20 +1960,26 @@ class KakaoServer:
 
     def _run_scheduled(self) -> None:
         for item in self.store.pop_due_scheduled(now_iso()):
-            room_id, sender, p = item['room_id'], item['sender'], item['payload']
-            if not self.store.is_member(room_id, sender):
-                logger.info('예약 메시지 %s 취소: 발신자가 방을 나감', item['scheduled_id'])
-                continue
-            reply_to_id = p.get('reply_to_id')
-            if reply_to_id is not None:
-                orig = self.store.get_message(reply_to_id)
-                if orig is None or orig['room_id'] != room_id:
-                    reply_to_id = None
-            members = set(self.store.members(room_id))
-            mentions = [m for m in p.get('mentions', []) if m in members]
-            self._deliver_message(room_id, sender, p['kind'], p['content'], reply_to_id, mentions,
-                                  p.get('attachment_id'), p.get('client_tmp_id'), None,
-                                  silent=bool(p.get('silent')))
+            try:
+                self._deliver_scheduled(item)
+            except Exception:   # 한 건이 실패해도 같은 시각의 나머지 예약 메시지는 보낸다
+                logger.exception('예약 메시지 %s 전송 실패', item.get('scheduled_id'))
+
+    def _deliver_scheduled(self, item: dict) -> None:
+        room_id, sender, p = item['room_id'], item['sender'], item['payload']
+        if not self.store.is_member(room_id, sender):
+            logger.info('예약 메시지 %s 취소: 발신자가 방을 나감', item['scheduled_id'])
+            return
+        reply_to_id = p.get('reply_to_id')
+        if reply_to_id is not None:
+            orig = self.store.get_message(reply_to_id)
+            if orig is None or orig['room_id'] != room_id:
+                reply_to_id = None
+        members = set(self.store.members(room_id))
+        mentions = [m for m in p.get('mentions', []) if m in members]
+        self._deliver_message(room_id, sender, p['kind'], p['content'], reply_to_id, mentions,
+                              p.get('attachment_id'), p.get('client_tmp_id'), None,
+                              silent=bool(p.get('silent')))
 
     def _run_reminders(self) -> None:
         for event, minutes in self.store.due_reminders(datetime.now(), REMINDER_GRACE):
@@ -1939,7 +2472,7 @@ class KakaoServer:
                     'display_name': _req_str(p, 'display_name', 20, label='이름'),
                     'status_message': _opt_str(p, 'status_message', 60), 'viewers': viewers}
             if _bool(p, 'avatar_clear'):
-                item['avatar_id'] = None
+                item['avatar_id'] = self.store.org_avatar(ctx.username)
             elif p.get('avatar_b64') is not None:
                 data = _decode_b64(p.get('avatar_b64'), MAX_AVATAR_BYTES, '프로필 사진은 512KB를 초과할 수 없습니다.')
                 sniffed = _sniff_image(data)
@@ -2062,6 +2595,8 @@ class KakaoServer:
             raise ProtocolError('존재하지 않는 오픈채팅방입니다.')
         if ctx.username in meta['members']:
             raise ProtocolError('이미 참여한 오픈채팅방입니다.')
+        if self.store.is_banned(room_id, ctx.username):
+            raise ProtocolError('방장이 내보낸 오픈채팅방에는 다시 들어갈 수 없습니다.')
         nickname = _req_str(msg, 'nickname', 20, label='닉네임')
         self.store.join_open_room(room_id, ctx.username, nickname)
         self._push_room_updated(room_id, meta['members'] + [ctx.username], ctx)
@@ -2146,14 +2681,24 @@ class KakaoServer:
 
     def _h_room_export(self, ctx: Ctx, msg: dict) -> None:
         """대화 내보내기: 500개씩 읽고(저장소 잠금은 쪽마다) 2000개씩 여러 조각으로 보낸다.
-        room_export {room_id, messages(이 조각, 오래된 순), part, done, truncated}"""
+        room_export {room_id, since?, until?} → room_export {room_id, messages(이 조각, 오래된 순), part, done,
+        truncated, since, until}. since/until 은 'YYYY-MM-DD'(그날 포함) - 그 기간의 메시지만 (명세 §9.5)"""
         meta = self._require_room_member(msg.get('room_id'), ctx.username)
         room_id = meta['room_id']
+        since, until = self._export_day(msg, 'since'), self._export_day(msg, 'until')
+        if since and until and since > until:
+            raise ProtocolError('시작 날짜가 끝 날짜보다 늦습니다.')
+
+        def in_range(m: dict) -> bool:
+            day = (m.get('timestamp') or '')[:10]
+            return (not since or day >= since) and (not until or day <= until)
+
         messages, before, truncated = [], None, False
         while True:
             page, more = self.store.history(room_id, before, EXPORT_PAGE, viewer=ctx.username)
-            messages = page + messages
-            if not more or not page:
+            messages = [m for m in page if in_range(m)] + messages
+            reached_start = bool(since and page and (page[0].get('timestamp') or '')[:10] < since)
+            if not more or not page or reached_start:      # 기간 시작보다 오래된 쪽까지 왔으면 그만 읽는다
                 break
             if len(messages) >= MAX_EXPORT_MESSAGES:
                 truncated = True
@@ -2163,4 +2708,19 @@ class KakaoServer:
         chunks = [messages[k:k + EXPORT_CHUNK] for k in range(0, len(messages), EXPORT_CHUNK)] or [[]]
         for part, chunk in enumerate(chunks):
             self._reply(ctx, {'type': 'room_export', 'room_id': room_id, 'messages': chunk, 'part': part,
-                              'done': part == len(chunks) - 1, 'truncated': truncated})
+                              'done': part == len(chunks) - 1, 'truncated': truncated,
+                              'since': since, 'until': until})
+
+    @staticmethod
+    def _export_day(msg: dict, key: str) -> Optional[str]:
+        """내보내기 기간 'YYYY-MM-DD' (없으면 None)"""
+        value = msg.get(key)
+        if value in (None, ''):
+            return None
+        if not isinstance(value, str) or not re.fullmatch(r'\d{4}-\d{2}-\d{2}', value):
+            raise ProtocolError('기간은 YYYY-MM-DD 형식으로 보내 주세요.')
+        try:
+            date.fromisoformat(value)
+        except ValueError:
+            raise ProtocolError('기간은 YYYY-MM-DD 형식으로 보내 주세요.') from None
+        return value

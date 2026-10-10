@@ -31,21 +31,39 @@ OTHER = '기타'
 
 # (테스트 id 정규식 'module.Class.method', 기능 key) - 위에서부터 먼저 맞는 것
 MAPPING = [
-    # 사내 그룹웨어와 같은 조직도 (엑셀 → 케이씨에스 › 주식회사케이씨에스 › 부서 10개)
+    (r'test_kakao_admin|test_kakao_member_admin|disabled_by_admin', 'admin'),
+    (r'(?i)Login(Flow)?Tests|login_dialog|logout|auto_login|fresh_login|password_reset|SavedLoginDialog|LoginHardening|RequirePassword', 'login'),
+    (r'test_kakao_review_fixes\.ServerReviewFixTests\.test_(deleted|edit)', 'edit'),
+    (r'test_kakao_review_fixes\.ServerReviewFixTests\.test_one_failing_scheduled', 'scheduled'),
+    (r'test_kakao_review_fixes\.ClientReviewFixTests', 'room_list'),
+    (r'test_kakao_settings_store|test_kakao_review_fixes\.SettingsUiReviewFixTests', 'lock'),
+    (r'(?i)UnreadBlink', 'unread_blink'),
+    # 사내 그룹웨어와 같은 조직도 (엑셀 → 그룹사 › 한국지주 · 계열사 13곳 같은 단계, 지식봇 맨 위, 조직도 그룹)
+    # v5 - 업무용 메신저 필수 기능 (test_kakao_v5, 명세 §10)
+    (r'test_kakao_v5\.(Dnd)', 'dnd'),
+    (r'test_kakao_v5\.Vacation', 'presence'),
+    (r'test_kakao_v5\.RoomOwner', 'room_owner'),
+    (r'test_kakao_v5\.Thread', 'thread'),
+    (r'test_kakao_v5\.MentionList|test_kakao_v5\.WorkUiTest\.test_mentions', 'mentions_inbox'),
+    (r'test_kakao_v5\.WorkUiTest\.test_unread', 'unread_members'),
+    (r'test_kakao_v5\.WorkUiTest\.test_draft', 'draft'),
+    (r'test_kakao_v5\.WorkUiTest\.test_bookmark', 'bookmark'),
+    (r'test_kakao_v5\.(MainWindowMinSize|Contrast)', 'font_size'),
     # v4 - 카카오톡 2026 업데이트 반영 (test_kakao_v4)
     (r'test_kakao_v4\..*(Summary|summary)', 'ai_summary'),
     (r'test_kakao_v4\..*reaction', 'reaction_more'),
     (r'test_kakao_v4\..*voice', 'voice_msg'),
     (r'test_kakao_v4\..*contact', 'contact_share'),
     (r'test_kakao_v4\..*(call_history|call_folder)', 'call_folder'),
-    (r'test_kakao_v4\..*export', 'chat_export'),
+    (r'test_kakao_v4\..*export|test_kakao_chat_export', 'chat_export'),
     (r'test_kakao_v4\..*story', 'story_hide'),
     (r'test_kakao_v4\.FailedMessageTest', 'failed_resend'),
     (r'test_kakao_v4\.(UiStylingPatternsTest|DesignTokenExportTest)', 'keyboard'),
     (r'test_kakao_v4\.AccessibilityTest\.test_keyboard|shortcuts_and_quick_switcher', 'keyboard'),
     (r'test_kakao_v4\..*org_contact', 'contact_share'),
-    (r'test_kakao_org_groupware\.', 'org_chart'),
+    (r'test_kakao_org_groupware\.|test_kakao_org_groups\.', 'org_chart'),
     (r'test_kakao_friend_add\.', 'friend_add'),
+    (r'test_kakao_osenv\.', 'platforms'),   # OS 공통 계층 · kcs.py · 빌드 · 바로가기
     # v3 화면 (이 스크립트와 함께 만든 테스트)
     (r'test_kakao_tour\.OpenChatTests', 'open_chat'),
     (r'test_kakao_tour\.TalkDrawerTests', 'talk_drawer'),
@@ -141,7 +159,7 @@ MAPPING = [
     (r'ChatsTabTests|room_list|row_content|relative_time', 'room_list'),
     # 설정 · 브랜드
     (r'test_kakao_wallpaper|wallpaper', 'wallpaper'),
-    (r'test_kakao_brand|brand|logo|app_icon', 'brand_ci'),
+    (r'test_kakao_brand|test_kakao_macos|brand|logo|app_icon', 'brand_ci'),
     (r'dark|apply_theme', 'dark_mode'),
     (r'font', 'font_size'),
     (r'notification|notifies', 'notifications'),

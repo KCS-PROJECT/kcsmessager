@@ -8,16 +8,17 @@
 import time
 
 from PyQt5.QtCore import Qt, QRectF, QTimer, QEvent, QObject, QPoint, pyqtSignal
-from PyQt5.QtGui import QPainter, QColor, QPalette, QKeySequence
+from PyQt5.QtGui import QPainter, QColor, QPalette, QKeySequence, QIcon, QPixmap
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QLabel,
                              QPushButton, QStackedWidget, QAbstractButton, QSystemTrayIcon, QMenu,
                              QSizePolicy, QFrame, QShortcut, QDialog, QLineEdit, QListWidget,
                              QListWidgetItem)
 
 from client.kakao import theme
+from client.kakao import osenv
 from client.kakao.widgets import paint_icon, Badge
 from client.kakao.login import talk_icon, talk_icon_pixmap
-from client.kakao import brand
+from client.kakao import brand, macos
 from client.kakao.chats_tab import presence_of, set_presence, user_pixmap, connect_avatar_changed
 
 APP_TITLE = 'KCS Talk'
@@ -135,7 +136,7 @@ class Sidebar(QWidget):
             self.buttons[key] = btn
         col.addStretch(1)
         self.me_avatar = QLabel()
-        self.me_avatar.setFixedSize(32, 32)
+        self.me_avatar.setFixedSize(theme.AVATAR_ROW, theme.AVATAR_ROW)   # 모든 목록과 같은 사진 크기
         self.me_avatar.setToolTip('내 프로필')
         col.addWidget(self.me_avatar, 0, Qt.AlignHCenter)
         self.chat_badge = Badge(0, self.buttons['chats'])
@@ -145,7 +146,7 @@ class Sidebar(QWidget):
 
     def refresh_me(self):
         if self.state.me:
-            self.me_avatar.setPixmap(user_pixmap(self.state, self.state.me, 32, show_presence=True))
+            self.me_avatar.setPixmap(user_pixmap(self.state, self.state.me, theme.AVATAR_ROW, show_presence=True))
             self.me_avatar.setToolTip(f"{self.state.display_name(self.state.me)} · 내 프로필")
 
     def _place_badge(self):
@@ -173,6 +174,11 @@ class Sidebar(QWidget):
     def paintEvent(self, event):
         p = QPainter(self)
         p.fillRect(self.rect(), QColor(theme.c('sidebar')))
+
+    def set_top_inset(self, height):
+        """macOS 투명 제목 표시줄: 신호등 버튼 높이만큼 로고·탭 버튼을 내린다 (배경은 맨 위까지 칠한다)"""
+        margins = self.layout().contentsMargins()
+        self.layout().setContentsMargins(margins.left(), 16 + height, margins.right(), margins.bottom())
 
     def apply_theme(self):
         self._refresh_logo()
@@ -340,11 +346,86 @@ class ConnectionBanner(QFrame):
 
     def apply_theme(self):
         self.setStyleSheet(
-            f"ConnectionBanner {{ background: {'#4A2A28' if theme.is_dark() else '#FFF1F0'};"
-            f" border-bottom: 1px solid {theme.c('border')}; }}"
-            f" QLabel {{ color: {theme.c('badge')}; font-size: {theme.fs('body')}px; font-weight: bold; }}"
-            f" QPushButton {{ background: {theme.c('bg')}; border: 1px solid {theme.c('border')};"
+            # 경고 글자 danger_text 는 bg_alt 위에서 라이트·다크 모두 4.5:1 이상, 아래 빨간 줄로 경고임을 표시
+            f"ConnectionBanner {{ background: {theme.c('bg_alt')};"
+            f" border-bottom: 2px solid {theme.c('badge')}; }}"
+            f" QLabel {{ color: {theme.c('danger_text')}; font-size: {theme.fs('body')}px; font-weight: bold; }}"
+            f" QPushButton {{ background: {theme.c('bg')}; color: {theme.c('text')}; border: 1px solid {theme.c('border')};"
             f" border-radius: 12px; padding: 4px 12px; font-size: {theme.fs('meta')}px; }}")
+
+
+# ================================================================ 안 읽은 메시지 아이콘 깜박임
+def faded_icon(opacity, sizes=(16, 32, 64, 128, 256)):
+    """앱 아이콘 전체를 흐리게 (깜박임의 '꺼진' 프레임). 빨간 점 같은 덧그림은 없다"""
+    icon = QIcon()
+    for size in sizes:
+        pm = QPixmap(size, size)
+        pm.fill(Qt.transparent)
+        p = QPainter(pm)
+        p.setOpacity(opacity)
+        p.drawPixmap(0, 0, QPixmap(talk_icon_pixmap(size)))
+        p.end()
+        icon.addPixmap(pm)
+    return icon
+
+
+class UnreadBlinker(QObject):
+    """안 읽은 메시지가 남아 있는 동안 앱 아이콘 전체를 깜박인다 (설정 'blink_unread').
+    Dock·창·트레이 아이콘이 모두 평소 아이콘 ↔ 거의 사라진 아이콘을 오간다.
+    '동작 줄이기'가 켜져 있으면 깜박이지 않고 흐린 아이콘으로 계속 표시한다. 다 읽으면 평소 아이콘으로 돌아온다."""
+
+    INTERVAL_MS = 600
+    OFF_OPACITY = 0.12       # 깜박임 '꺼짐' 프레임 - Dock 칸이 비어 보이지 않을 만큼만 남긴다
+    STEADY_OPACITY = 0.45    # 동작 줄이기: 깜박이지 않고 흐리게만
+
+    def __init__(self, window, settings, parent=None):
+        super().__init__(parent)
+        self.window = window
+        self.settings = settings
+        self.normal_icon = talk_icon()
+        self.off_icon = faded_icon(self.OFF_OPACITY)
+        self.steady_icon = faded_icon(self.STEADY_OPACITY)
+        self.lit = True          # True = 평소 아이콘이 보이는 프레임
+        self.alerting = False    # 안 읽음 표시 중(깜박임 또는 고정 흐린 아이콘)
+        self.timer = QTimer(self)
+        self.timer.setInterval(self.INTERVAL_MS)
+        self.timer.timeout.connect(self._tick)
+
+    @property
+    def blinking(self):
+        return self.timer.isActive()
+
+    def update(self, unread):
+        want = unread > 0 and bool(self.settings.get('blink_unread'))
+        steady = bool(self.settings.get('reduce_motion'))
+        if want and steady:
+            self.timer.stop()
+            self._show(False, steady=True)
+        elif want:
+            if not self.timer.isActive():
+                self.timer.start()
+                self._show(False)          # 바로 한 번 바뀌어 보이게
+        elif self.alerting or self.timer.isActive():
+            self.stop()
+            return
+        self.alerting = want
+
+    def stop(self):
+        self.timer.stop()
+        self.alerting = False
+        self._show(True)
+
+    def _tick(self):
+        self._show(not self.lit)
+
+    def _show(self, lit, steady=False):
+        self.lit = lit
+        icon = self.normal_icon if lit else (self.steady_icon if steady else self.off_icon)
+        tray = getattr(self.window, 'tray', None)
+        if tray is not None:
+            tray.setIcon(icon)
+        self.window.setWindowIcon(icon)
+        QApplication.setWindowIcon(icon)     # macOS Dock 아이콘 · 작업 표시줄
 
 
 # ================================================================ 자동 자리비움
@@ -425,12 +506,48 @@ class PlaceholderTab(QWidget):
         self.label.setStyleSheet(f"color: {theme.c('text_hint')}; font-size: {theme.fs('body')}px;")
 
 
+class TitleBand(QWidget):
+    """사이드바 오른쪽 본문. macOS 에서 제목 표시줄을 투명하게 하면(로그인 창과 같은 모양) 위 28px 띠가
+    비는데, 그 띠를 아래 열(조직도 · 목록 · 대화창)의 헤더 색으로 칠해 헤더가 창 맨 위까지 이어져 보이게 한다"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.band = 0
+        self.columns = []    # [(widget, 칠할 색 토큰 목록을 돌려주는 함수)] - 반투명 색은 앞 색 위에 겹친다
+
+    def set_band(self, height):
+        self.band = height
+        margins = self.layout().contentsMargins()
+        self.layout().setContentsMargins(margins.left(), height, margins.right(), margins.bottom())
+        self.update()
+
+    def event(self, e):
+        if e.type() == QEvent.LayoutRequest and self.band:   # 열이 생기거나 사라지면(분할 화면 · 조직도) 띠도 다시
+            self.update(0, 0, self.width(), self.band)
+        return super().event(e)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        if self.band:
+            self.update(0, 0, self.width(), self.band)
+
+    def paintEvent(self, event):
+        if not self.band:
+            return
+        p = QPainter(self)
+        for widget, color in self.columns:
+            if widget.isVisible():
+                for key in color():
+                    p.fillRect(widget.x(), 0, widget.width(), self.band, theme.qc(key))
+
+
 class MainWindow(QMainWindow):
-    def __init__(self, state, settings, reconnect=None, server_address='', parent=None):
+    def __init__(self, state, settings, reconnect=None, server_address='', parent=None, logout=None):
         super().__init__(parent)
         self.state = state
         self.settings = settings
         self.reconnect_cb = reconnect
+        self.logout_cb = logout
         self.server_address = server_address
         self.room_windows = {}
         self._last_notify_room = ''
@@ -441,8 +558,6 @@ class MainWindow(QMainWindow):
 
         self.setWindowIcon(talk_icon())
         self.resize(400, 680)
-        self.setMinimumSize(340, 520)
-
         central = QWidget()
         self.setCentralWidget(central)
         row = QHBoxLayout(central)
@@ -450,6 +565,12 @@ class MainWindow(QMainWindow):
         row.setSpacing(0)
         self.sidebar = Sidebar(state)
         row.addWidget(self.sidebar)
+        self.body = TitleBand()
+        body_row = QHBoxLayout(self.body)
+        body_row.setContentsMargins(0, 0, 0, 0)
+        body_row.setSpacing(0)
+        row.addWidget(self.body, 1)
+        row = body_row
         # 넓은 창에서는 조직도를 왼쪽에 항상 펼쳐 둔다(현재 탭이 조직도가 아닐 때)
         from client.kakao.org_tab import OrgTab
         self.org_dock = OrgTab(state, settings)
@@ -482,6 +603,10 @@ class MainWindow(QMainWindow):
         self.room_pane.addWidget(self.room_placeholder)
         row.addWidget(self.room_pane, 1)
         self.toast = Toast(central)
+        self.body.columns = [(self.org_dock, lambda: ['bg']), (self.dock_line, lambda: ['border']),
+                             (self.list_column, lambda: ['bg']), (self.split_line, lambda: ['border']),
+                             (self.room_pane, self._room_band_colors)]
+        self.room_pane.currentChanged.connect(lambda _i: self.body.update())
 
         self.tabs = {}
         self._build_tabs()
@@ -496,6 +621,7 @@ class MainWindow(QMainWindow):
         state.welcomed.connect(self._on_welcomed)
         state.error.connect(self.show_toast)
         state.notify.connect(self.show_notification)
+        state.admin_notice.connect(self.show_admin_notice)
         settings.changed.connect(self._on_setting_changed)
         self.banner.reconnect_clicked.connect(self.reconnect)
 
@@ -504,6 +630,7 @@ class MainWindow(QMainWindow):
         label_buttons_for_accessibility(self)
         self.tray = None
         self._setup_tray()
+        self.blinker = UnreadBlinker(self, settings, self)
         self.idle_watcher = IdleWatcher(state, parent=self, lock_seconds=self._lock_seconds, on_lock=self.lock)
         from client.kakao.lock import LockScreen, has_pin
         self.lock_screen = LockScreen(settings, self)
@@ -605,6 +732,7 @@ class MainWindow(QMainWindow):
         except Exception as e:  # 캘린더 모듈이 없거나 오류여도 앱은 동작해야 한다
             self.tabs['calendar'] = PlaceholderTab(f'캘린더를 불러올 수 없습니다\n({e.__class__.__name__})')
         self.tabs['more'] = MoreTab(self.state, self.settings, server_address=self.server_address)
+        self.tabs['more'].logout_requested.connect(lambda: self.logout_cb and self.logout_cb())
         for key in TAB_KEYS:
             self.stack.addWidget(self.tabs[key])
 
@@ -629,8 +757,10 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, apply)
 
     # ---- 키보드 ----
-    SHORTCUT_HELP = [('Ctrl+1~5', '친구 · 채팅 · 조직도 · 캘린더 · 더보기'), ('Ctrl+K', '채팅방·동료 빠른 이동'),
-                     ('Ctrl+N', '새 채팅'), ('Ctrl+Shift+A', '친구 추가')]
+    # 키 연결은 어디서나 'Ctrl+…' (Qt 가 macOS 에서 ⌘ 로 바꾼다), 보이는 글자만 OS 표기로
+    SHORTCUT_HELP = [(osenv.shortcut_text('Ctrl+1~5'), '친구 · 채팅 · 조직도 · 캘린더 · 더보기'),
+                     (osenv.shortcut_text('Ctrl+K'), '채팅방·동료 빠른 이동'),
+                     (osenv.shortcut_text('Ctrl+N'), '새 채팅'), (osenv.shortcut_text('Ctrl+Shift+A'), '친구 추가')]
 
     def _setup_shortcuts(self):
         self.shortcuts = []
@@ -649,7 +779,7 @@ class MainWindow(QMainWindow):
             if hasattr(self.tabs['friends'], 'show_add_friend') else None)
         for key, btn in self.sidebar.buttons.items():
             idx = TAB_KEYS.index(key) + 1
-            btn.setToolTip(f'{TAB_LABELS[key]}  (Ctrl+{idx})')
+            btn.setToolTip(f"{TAB_LABELS[key]}  ({osenv.shortcut_text(f'Ctrl+{idx}')})")
             btn.setAccessibleName(TAB_LABELS[key])
 
     def open_quick_switcher(self, exec_=True):
@@ -720,6 +850,8 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"{APP_TITLE} ({total})" if total else APP_TITLE)
         if self.tray is not None:
             self.tray.setToolTip(f"{APP_TITLE} - 안 읽은 메시지 {total}개" if total else APP_TITLE)
+        if getattr(self, 'blinker', None) is not None:
+            self.blinker.update(total)
 
     # ---- 채팅방 창 ----
     def open_room(self, room_id):
@@ -749,7 +881,9 @@ class MainWindow(QMainWindow):
             return None
         win = ChatRoomWindow(self.state, room_id)
         win.setAttribute(Qt.WA_DeleteOnClose, True)
-        win.destroyed.connect(lambda _obj=None, rid=room_id: self.room_windows.pop(rid, None))
+        # 같은 방을 다시 열어 새 창이 들어와 있으면 그 항목은 지우지 않는다 (이 창일 때만 제거)
+        win.destroyed.connect(lambda _obj=None, rid=room_id, w=win:
+                              self.room_windows.pop(rid, None) if self.room_windows.get(rid) is w else None)
         if self.is_split():
             # 분할 화면: 오른쪽 칸에 끼워 연다
             self.room_windows[room_id] = win
@@ -778,10 +912,13 @@ class MainWindow(QMainWindow):
         win.activateWindow()
         return win
 
-    def focus_message(self, room_id, msg_id):
+    def focus_message(self, room_id, msg_id, hint=None):
         win = self.open_room(room_id)
         if win is not None and hasattr(win, 'focus_message'):
-            win.focus_message(msg_id)
+            if hint is not None and hint.get('thread_root') is not None:   # 스레드 답글이면 스레드 창 (§10.4)
+                win.focus_message(msg_id, hint=hint)
+            else:
+                win.focus_message(msg_id)
 
     def _close_room_window(self, room_id):
         win = self.room_windows.pop(room_id, None)
@@ -799,12 +936,36 @@ class MainWindow(QMainWindow):
         menu = QMenu()
         menu.addAction('KCS Talk 열기', self.bring_to_front)
         menu.addSeparator()
+        self.tray_dnd_menu = menu.addMenu('알림 일시중지')
+        self.tray_dnd_menu.aboutToShow.connect(self._fill_tray_dnd_menu)
+        menu.addSeparator()
+        if self.logout_cb is not None:
+            self.tray_logout_action = menu.addAction('로그아웃…', self.request_logout)
         menu.addAction('종료', self.quit_app)
         self.tray.setContextMenu(menu)
         self._tray_menu = menu
         self.tray.activated.connect(self._tray_activated)
         self.tray.messageClicked.connect(self._notification_clicked)
         self.tray.show()
+
+    def _fill_tray_dnd_menu(self):
+        """트레이 → 알림 일시중지 (방해금지 §10.1)"""
+        from client.kakao import dnd
+        menu = self.tray_dnd_menu
+        menu.clear()
+        status = menu.addAction(dnd.status_text(self.settings))
+        status.setEnabled(False)
+        menu.addSeparator()
+        for label, preset in dnd.PAUSE_PRESETS:
+            menu.addAction(label, lambda _checked=False, p=preset: dnd.pause(self.settings, p))
+        if dnd.paused_until(self.settings) is not None:
+            menu.addSeparator()
+            menu.addAction('일시중지 끄기', lambda _checked=False: dnd.resume(self.settings))
+
+    def request_logout(self):
+        """트레이 메뉴 등에서: 창을 앞으로 가져와 더보기 탭과 같은 확인 후 로그아웃"""
+        self.bring_to_front()
+        self.tabs['more']._confirm_logout()
 
     def _tray_activated(self, reason):
         if reason in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick):
@@ -850,6 +1011,14 @@ class MainWindow(QMainWindow):
     def show_toast(self, text):
         self.toast.show_message(text)
 
+    def show_admin_notice(self, notice):
+        """관리자 전체 공지 (명세 §4.2): 비모달 '관리자 공지' 창 + 트레이 알림"""
+        from client.kakao.admin import show_admin_notice
+        if self.tray is not None and self.tray.supportsMessages():
+            self.tray.showMessage('관리자 공지', notice.get('content', ''), talk_icon(), 6000)
+        self.admin_notice_box = show_admin_notice(self, notice)
+        return self.admin_notice_box
+
     # ---- 연결 ----
     def _on_connection_lost(self, reason=''):
         self.banner.label.setText('서버 연결이 끊어졌습니다')
@@ -891,12 +1060,24 @@ class MainWindow(QMainWindow):
     def _on_setting_changed(self, key):
         if key in ('dark_mode', 'font_scale', 'brand_theme'):
             self.apply_theme_all()
-        elif key in ('muted_rooms',):
+        elif key in ('muted_rooms', 'blink_unread', 'reduce_motion'):
             self.refresh_unread()
+
+    MIN_FLOOR = (340, 520)   # 창 최소 크기 하한 (디자인 기준)
+
+    def update_minimum_size(self):
+        """최소 크기 = max(하한, 레이아웃이 필요한 크기) - 글자 200%에서도 창이 내용보다 좁아져 잘리지 않게 (§10.9)"""
+        layout = self.centralWidget().layout() if self.centralWidget() else None
+        if layout is None:
+            return
+        layout.activate()
+        need = layout.totalMinimumSize()
+        self.setMinimumSize(max(self.MIN_FLOOR[0], need.width()), max(self.MIN_FLOOR[1], need.height()))
 
     def apply_theme_all(self):
         apply_app_theme(self.settings)
         self.apply_theme()
+        QTimer.singleShot(0, self.update_minimum_size)
         for win in list(self.room_windows.values()):
             try:
                 if hasattr(win, 'apply_theme'):
@@ -904,7 +1085,23 @@ class MainWindow(QMainWindow):
             except RuntimeError:
                 pass
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.update_minimum_size()
+        # macOS: 회색 제목 표시줄 대신 사이드바 · 헤더 색이 창 맨 위(신호등 버튼 뒤)까지 (로그인 창과 같은 모양)
+        if not getattr(self, '_title_bar_unified', False) and macos.unify_title_bar(self):
+            self._title_bar_unified = True
+            self.sidebar.set_top_inset(macos.TITLE_BAR_HEIGHT)
+            self.body.set_band(macos.TITLE_BAR_HEIGHT)
+
+    def _room_band_colors(self):
+        """분할 화면 대화창 위 띠: 대화방이면 대화방 헤더와 같게(대화 배경 위 반투명 헤더), 빈 화면이면 그 배경색"""
+        if self.room_pane.currentWidget() is self.room_placeholder:
+            return ['chat_bg']
+        return ['chat_bg', 'header_panel']
+
     def apply_theme(self):
+        self.body.update()
         self.sidebar.apply_theme()
         self.banner.apply_theme()
         self.lock_screen.apply_theme()
@@ -927,6 +1124,7 @@ class MainWindow(QMainWindow):
             except RuntimeError:
                 pass
         self.idle_watcher.stop()
+        self.blinker.stop()
         self.state.locked = False
         if self.tray is not None:
             self.tray.hide()

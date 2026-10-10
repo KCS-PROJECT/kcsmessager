@@ -1,0 +1,89 @@
+# KCS Talk 세 OS 실제 실행 점검 - Windows · Ubuntu · macOS 러너에서 같은 명령으로
+name: cross-platform
+
+on:
+  push:
+    branches: [main, 'feature/**']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONIOENCODING: utf-8
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Linux - Qt 화면 라이브러리 · 한글/이모지 글꼴
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxcb-xinerama0 libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 \
+            libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 libegl1 libgl1 \
+            libdbus-1-3 libpulse0 fonts-noto-cjk fonts-noto-color-emoji
+
+      - name: 설치 (requirements-kcs.txt)
+        run: python -m pip install -r requirements-kcs.txt
+
+      - name: kcs.py doctor
+        run: python kcs.py doctor
+
+      - name: 단위 테스트 (전체)
+        run: python -m unittest discover -s tests -p "test_*.py"
+
+      - name: 소스 실행 점검 (서버 접속 · 클라이언트 self-check)
+        run: python scripts/ci_smoke.py source
+
+      - name: 실제 서버 + 클라이언트 세션 끝까지 (demo --headless-check)
+        run: python scripts/demo.py --headless-check
+
+      - name: Windows - 설치 배치 파일 실행 (pip · doctor · 바탕화면/시작 메뉴 바로가기)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          call launch\windows\install.bat < NUL
+          if not exist "%USERPROFILE%\Desktop\KCS Talk.lnk" exit /b 1
+          if not exist "%APPDATA%\Microsoft\Windows\Start Menu\Programs\KCS Talk.lnk" exit /b 1
+          echo shortcuts OK
+
+      - name: Linux - 설치 스크립트 실행 (앱 목록 .desktop)
+        if: runner.os == 'Linux'
+        run: |
+          sh launch/linux/install.sh
+          test -f ~/.local/share/applications/kr.co.kcs.talk.desktop
+          desktop-file-validate ~/.local/share/applications/kr.co.kcs.talk.desktop || true
+          cat ~/.local/share/applications/kr.co.kcs.talk.desktop
+
+      - name: macOS - 설치 스크립트 실행 (바탕화면 .command)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p ~/Desktop
+          bash launch/macos/install.command
+          test -x ~/Desktop/"KCS Talk.command"
+
+      - name: 실행 파일 만들기 (메신저 + 서버)
+        run: |
+          python -m pip install pyinstaller
+          python kcs.py build
+          python kcs.py build --server
+
+      - name: 빌드한 메신저 · 서버 실행 점검
+        run: python scripts/ci_smoke.py built dist
+
+      - name: 빌드 결과 올리기
+        uses: actions/upload-artifact@v4
+        with:
+          name: kcs-talk-${{ runner.os }}
+          path: dist/
+          retention-days: 7

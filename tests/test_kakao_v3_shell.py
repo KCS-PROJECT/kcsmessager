@@ -359,6 +359,10 @@ class StoryViewerTests(V3TestBase):
         self.assertEqual(viewer.viewers_label.text(), '2명이 봤어요')
         self.assertEqual(rows(viewer.viewers_list), ['김철수', '이영희'])
         self.assertEqual(self.sent('story_view'), [])   # 내 펑은 조회 기록 안 보냄
+        with mock.patch.object(QMessageBox, 'question', return_value=QMessageBox.No) as ask:
+            viewer.delete_button.click()
+        ask.assert_called_once()                         # 버튼으로 지우면 반드시 먼저 묻는다
+        self.assertEqual(self.sent('story_delete'), [])  # 아니요 → 안 지움
         with mock.patch.object(QMessageBox, 'question', return_value=QMessageBox.Yes):
             viewer.delete_button.click()
         self.assertEqual(self.conn.last('story_delete'), {'story_id': 7})

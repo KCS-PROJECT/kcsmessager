@@ -2,9 +2,11 @@
 """
 KCS Talk 품질 하네스 — 실제 서버 + 실제 앱 세션(Session: 연결·설정·상태·창)으로 기능과 동작을 채점한다.
 
-10개 영역 × 영역 안 점검 항목. 영역 점수 = 통과 항목 비율, 총점 = 영역 점수 합 (10점 만점).
+12개 영역 × 영역 안 점검 항목. 영역 점수 = 통과 항목 비율, 총점 = 영역 점수 평균 × 10 (10점 만점).
   1 기본 대화        2 읽음·안읽음      3 메시지 조작      4 연결 복원력      5 동시성·부하
   6 성능             7 데이터 지속성    8 서버 견고성      9 화면 안정성     10 기능 회귀
+  11 디자인 품질 (명암비 · 접근성 이름 · 클릭 영역 · 글자 잘림 100%/200% · 대화상자 그리기 경고)
+  12 업무 기능 (스레드 · 방장 · 휴가 · 방해금지 · 안 읽은 사람 · 임시저장 · 멘션 모아보기 · 책갈피)
 
 사용:
   python3 scripts/harness/score_messenger.py            # 전체 (기능 회귀 포함, 약 4분)
@@ -156,7 +158,9 @@ class Score:
         print(f'   {mark} {label} — {detail}', flush=True)
 
     def total(self):
-        return sum(sum(c['ok'] for c in a['checks']) / max(1, len(a['checks'])) for a in self.areas)
+        if not self.areas:
+            return 0.0
+        return 10 * sum(sum(c['ok'] for c in a['checks']) / max(1, len(a['checks'])) for a in self.areas) / len(self.areas)
 
 
 # ---------------------------------------------------------------- 1 기본 대화
@@ -831,6 +835,200 @@ def area_ui(sc, srv):
         s.close()
 
 
+# ---------------------------------------------------------------- 11 디자인 품질
+def area_design(sc, srv):
+    from client.kakao.chat_room import ChatRoomWindow
+    from client.kakao import theme
+    from scripts.harness.design_probe import contrast_failures, widget_audit, iter_dialogs
+    ar = sc.area('디자인 품질')
+
+    def contrast_ok():
+        bad = contrast_failures()
+        return not bad, '모든 글자/배경 토큰 쌍 기준 이상 (라이트·다크)' if not bad else \
+            ', '.join(f'{m} {fg}/{bg} {r}<{n}' for m, fg, bg, r, n in bad[:3])
+    sc.check(ar, 'WCAG 명암비 (토큰 16쌍 × 라이트·다크)', contrast_ok)
+
+    d, e = login(srv, '디자인D', gui=True), login(srv, '디자인E', gui=True)
+    rid = direct(d, e)
+    gid = group(d, [e], '디자인방')
+    d.state.send_text(gid, '공지로 올릴 아주 긴 메시지입니다. 자료는 https://example.com/docs/very/long/path 참고해 주세요')
+    pump(lambda: len(e.state.room_messages(gid)) >= 2, 5)
+    notice = [m for m in d.state.room_messages(gid) if m.get('kind') == 'text'][-1]
+    d.state.set_notice(gid, notice['msg_id'])
+    d.state.send_text(gid, '지울 메시지')
+    pump(lambda: 'notice' in (e.state.room(gid) or {}) and (e.state.room(gid) or {}).get('notice'), 5)
+    pump(lambda: '지울 메시지' in texts(d, gid), 5)
+    gone = [m for m in d.state.room_messages(gid) if m.get('content') == '지울 메시지'][-1]
+    d.state.delete_for_all(gone['msg_id'])
+    pump(lambda: (e.state.find_message(gid, gone['msg_id']) or {}).get('deleted'), 5)
+    screens = {}
+
+    def audit_screens(scale):
+        theme.set_font_scale(scale)
+        found = {'unnamed': [], 'small': [], 'clipped': []}
+        w = e.window
+        w.resize(380, 680)
+        for tab in ('friends', 'chats', 'org', 'calendar', 'more'):
+            w.set_tab(tab)
+            pump(timeout=0.2)
+            for k, v in widget_audit(w).items():
+                found[k] += [f'{tab}:{x}' for x in v]
+        for room in (rid, gid):
+            win = ChatRoomWindow(e.state, room)
+            win.resize(420, 720)
+            win.show()
+            pump(timeout=0.5)
+            for k, v in widget_audit(win).items():
+                found[k] += [f'방:{x}' for x in v]
+            if room == gid:
+                screens['room'] = win
+            else:
+                win.close()
+        theme.set_font_scale(1.0)
+        return found
+
+    base = audit_screens(1.0)
+    zoom = audit_screens(2.0)
+    room_win = screens['room']
+    QT_WARNINGS.clear()
+    dialogs = {'unnamed': [], 'small': [], 'clipped': []}
+    names = []
+    for scale in (1.0, 2.0):
+        theme.set_font_scale(scale)
+        for name, dlg in iter_dialogs(e.state, room_win):
+            try:
+                dlg.show()
+                pump(timeout=0.12)
+                for k, v in widget_audit(dlg).items():
+                    dialogs[k] += [f'{name}@{int(scale * 100)}%:{x}' for x in v]
+                names.append(name)
+            finally:
+                dlg.close()
+                dlg.deleteLater()
+        theme.set_font_scale(1.0)
+    pump(timeout=0.2)
+    paint_warnings = [w for w in QT_WARNINGS if 'QPaint' in w or 'QPainter' in w or 'Cannot' in w]
+
+    def fmt(items, ok_text):
+        return (not items), ok_text if not items else f'{len(items)}개: ' + ' · '.join(items[:3])
+    sc.check(ar, '아이콘 버튼 접근성 이름', lambda: fmt(base['unnamed'] + zoom['unnamed'] + dialogs['unnamed'],
+                                                f'화면 7개 · 대화상자 {len(set(names))}개 모두 이름 있음'))
+    sc.check(ar, '클릭 영역 24px 이상 (WCAG 2.5.8)', lambda: fmt(base['small'] + zoom['small'] + dialogs['small'],
+                                                         '아이콘 버튼·체크박스 모두 24px 이상'))
+    sc.check(ar, '글자 잘림 없음 (100%)', lambda: fmt(base['clipped'] + [x for x in dialogs['clipped'] if '@100%' in x],
+                                                '메인 탭 5개 · 채팅방 · 대화상자'))
+    sc.check(ar, '글자 잘림 없음 (200% 확대)', lambda: fmt(zoom['clipped'] + [x for x in dialogs['clipped'] if '@200%' in x],
+                                                   '200%에서도 잘린 글자 없음'))
+    sc.check(ar, '대화상자 그리기 경고 없음', lambda: fmt(paint_warnings, f'대화상자 {len(names)}번 열고 닫기 경고 없음'))
+    room_win.close()
+    for s in (d, e):
+        if s.window:
+            s.window.close()
+        s.close()
+
+
+# ---------------------------------------------------------------- 12 업무 기능
+def area_work(sc, srv):
+    from client.kakao import dnd
+    from client.kakao.chat_room import ChatRoomWindow
+    ar = sc.area('업무 기능')
+    a, b, c = login(srv, '업무A', gui=True), login(srv, '업무B', gui=True), login(srv, '업무C')
+    gid = group(a, [b, c], '업무방')
+
+    def thread():
+        a.state.send_text(gid, '스레드 원글')
+        pump(lambda: '스레드 원글' in texts(b, gid), 5)
+        root = [m for m in b.state.room_messages(gid) if m.get('content') == '스레드 원글'][-1]
+        b.state.send_text(gid, '스레드 답글', thread_root_id=root['msg_id'])
+        ok = pump(lambda: (a.state.find_message(gid, root['msg_id']) or {}).get('thread_count') == 1, 5)
+        hidden = all(m.get('content') != '스레드 답글' for m in a.state.timeline_messages(gid))
+        return ok and hidden, '답글 수 1 · 본문에서 숨김' if ok and hidden else f'count ok={ok} hidden={hidden}'
+    sc.check(ar, '스레드 답장', thread)
+
+    def owner():
+        tmp = group(a, [b, c], '방장시험')
+        a.state.kick_member(tmp, c.state.me)
+        gone = pump(lambda: tmp not in c.state.rooms, 5)
+        return gone and a.state.room_owner(tmp) == a.state.me, '방장이 내보내기 → 상대 방 사라짐' if gone else '내보내기 실패'
+    sc.check(ar, '방장 내보내기', owner)
+
+    def vacation():
+        c.state.set_presence('vacation')
+        pump(lambda: a.state.presence_of(c.state.me) == 'vacation', 5)
+        c.close()
+        ok = pump(lambda: not a.state.is_online('업무C'), 5) and a.state.presence_of('업무C') == 'vacation'
+        return ok, '접속 종료 후에도 휴가 중' if ok else a.state.presence_of('업무C')
+    sc.check(ar, '휴가 상태 (미접속에도 표시)', vacation)
+
+    def dnd_check():
+        dnd.pause(a.settings, 60)
+        msg = {'kind': 'text', 'content': 'x', 'sender': b.state.me, 'mentions': []}
+        blocked = not a.state.should_alert(gid, msg)
+        a.settings.set('vip_users', [b.state.me])
+        vip = a.state.should_alert(gid, msg)
+        dnd.resume(a.settings)
+        a.settings.set('vip_users', [])
+        return blocked and vip, '일시중지 중 알림 막힘 · VIP 통과' if blocked and vip else f'blocked={blocked} vip={vip}'
+    sc.check(ar, '방해금지 · VIP', dnd_check)
+
+    def unread_members():
+        a.state.send_text(gid, '누가 안 읽었나')
+        pump(lambda: '누가 안 읽었나' in texts(b, gid), 5)
+        m = [x for x in a.state.room_messages(gid) if x.get('content') == '누가 안 읽었나'][-1]
+        b.state.mark_read(gid)
+        pump(lambda: a.state.message_unread(gid, m) == 1, 5)
+        names = a.state.unread_members(gid, m)
+        win = ChatRoomWindow(a.state, gid)
+        win.show()
+        pump(timeout=0.4)
+        popup = win.show_unread_members(m)
+        shown = popup is not None and '업무C' in popup.member_names()
+        popup.close()
+        win.close()
+        return names == ['업무C'] and shown, '읽음 숫자 → 안 읽은 사람 목록' if shown else f'names={names}'
+    sc.check(ar, '안 읽은 사람 보기', unread_members)
+
+    def drafts():
+        win = ChatRoomWindow(a.state, gid)
+        win.show()
+        pump(timeout=0.3)
+        win.edit.setPlainText('쓰다 만 글')
+        win.close()
+        pump(timeout=0.2)
+        again = ChatRoomWindow(a.state, gid)
+        again.show()
+        pump(timeout=0.3)
+        restored = again.edit.toPlainText() == '쓰다 만 글'
+        preview = a.state.room_draft(gid) == '쓰다 만 글'
+        again.edit.clear()
+        again.close()
+        pump(timeout=0.2)
+        cleared = not a.state.room_draft(gid)
+        return restored and preview and cleared, '창을 닫았다 열어도 입력 유지 · 비우면 삭제' if restored and preview and cleared \
+            else f'restored={restored} saved={preview} cleared={cleared}'
+    sc.check(ar, '입력 임시저장', drafts)
+
+    def mentions():
+        b.state.send_text(gid, '@업무A 확인 부탁드려요')
+        pump(lambda: '@업무A 확인 부탁드려요' in texts(a, gid), 5)
+        a.state.request_mentions()
+        ok = pump(lambda: any(m.get('content') == '@업무A 확인 부탁드려요' for m in a.state.mentions), 5)
+        return ok, '다른 방 멘션까지 한곳에' if ok else f'{len(a.state.mentions)}개'
+    sc.check(ar, '멘션 모아보기', mentions)
+
+    def bookmarks():
+        m = [x for x in a.state.room_messages(gid) if x.get('content') == '스레드 원글'][-1]
+        a.state.save_message(m)
+        saved = a.state.is_saved(gid, m['msg_id']) and a.state.saved_messages()[0]['msg_id'] == m['msg_id']
+        a.state.unsave_message(gid, m['msg_id'])
+        return saved and not a.state.is_saved(gid, m['msg_id']), '책갈피 저장 · 해제' if saved else '저장 안 됨'
+    sc.check(ar, '책갈피 (저장한 메시지)', bookmarks)
+    for s in (a, b):
+        if s.window:
+            s.window.close()
+        s.close()
+
+
 # ---------------------------------------------------------------- 10 기능 회귀
 def area_regression(sc, quick):
     ar = sc.area('기능 회귀')
@@ -873,12 +1071,13 @@ def main():
     for s in ctx[:3]:
         s.close()
     for label, fn in (('4. 연결 복원력', area_resilience), ('5. 동시성·부하', area_load), ('6. 성능', area_perf),
-                      ('7. 데이터 지속성', area_persistence), ('8. 서버 견고성', area_robust), ('9. 화면 안정성', area_ui)):
+                      ('7. 데이터 지속성', area_persistence), ('8. 서버 견고성', area_robust), ('9. 화면 안정성', area_ui),
+                      ('11. 디자인 품질', area_design), ('12. 업무 기능', area_work)):
         print(label)
         try:
             fn(sc, srv)
         except Exception as e:
-            area = sc.area(label[3:])
+            area = sc.area(label.split('. ', 1)[1])
             area['checks'].append({'label': '영역 실행', 'ok': False, 'detail': f'{type(e).__name__}: {e}', 'ms': 0})
             print(f'   ✗ 영역 실행 실패 — {e}')
     srv.stop()

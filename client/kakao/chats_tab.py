@@ -6,10 +6,11 @@
 공용 목록 위젯(ElidedLabel, StatusPill, RowList, TabHeader)도 이 모듈에 둔다.
 """
 
+import copy
 import os
 from datetime import datetime, date, timedelta
 
-from PyQt5.QtCore import Qt, QSize, QRectF, QPoint, QPointF, pyqtSignal
+from PyQt5.QtCore import Qt, QObject, QSize, QRectF, QPoint, QPointF, pyqtSignal, pyqtSlot
 from PyQt5.QtGui import QPainter, QFontMetrics, QColor, QPen, QPixmap, QIcon, QPainterPath
 from PyQt5.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QListWidget, QListWidgetItem,
                              QLineEdit, QLabel, QMenu, QMessageBox, QDialog, QPushButton,
@@ -198,20 +199,19 @@ class TabHeader(QWidget):
         self.subtitle.hide()
         self.buttons = []
         col = QVBoxLayout(self)
-        col.setContentsMargins(theme.sp('l') + 4, theme.sp('m'), theme.sp('m'), theme.sp('m'))
+        col.setContentsMargins(theme.sp('l') + 4, theme.sp('l'), theme.sp('m'), theme.sp('m'))
         col.setSpacing(theme.sp('xxs'))
         self._row = QHBoxLayout()
         self._row.setSpacing(theme.sp('xs'))
+        # 제목 앞 강조 막대는 없앴다 (KCS Ink: 제목은 굵기와 크기로 선다) - 속성은 호환용으로만 남김
         self.accent = QFrame()
         self.accent.setObjectName('tabAccent')
-        self.accent.setFixedSize(4, 18)
-        self._row.addWidget(self.accent, 0, Qt.AlignVCenter)
-        self._row.addSpacing(theme.sp('xs'))
+        self.accent.hide()
         self._row.addWidget(self.title, 0, Qt.AlignVCenter)
         self._row.addStretch(1)
         col.addLayout(self._row)
         sub_row = QHBoxLayout()
-        sub_row.setContentsMargins(theme.sp('m'), 0, 0, 0)
+        sub_row.setContentsMargins(0, 0, 0, 0)
         sub_row.addWidget(self.subtitle)
         col.addLayout(sub_row)
         self.apply_theme()
@@ -234,7 +234,8 @@ class TabHeader(QWidget):
     def apply_theme(self):
         self.setStyleSheet(
             f"QWidget#tabHeader {{ background: {theme.c('bg')}; border-bottom: 1px solid {theme.c('border')}; }}"
-            f" QLabel#tabTitle {{ font-size: {theme.fs('headline')}px; font-weight: bold; color: {theme.c('text')}; }}"
+            f" QLabel#tabTitle {{ font-size: {theme.fs('display')}px; font-weight: bold; color: {theme.c('text')};"
+            f" letter-spacing: -0.4px; }}"
             f" QFrame#tabAccent {{ background: {theme.c('yellow')}; border-radius: 2px; }}")
         self.subtitle.refresh_theme()
         for btn in self.buttons:
@@ -267,6 +268,7 @@ PRESENCE_CHOICES = [
     ('away', '자리비움', '#F5B400'),
     ('busy', '다른 용무 중', '#FF4B3E'),
     ('meeting', '회의 중', '#8E6CEF'),
+    ('vacation', '휴가 중', '#1FA2B8'),
 ]
 PRESENCE_COLORS = {key: color for key, _label, color in PRESENCE_CHOICES}
 PRESENCE_COLORS['offline'] = '#BDBDBD'
@@ -275,11 +277,13 @@ PRESENCE_LABELS['offline'] = '오프라인'
 
 
 def presence_of(state, username):
-    """사용자 상태: online/away/busy/meeting/offline"""
+    """사용자 상태: online/away/busy/meeting/vacation/offline"""
     fn = getattr(state, 'presence_of', None)
     if callable(fn):
         return fn(username)
     user = state.user(username)
+    if user.get('presence') == 'vacation':
+        return 'vacation'
     if not user.get('online'):
         return 'offline'
     return user.get('presence') or 'online'
@@ -385,9 +389,28 @@ class CompanyChip(QWidget):
         p.drawText(r, Qt.AlignCenter, text)
 
 
+class _AvatarRelay(QObject):
+    """avatar_changed(str) → 인자 없는 slot() 중계. slot 의 주인(QObject)의 자식이라
+    주인이 사라지면 함께 사라지고 연결도 자동으로 끊긴다 (짧게 열리는 대화상자 누수 방지)"""
+
+    def __init__(self, slot, parent=None):
+        super().__init__(parent)
+        self._slot = slot
+
+    @pyqtSlot(str)
+    def fire(self, _username=''):
+        self._slot()
+
+
 def connect_avatar_changed(state, slot):
     sig = getattr(state, 'avatar_changed', None)
-    if sig is not None:
+    if sig is None:
+        return
+    owner = getattr(slot, '__self__', None)
+    if isinstance(owner, QObject):
+        relay = _AvatarRelay(slot, owner)
+        sig.connect(relay.fire)
+    else:
         sig.connect(lambda *_: slot())
 
 
@@ -422,10 +445,11 @@ class RoomBadge(Badge):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor('#B5B5B5') if self.muted else theme.qc('badge'))
+        # 알림 끈 방: 회색 배지 (라이트 #6A6A6A 위 흰 글자 5.3:1, 다크 #ABABAB 위 어두운 글자 7:1 이상)
+        p.setBrush(theme.qc('text_hint') if self.muted else theme.qc('badge'))
         r = QRectF(self.rect())
         p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
-        p.setPen(QColor('#FFFFFF'))
+        p.setPen(theme.qc('bg') if self.muted else theme.qc('on_badge'))
         p.setFont(theme.font('caption', bold=True))
         p.drawText(r, Qt.AlignCenter, self.text)
 
@@ -435,7 +459,7 @@ class RoomRow(QWidget):
         super().__init__(parent)
         self.room_id = room_id
         room = state.room(room_id) or {}
-        avatar_size = theme.px(48)
+        avatar_size = theme.px(theme.AVATAR_ROW)   # 친구 탭 · 조직도 · 채팅방과 같은 사진 크기
         row = QHBoxLayout(self)
         row.setContentsMargins(16, 9, 16, 9)
         row.setSpacing(12)
@@ -489,6 +513,9 @@ class RoomRow(QWidget):
         failed = getattr(state, 'room_has_failed', lambda _r: False)(room_id)
         if failed:   # 보내지 못한 메시지가 있으면 목록에서도 바로 보이게
             preview = '보내지 못한 메시지가 있습니다'
+        draft = '' if failed else getattr(state, 'room_draft', lambda _r: '')(room_id)
+        if draft and room_id not in getattr(state, 'active_rooms', ()):   # 쓰다 만 글 (§10.8)
+            preview = f'[임시저장] {draft}'
         self.preview = ElidedLabel(preview.replace('\n', ' '), 'meta', 'danger_text' if failed else 'text_sub', bold=failed)
         center.addWidget(self.preview)
         row.addLayout(center, 1)
@@ -533,7 +560,7 @@ _call_icon_cache = {}
 def call_icon(mode, missed, size):
     """통화 기록 원형 아이콘 (모드·부재중·크기·테마별로 한 번만 그린다)"""
     from client.kakao.chat_room import extra_icon_pixmap, CALL_ICONS   # 통화 아이콘은 chat_room 아이콘 세트
-    color = '#FFFFFF' if missed else theme.c('on_accent')
+    color = theme.c('on_badge') if missed else theme.c('on_accent')
     bg = theme.c('badge') if missed else theme.c('yellow')
     key = (mode, missed, size, color, bg)
     if key not in _call_icon_cache:
@@ -907,6 +934,7 @@ class OpenChatDialog(QDialog):
         layout.addWidget(title)
         hint = QLabel('관심사가 같은 사람들과 닉네임으로 대화해 보세요.')
         hint.setObjectName('panelHint')
+        hint.setWordWrap(True)
         layout.addWidget(hint)
         self.tabs = QTabWidget()
         layout.addWidget(self.tabs, 1)
@@ -1133,7 +1161,8 @@ class ChatsTab(QWidget):
         self.list.row_activated.connect(self._activate)
         self.list.customContextMenuRequested.connect(self._show_context_menu)
 
-        state.rooms_changed.connect(self.refresh)
+        self._fresh_row = None   # (room_id, 방 스냅샷): room_changed 로 막 새로 만든 행
+        state.rooms_changed.connect(self._on_rooms_changed)
         state.room_changed.connect(self._on_room_changed)
         state.users_changed.connect(self.refresh)
         state.call_history_changed.connect(self.refresh)
@@ -1182,7 +1211,24 @@ class ChatsTab(QWidget):
                        lambda: self.show_open_chat_dialog())
         menu.addAction(make_icon('drawer', theme.c('text_sub'), 16), '톡서랍 (모든 채팅방의 사진·파일·링크)',
                        lambda: self.show_talk_drawer())
+        menu.addSeparator()
+        menu.addAction('@ 나를 멘션한 메시지', lambda: self.show_mentions())
+        menu.addAction('책갈피 (저장한 메시지)', lambda: self.show_saved())
         return menu
+
+    def show_mentions(self):
+        """멘션 모아보기 (§10.5)"""
+        from client.kakao.inbox import MentionsDialog
+        dlg = MentionsDialog(self.state, self.window())
+        dlg.show()
+        return dlg
+
+    def show_saved(self):
+        """책갈피 (§10.7)"""
+        from client.kakao.inbox import SavedDialog
+        dlg = SavedDialog(self.state, self.window())
+        dlg.show()
+        return dlg
 
     def _show_more_menu(self):
         self.more_menu().exec_(self.more_button.mapToGlobal(self.more_button.rect().bottomLeft()))
@@ -1254,7 +1300,13 @@ class ChatsTab(QWidget):
             return f"'{self.current_folder}' 폴더에 채팅방이 없습니다\n채팅방을 우클릭해 폴더에 추가해 보세요"
         return '채팅방이 없습니다'
 
-    def refresh(self):
+    def _on_rooms_changed(self):
+        self.refresh(reuse_fresh=True)
+
+    def refresh(self, reuse_fresh=False):
+        # room_changed 직후 이어지는 rooms_changed 에서는 방금 만든 행을 다시 만들지 않는다
+        fresh = self._fresh_row if reuse_fresh else None
+        self._fresh_row = None
         folders = self.state.chat_folders()
         if self.current_folder not in [name for name, _count in folders]:
             # 이름이 바뀌었을 수도 있으니 기억해 두었다가 편집 결과에서 따라간다
@@ -1262,18 +1314,18 @@ class ChatsTab(QWidget):
             self.current_folder = FOLDER_ALL
         self.folder_bar.set_folders(folders, self.current_folder)
         self._update_subtitle()
+        query = self.search_edit.text().strip()
+        if self.current_folder != '통화':
+            rooms = [room for room in self.state.rooms_in_folder(self.current_folder) if self._matches(room, query)]
+            if self._update_rows_in_place(rooms, fresh):
+                return
         current = self.list.currentItem().data(Qt.UserRole) if self.list.currentItem() else None
         scroll = self.list.verticalScrollBar().value()
         self.list.clear()
-        query = self.search_edit.text().strip()
         if self.current_folder == '통화':
             self._fill_call_log(query)
             rooms = []
-        else:
-            rooms = self.state.rooms_in_folder(self.current_folder)
         for room in rooms:
-            if not self._matches(room, query):
-                continue
             item = self.list.add_row(RoomRow(self.state, room['room_id']), room['room_id'])
             if room['room_id'] == current:
                 self.list.setCurrentItem(item)
@@ -1283,6 +1335,28 @@ class ChatsTab(QWidget):
         self.list.setVisible(has_rows)
         self.empty_label.setText(self._empty_text(query))
         self.empty_label.setVisible(not has_rows)
+
+    def _update_rows_in_place(self, rooms, fresh=None):
+        """보이는 방 목록·순서가 그대로면 항목은 두고 행 위젯만 바꾼다 (선택·스크롤 유지, 목록 재생성 없음).
+        순서·구성이 바뀌었으면 False → 전체를 다시 만든다"""
+        items = self.list.items()
+        if not rooms or len(items) != len(rooms):
+            return False
+        if [it.data(Qt.UserRole) for it in items] != [room['room_id'] for room in rooms]:
+            return False
+        if not all(isinstance(self.list.itemWidget(it), RoomRow) for it in items):
+            return False
+        for item, room in zip(items, rooms):
+            rid = room['room_id']
+            if fresh is not None and fresh[0] == rid and fresh[1] == room:
+                continue   # room_changed 에서 막 만든 행이고 그 뒤로 방 정보가 그대로
+            row = RoomRow(self.state, rid)
+            item.setSizeHint(QSize(1, row.sizeHint().height()))
+            self.list.setItemWidget(item, row)
+        self.list._fit_rows()
+        self.list.setVisible(True)
+        self.empty_label.setVisible(False)
+        return True
 
     def _fill_call_log(self, query):
         for call in self.state.call_history:
@@ -1306,6 +1380,7 @@ class ChatsTab(QWidget):
                 self.list.setItemWidget(item, row)
                 self.list._fit_rows()
                 self._update_subtitle()
+                self._fresh_row = (room_id, copy.deepcopy(self.state.room(room_id)))
                 return
         self.refresh()
 
@@ -1351,9 +1426,18 @@ class ChatsTab(QWidget):
         room = self.state.room(room_id) or {}
         if room.get('type') in ('group', 'direct'):
             menu.addAction('대화상대 초대…', lambda: self.show_invite_dialog(room_id))
+        menu.addAction('대화 내용 저장…', lambda: self.export_room(room_id))
         menu.addSeparator()
         menu.addAction('나가기', lambda: self.confirm_leave(room_id))
         return menu
+
+    def export_room(self, room_id, exec_=True):
+        """채팅 목록에서 바로 대화 내용 저장: 그 방을 열고 저장 옵션 창을 띄운다 (명세 §9.5)"""
+        opener = getattr(self.window(), 'open_room', None)
+        win = opener(room_id) if opener else None
+        if win is None:
+            return None
+        return win.show_export_dialog(exec_=exec_)
 
     def _show_context_menu(self, pos):
         item = self.list.itemAt(pos)

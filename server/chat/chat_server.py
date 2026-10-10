@@ -29,6 +29,8 @@ def parse_args(argv=None):
     parser.add_argument('--db', default=DEFAULT_DB_PATH, help=f'SQLite DB 경로 (기본: {DEFAULT_DB_PATH})')
     parser.add_argument('--no-briefing', action='store_true', help='AI 비서의 오늘의 브리핑(선톡) 끄기')
     parser.add_argument('--no-link-preview', action='store_true', help='URL 미리보기 끄기')
+    parser.add_argument('--allow-passwordless', action='store_true',
+                        help='비밀번호 없는 구버전 클라이언트 로그인 허용 (기본: 비밀번호 필수)')
     parser.add_argument('--retention-days', type=float, default=90,
                         help='받은 파일(첨부) 보관 기간, 일 단위 (기본: 90)')
     return parser.parse_args(argv)
@@ -41,7 +43,8 @@ def main(argv=None):
     server = KakaoServer(host=args.host, port=args.port, db_path=args.db,
                          daily_briefing=not args.no_briefing,
                          link_preview=False if args.no_link_preview else None,
-                         retention_days=args.retention_days)
+                         retention_days=args.retention_days,
+                         require_password=not args.allow_passwordless)
     try:
         server.start()
     except KeyboardInterrupt:

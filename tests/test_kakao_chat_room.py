@@ -662,10 +662,9 @@ class KakaoUpdate2025Tests(ChatRoomTestBase):
             self.assertLessEqual(card.desc_label.text().count('\n'), 1)
             self.assertLessEqual(self.win.rows[mid].bubble.width(), self.win.max_bubble_width() + 1)
             self.assertEqual(card.objectName(), 'linkCardMine' if sender == '홍길동' else 'linkCard')
-        with mock.patch.object(chat_room, 'QDesktopServices') as ds:
+        with mock.patch.object(chat_room.osenv, 'open_url') as open_url:      # OS 공통 계층으로 연다
             QTest.mouseClick(self.win.rows[91].link_card, Qt.LeftButton)
-            ds.openUrl.assert_called_once()
-            self.assertEqual(ds.openUrl.call_args[0][0].toString(), 'https://example.com/docs')
+            open_url.assert_called_once_with('https://example.com/docs')
 
     def test_link_preview_arrives_via_update(self):
         mine = self.push_mine(92, 'https://kcs.example.com')
@@ -1087,7 +1086,7 @@ class BubbleStyleKeywordTests(ChatRoomTestBase):
 
     def test_bubble_style_applies_and_repaints(self):
         row = self.push_mine()
-        self.assertEqual(row.bubble.radius, 13)
+        self.assertEqual(row.bubble.radius, theme.BUBBLE_STYLES['basic']['radius'])   # KCS Ink 기본 17
         self.state.settings.set('bubble_style', 'pastel')
         row = self.win.rows[60]
         self.assertEqual(row.bubble.fill, '#FFD6E0')
@@ -1205,6 +1204,71 @@ class HeaderInviteTest(unittest.TestCase):
             self.assertFalse(w.invite_btn.isHidden(), rid)
         w = chat_room.ChatRoomWindow(state, 'r1')
         self.assertEqual([a.text() for a in w.call_menu().actions()], ['보이스톡', '페이스톡', '보이스룸'])
+
+
+class ReviewFixRegressionTests(ChatRoomTestBase):
+    """검토 반영: 다크 전환 시 바 아이콘 갱신 · 오프라인 이전 대화 로딩 플래그 · 창 목록 정리"""
+
+    def test_bar_icons_follow_dark_mode(self):
+        btns = (self.win.search_up, self.win.search_down, self.win.search_close,
+                self.win.notice_close, self.win.reply_cancel, self.win.edit_cancel)
+
+        def lightness(b):   # 아이콘에서 가장 밝은 불투명 픽셀 (text_sub: 라이트 #6B6B6B → 다크 #A6A6A6)
+            img = b.icon().pixmap(16, 16).toImage()
+            return max((QColor.fromRgba(img.pixel(x, y)).lightness() for x in range(img.width())
+                        for y in range(img.height()) if QColor.fromRgba(img.pixel(x, y)).alpha() > 200), default=0)
+        before = [lightness(b) for b in btns]
+        theme.set_dark(True)
+        try:
+            self.win.apply_theme()
+            for b, old in zip(btns, before):
+                self.assertGreater(lightness(b), old + 20, b.accessibleName())   # 다크 색으로 다시 그림
+        finally:
+            theme.set_dark(False)
+            self.win.apply_theme()
+
+    def test_load_older_offline_does_not_stick(self):
+        self.state.has_more[self.room] = True
+        self.win._hidden_older = 0
+        self.conn.is_connected = False
+        try:
+            self.assertFalse(self.win._load_older())
+            self.assertFalse(self.win._loading_older)
+            self.assertIsNone(self.win._anchor)
+        finally:
+            self.conn.is_connected = True
+        self.assertTrue(self.win._load_older())    # 다시 연결되면 정상 요청
+        self.assertTrue(self.win._loading_older)
+        self.state.connection_lost.emit('끊김')     # 응답 전에 끊기면 플래그를 푼다
+        self.assertFalse(self.win._loading_older)
+        self.assertIsNone(self.win._anchor)
+
+    def test_destroyed_old_window_keeps_new_entry(self):
+        from PyQt5.QtCore import QEvent
+        from client.kakao.main_window import MainWindow
+        main = MainWindow(self.state, self.state.settings, server_address='127.0.0.1:5555')
+        try:
+            self.state.room_opened.emit('r2')
+            old = main.room_windows['r2']
+            newer = object()
+            main.room_windows['r2'] = newer        # 같은 방을 새 창으로 다시 연 상황
+            old.close()
+            QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+            flush()
+            self.assertIs(main.room_windows.get('r2'), newer)
+            main.room_windows.pop('r2', None)
+            self.state.room_opened.emit('r2')
+            again = main.room_windows['r2']
+            again.close()
+            QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+            flush()
+            self.assertNotIn('r2', main.room_windows)   # 자기 항목이면 지운다
+        finally:
+            for w in list(main.room_windows.values()):
+                if hasattr(w, 'close'):
+                    w.close()
+            main.close()
+            main.deleteLater()
 
 
 if __name__ == '__main__':

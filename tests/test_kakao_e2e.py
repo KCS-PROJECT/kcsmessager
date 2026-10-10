@@ -422,3 +422,211 @@ class E2EV3Test(E2ETest):
 for _name in [n for n in vars(E2ETest) if n.startswith('test_')]:
     setattr(E2EV3Test, _name, None)
 
+
+
+class ChatExportE2ETest(unittest.TestCase):
+    """대화 내용 저장(명세 §9.5)을 실제 서버로: 기간 + 사진 포함 zip (E2ETest 의 테스트는 다시 돌리지 않는다)"""
+    setUp, tearDown, login, open_direct = E2ETest.setUp, E2ETest.tearDown, E2ETest.login, E2ETest.open_direct
+
+    def test_zip_export_with_real_attachment(self):
+        import zipfile
+        from datetime import date
+        from client.kakao.chat_room import ChatRoomWindow
+        a, b = self.login('저장A'), self.login('저장B')
+        rid = self.open_direct(a, '저장B')
+        a.send_text(rid, '사진 보냅니다')
+        path = os.path.join(self.dir, 'photo.png')
+        with open(path, 'wb') as f:
+            f.write(png_bytes())
+        self.assertIsNone(a.send_file(rid, path))
+        self.assertTrue(pump(lambda: any(m.get('kind') == 'image' for m in b.room_messages(rid))
+                             or any(m.get('attachment') for m in b.room_messages(rid))))
+        win = ChatRoomWindow(b, rid)
+        win.show()
+        self.addCleanup(win.close)
+        out = os.path.join(self.dir, 'export.zip')
+        today = date.today()
+        win.export_chat(out, fmt='zip', since=today, until=today, period=today.isoformat())
+        self.assertTrue(pump(lambda: os.path.exists(out) and not win._export_requested, 10))
+        with zipfile.ZipFile(out) as zf:
+            names = zf.namelist()
+            text = zf.read('대화.txt').decode('utf-8')
+            photo = [n for n in names if n.startswith('files/')]
+            self.assertEqual(len(photo), 1)
+            self.assertEqual(zf.read(photo[0]), png_bytes())
+        self.assertIn('사진 보냅니다', text)
+        self.assertIn(f'저장한 기간 : {today.isoformat()}', text)
+        self.assertIn(f'[{photo[0]}]', text)
+        # 어제 하루만 고르면 오늘 대화는 없다
+        yesterday = date.fromordinal(today.toordinal() - 1)
+        out2 = os.path.join(self.dir, 'yesterday.txt')
+        win.export_chat(out2, since=yesterday, until=yesterday)
+        self.assertTrue(pump(lambda: os.path.exists(out2), 10))
+        with open(out2, encoding='utf-8') as f:
+            self.assertNotIn('사진 보냅니다', f.read())
+
+
+class LoginFlowTests(unittest.TestCase):
+    """로그인 창 뒤의 실제 경로: Session(아이디, 비밀번호) → join → wait_for_login (명세 §4.1)"""
+
+    def setUp(self):
+        app()
+        self.dir = tempfile.mkdtemp(prefix='kcs_login_')
+        self.server = KakaoServer(host='127.0.0.1', port=0, db_path=os.path.join(self.dir, 'kakao.db'),
+                                  tick_seconds=0.2)
+        self.server.serve_in_thread()
+        self._old_home = os.environ.get('KCS_MESSENGER_HOME')
+        os.environ['KCS_MESSENGER_HOME'] = os.path.join(self.dir, 'home')
+        self.sessions = []
+
+    def tearDown(self):
+        for s in self.sessions:
+            s.close()
+        # 지우지 않고 되돌린다: 지우면 뒤 테스트가 실제 ~/.kcs_messenger(저장된 로그인)를 읽는다
+        if self._old_home is None:
+            os.environ.pop('KCS_MESSENGER_HOME', None)
+        else:
+            os.environ['KCS_MESSENGER_HOME'] = self._old_home
+        pump(lambda: False, 0.2)
+        self.server.stop()
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def ensure_registered(self, login_id, password):
+        if self.server.store.password_hash(login_id) is None:      # 처음 사용 등록은 한 번만 (명세 §4.1)
+            self.server.store.register_user(login_id, 'KCS 홀딩스', f'{abs(hash(login_id))}@kcs.test', password,
+                                            employee_no=f'T{abs(hash(login_id))}'[:20])
+
+    def attempt(self, login_id, password):
+        from client.kakao.app import Session, wait_for_login
+        self.ensure_registered(login_id, password)
+        s = Session('127.0.0.1', self.server.port, login_id, password)
+        self.sessions.append(s)
+        s.connect()
+        return s, wait_for_login(s.state, 5000)
+
+    def test_wait_for_login_ok_then_wrong_password(self):
+        s, result = self.attempt('로그인테스트', 'right-pw')
+        self.assertEqual(result, ('ok', ''))
+        self.assertEqual(s.state.me, '로그인테스트')
+        _, result = self.attempt('로그인테스트', 'nope-pw')
+        self.assertEqual(result, ('failed', '아이디 또는 비밀번호가 올바르지 않습니다.'))
+
+    def test_first_use_registration_then_password_login(self):
+        from client.kakao.app import Session, wait_for_login
+        reg = {'company': 'KCS 물류', 'name': '처음사용', 'employee_no': 'E2026001', 'email': 'first@kcs.test',
+               'password': 'first-pw'}
+        s = Session('127.0.0.1', self.server.port, '', registration=reg)
+        self.sessions.append(s)
+        s.connect()
+        self.assertEqual(wait_for_login(s.state, 5000), ('ok', ''))
+        self.assertEqual(s.state.me, '처음사용')
+        self.assertEqual(s.username, 'E2026001')                        # 다음부터의 로그인 아이디 = 사번
+        self.assertEqual(s.state.users['처음사용']['company'], 'KCS 물류')
+        welcomes = []
+        s.state.welcomed.connect(lambda: welcomes.append(1))
+        self.assertTrue(s.reconnect()[0])                               # 재연결은 등록한 비밀번호로 join
+        self.assertTrue(pump(lambda: welcomes))
+        # 다음 실행: 사번/비밀번호만으로 로그인
+        s2 = Session('127.0.0.1', self.server.port, 'E2026001', 'first-pw')
+        self.sessions.append(s2)
+        s2.connect()
+        self.assertEqual(wait_for_login(s2.state, 5000), ('ok', ''))
+        self.assertEqual(s2.state.me, '처음사용')
+        # 같은 이름으로 다시 등록하면 거절 → 로그인 창에 사유
+        s3 = Session('127.0.0.1', self.server.port, '', registration=dict(reg, email='x@kcs.test'))
+        self.sessions.append(s3)
+        s3.connect()
+        outcome, reason = wait_for_login(s3.state, 5000)
+        self.assertEqual(outcome, 'failed')
+        self.assertIn('이미 등록된 이름', reason)
+
+    def test_disabled_by_admin_goes_back_to_login_without_retry(self):
+        s, result = self.attempt('중지대상', 'keep-pw')
+        self.assertEqual(result[0], 'ok')
+        s.window = object()                                  # 메인 창이 떠 있는 상태로 (재로그인 경로)
+        reasons = []
+        s.on_relogin_needed = reasons.append
+        admin, admin_result = self.attempt('관리자테스트', 'admin-pw')
+        self.assertEqual(admin_result[0], 'ok')
+        self.server.store.set_admin('관리자테스트', True)
+        admin.state.admin_set_disabled('중지대상', True)
+        self.assertTrue(pump(lambda: reasons, 5))
+        self.assertIn('사용이 중지된 계정', reasons[0])
+        pump(lambda: False, 1.5)                               # 재연결하지 않는다
+        self.assertFalse(s._retry_timer.isActive())
+        self.assertNotIn('중지대상', self.server._online_users())
+
+    def test_reconnect_reuses_password(self):
+        s, result = self.attempt('재연결테스트', 'keep-pw')
+        self.assertEqual(result[0], 'ok')
+        failures, welcomes = [], []
+        s.state.login_failed.connect(failures.append)
+        s.state.welcomed.connect(lambda: welcomes.append(1))
+        ok, _ = s.reconnect()
+        self.assertTrue(ok)
+        self.assertTrue(pump(lambda: welcomes))                       # 두 번째 welcome
+        self.assertTrue(pump(lambda: len(self.server._by_user.get('재연결테스트', ())) == 1))  # 예전 연결은 닫힘
+        self.assertEqual(failures, [])
+
+    def test_remember_issues_token_and_auto_login(self):
+        from client.kakao import login
+        from client.kakao.app import remember_login
+        s, result = self.attempt_remember('자동로그인', 'auto-pw')
+        self.assertEqual(result[0], 'ok')
+        token = s.state.login_token
+        self.assertTrue(token)
+        remember_login(s, '자동로그인', True)
+        saved = login.load_saved_login()
+        self.assertEqual((saved['login_id'], saved['token'], saved['auto_login']), ('자동로그인', token, True))
+        self.assertEqual(os.stat(login.saved_path()).st_mode & 0o777, 0o600)
+        with open(login.saved_path(), encoding='utf-8') as f:
+            self.assertNotIn('auto-pw', f.read())                        # 비밀번호 원문은 저장하지 않는다
+        # 다음 실행: 비밀번호 없이 토큰으로
+        from client.kakao.app import Session, wait_for_login
+        s2 = Session('127.0.0.1', self.server.port, '자동로그인', token=token)
+        self.sessions.append(s2)
+        s2.connect()
+        self.assertEqual(wait_for_login(s2.state, 5000), ('ok', ''))
+        # 로그아웃: 토큰 폐기 → 같은 토큰은 거절
+        s2.state.revoke_login_token(token)
+        self.assertTrue(pump(lambda: not self.server.store.check_login_token('자동로그인', token)))
+        s3 = Session('127.0.0.1', self.server.port, '자동로그인', token=token)
+        self.sessions.append(s3)
+        s3.connect()
+        self.assertEqual(wait_for_login(s3.state, 5000)[0], 'failed')
+
+    def test_logout_revokes_token_clears_saved_login_and_relaunches(self):
+        from client.kakao import login
+        from client.kakao.app import perform_logout, remember_login
+        s, result = self.attempt_remember('로그아웃테스트', 'out-pw')
+        self.assertEqual(result[0], 'ok')
+        token = s.state.login_token
+        remember_login(s, '로그아웃테스트', True)
+        self.assertIsNotNone(login.load_saved_login())
+        relaunched = []
+        perform_logout(s, relaunch=lambda: relaunched.append(1))
+        self.assertEqual(relaunched, [1])                                     # 로그인 창부터 다시
+        self.assertIsNone(login.load_saved_login())                           # 저장된 로그인·자동 로그인 해제
+        self.assertFalse(s.conn.is_connected)
+        self.assertTrue(pump(lambda: not self.server.store.check_login_token('로그아웃테스트', token)))
+        self.assertTrue(pump(lambda: not self.server._by_user.get('로그아웃테스트')))   # 서버에서도 접속 종료
+
+    def test_reconnect_rejected_asks_relogin(self):
+        s, _ = self.attempt('재로그인', 'pw-one')
+        s.window = object()                                            # 메인 창이 떠 있는 상태
+        reasons = []
+        s.on_relogin_needed = reasons.append
+        self.server.store.set_password('재로그인', 'pw-two')            # 다른 곳에서 비밀번호 변경
+        s.state.login_token = ''
+        ok, _ = s.reconnect()
+        self.assertTrue(ok)
+        self.assertTrue(pump(lambda: reasons))
+        self.assertTrue(s._closing)                                    # 재시도 멈춤
+
+    def attempt_remember(self, login_id, password):
+        from client.kakao.app import Session, wait_for_login
+        self.ensure_registered(login_id, password)
+        s = Session('127.0.0.1', self.server.port, login_id, password, remember=True)
+        self.sessions.append(s)
+        s.connect()
+        return s, wait_for_login(s.state, 5000)

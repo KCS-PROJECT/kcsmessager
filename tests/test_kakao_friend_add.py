@@ -59,10 +59,30 @@ class AddFriendUiTest(unittest.TestCase):
         dlg._chat()
         self.assertEqual(self.conn.last('room_open_direct'), {'target': '최지우'})
 
+    def test_section_header_text_is_vertically_centered(self):
+        """'온라인 0', '오프라인 54' 같은 묶음 머리글 글자가 줄(강조 영역) 가운데에 온다 - 아래로 처지지 않게"""
+        tab = FriendsTab(self.state, self.state.settings)
+        tab.resize(420, 700)
+        tab.show()
+        headers = [tab.list.itemWidget(tab.list.item(i)) for i in range(tab.list.count())
+                   if (tab.list.item(i).data(0x0100) or ('',))[0] == 'section']
+        self.assertTrue(headers)
+        for h in headers:
+            h.layout().activate()
+            above = h.title.geometry().top()
+            below = h.height() - h.title.geometry().bottom() - 1
+            self.assertLessEqual(abs(above - below), 1, h.title.text())
+        tab.hide()
+
     def test_registered_section_and_header_button(self):
         tab = FriendsTab(self.state, self.state.settings)
         self.assertIsNotNone(tab.add_friend_button)
         self.assertIsInstance(tab.show_add_friend(exec_=False), AddFriendDialog)
+        # 머리글의 사람+ 아이콘을 실제로 누르면 친구 추가 창이 떠야 한다 (clicked 의 checked 인자 회귀)
+        from unittest import mock
+        with mock.patch.object(AddFriendDialog, 'exec_', return_value=0) as shown:
+            tab.add_friend_button.click()
+        shown.assert_called_once()
         self.assertNotIn(('section', 'registered'), rows(tab.list))
         self.conn.push('friend_list', friends=['박민수', '최지우'])
         self.assertIn(('section', 'registered'), rows(tab.list))

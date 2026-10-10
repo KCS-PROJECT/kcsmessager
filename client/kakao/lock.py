@@ -39,12 +39,12 @@ def has_pin(settings):
 
 
 def set_pin(settings, pin):
-    """새 PIN 저장. 4자리 숫자가 아니면 ValueError"""
+    """새 PIN 저장. 4자리 숫자가 아니면 ValueError. 디스크에 저장하지 못하면 False"""
     if not is_valid_pin(pin):
         raise ValueError('비밀번호는 숫자 4자리로 입력해 주세요.')
     salt = secrets.token_hex(8)
-    settings.set('lock_salt', salt)
-    settings.set('lock_pin_hash', hash_pin(pin, salt))
+    ok = settings.set('lock_salt', salt) is not False
+    return settings.set('lock_pin_hash', hash_pin(pin, salt)) is not False and ok
 
 
 def clear_pin(settings):

@@ -14,6 +14,7 @@ Image #6(설치된 디자인 스킬 8개)과 Image #7(디자인/UI 스킬 17개 
 | 08 | [impeccable audit & fixes](08_impeccable_audit_and_fixes.md) | `impeccable` audit·adapt·animate·typeset·polish + `ui-ux-pro-max` + `ui-styling` + `frontend-design` | 11/20 → 16/20 |
 | 09 | [shape: 보내지 못한 메시지](09_shape_failed_messages.md) | `impeccable shape` | 사용자 확정 브리프 |
 | 10 | [Image #7 순서대로 실행](10_image7_workflow_run.md) | shape → craft → animate → polish → audit → adapt | 새 기능 '전송 실패·재전송' |
+| 12 | [KCS Ink 리디자인](12_kcs_ink_redesign.md) | ui-ux-pro-max · impeccable · taste-skill · frontend-design · ui-styling | 팔레트 · Pretendard · 말풍선 · 입력창 · 날짜 구분선 |
 
 `frontend-design`은 01의 수정(그린 재생 버튼·파형 대비·요약 칩·카드 문구)에 적용했다.
 

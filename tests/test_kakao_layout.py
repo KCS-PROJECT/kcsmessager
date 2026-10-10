@@ -46,11 +46,83 @@ class TokenContrastTest(unittest.TestCase):
             self.assertGreaterEqual(contrast('#FFFFFF', color), 3.0, color)   # 굵은 큰 글자 기준
 
 
+def chat_room_av():
+    from client.kakao import chat_room
+    return chat_room.AV
+
+
 class LayoutTest(unittest.TestCase):
     def setUp(self):
         app()
         theme.set_dark(False)
         self.state, self.conn = make_demo_state()
+
+    def test_my_profile_avatar_same_size_as_friend_rows(self):
+        """친구 탭 맨 위 내 프로필 사진이 AI 비서 · 친구 행 사진보다 크지 않다 (2026-10-10 요청)"""
+        from client.kakao.friends_tab import MyProfileRow, FriendRow
+        mine = MyProfileRow(self.state)
+        friend = FriendRow(self.state, '김철수')
+        self.assertEqual(mine.avatar.width(), friend.avatar.width())
+        self.assertEqual(mine.avatar.height(), friend.avatar.height())
+
+    def test_white_background_photo_reads_same_size_as_initials(self):
+        """흰 배경 증명사진도 가장자리 선으로 이니셜 아바타와 같은 칸 크기가 보인다 (2026-10-10 요청)"""
+        from PyQt5.QtCore import QBuffer, QByteArray, QIODevice
+        from PyQt5.QtGui import QImage, QColor
+        from client.kakao.widgets import photo_avatar_pixmap, avatar_pixmap
+        img = QImage(64, 64, QImage.Format_RGB32)
+        img.fill(QColor('#FFFFFF'))
+        raw = QByteArray()
+        buf = QBuffer(raw)
+        buf.open(QIODevice.WriteOnly)
+        img.save(buf, 'PNG')
+        size = 44
+        photo = photo_avatar_pixmap(bytes(raw), size).toImage()
+        initials = avatar_pixmap('김철수', '김철수', size).toImage()
+        self.assertEqual(photo.size(), initials.size())
+        mid = photo.height() // 2
+        edge = QColor(photo.pixel(1, mid))                     # 왼쪽 가장자리 (2배 해상도 기준)
+        self.assertLess(edge.lightness(), 250)                  # 흰 사진이어도 가장자리가 보인다
+
+    def test_more_tab_profile_avatar_same_size_as_friends_tab(self):
+        """더보기 프로필 카드 사진 = 친구 탭 내 프로필 사진 크기 (2026-10-10 요청)"""
+        from client.kakao.friends_tab import MyProfileRow
+        from client.kakao.more_tab import MoreTab
+        more = MoreTab(self.state, self.state.settings)
+        more.refresh_profile()
+        mine = MyProfileRow(self.state)
+        self.assertEqual(more.avatar.size(), mine.avatar.size())
+        pm = more.avatar.pixmap()
+        self.assertEqual(pm.width() / pm.devicePixelRatio(), mine.avatar.width())
+
+    def test_every_person_avatar_same_size(self):
+        """친구 · 채팅 목록 · 조직도 · 더보기 · 사이드바 · 채팅방의 사람 사진이 모두 같은 크기 (2026-10-10 요청)"""
+        from PyQt5.QtWidgets import QApplication
+        from client.kakao.main_window import MainWindow
+        from client.kakao.chat_room import ChatRoomWindow
+        from client.kakao.friends_tab import MyProfileRow, FriendRow
+        from client.kakao.chats_tab import RoomRow
+        from client.kakao.org_tab import MemberRow, CompactMemberRow
+        want = theme.px(theme.AVATAR_ROW)
+        win = MainWindow(self.state, self.state.settings)
+        win.show()
+        sizes = {}
+        for i in range(win.stack.count()):
+            win.stack.setCurrentIndex(i)
+            QApplication.processEvents()
+            for cls in (MyProfileRow, FriendRow, RoomRow, MemberRow, CompactMemberRow):
+                for row in win.stack.currentWidget().findChildren(cls):
+                    if getattr(row, 'avatar', None) is not None:
+                        sizes.setdefault(cls.__name__, set()).add(row.avatar.width())
+        sizes['Sidebar'] = {win.sidebar.me_avatar.width()}
+        sizes['MoreTab'] = {win.tabs['more'].avatar.width()}
+        room = ChatRoomWindow(self.state, sorted(self.state.rooms)[0])
+        sizes['ChatHeader'] = {room.avatar.width()}
+        sizes['ChatMessage'] = {chat_room_av()}
+        for name, got in sizes.items():
+            self.assertEqual(got, {want}, name)
+        win.close()
+        room.close()
 
     def test_header_subtitle_on_own_row(self):
         from client.kakao.chats_tab import ChatsTab
@@ -69,7 +141,8 @@ class LayoutTest(unittest.TestCase):
         visible = [b for b in tab.header.buttons if not b.isHidden()]
         self.assertLessEqual(len(visible), 4)
         self.assertEqual([a.text() for a in tab.more_menu().actions()],
-                         ['오픈채팅 찾기 · 만들기', '톡서랍 (모든 채팅방의 사진·파일·링크)'])
+                         ['오픈채팅 찾기 · 만들기', '톡서랍 (모든 채팅방의 사진·파일·링크)', '',
+                          '@ 나를 멘션한 메시지', '책갈피 (저장한 메시지)'])
 
     def test_chat_input_shows_three_tools_and_labelled_menu(self):
         from client.kakao.chat_room import ChatRoomWindow
@@ -105,7 +178,7 @@ class LayoutTest(unittest.TestCase):
         tab = MoreTab(self.state, self.state.settings)
         self.assertGreaterEqual(len(tab.groups), 5)
         titles = [l.text() for l in tab.section_labels]
-        self.assertEqual(titles[:2], ['상태 · 화면', '알림 · 채팅'])
+        self.assertEqual(titles[:3], ['계정', '상태 · 화면', '알림 · 채팅'])   # 로그아웃이 맨 위
         for frame in tab.groups:
             rows = [frame.layout().itemAt(i).widget() for i in range(frame.layout().count())]
             rows = [r for r in rows if r is not None and r.objectName() != 'settingsDivider']

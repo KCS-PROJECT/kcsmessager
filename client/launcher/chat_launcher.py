@@ -13,6 +13,16 @@ from PyQt5.QtCore import *
 from PyQt5.QtGui import *
 import os
 
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+from client.kakao import osenv  # noqa: E402  - OS 차이는 공통 계층에서
+
+
+def _new_console_flags():
+    """Windows 는 서버 · 클라이언트를 새 콘솔 창으로, 그 밖 OS 는 0"""
+    return getattr(subprocess, 'CREATE_NEW_CONSOLE', 0) if osenv.is_windows() else 0
+
 
 class ChatLauncher(QMainWindow):
     """Launcher window for managing chat server and clients"""
@@ -348,7 +358,7 @@ class ChatLauncher(QMainWindow):
                 self.server_process = subprocess.Popen(
                     [sys.executable, server_path],
                     cwd=project_root,  # 작업 디렉토리를 프로젝트 루트로 설정
-                    creationflags=subprocess.CREATE_NEW_CONSOLE if sys.platform == "win32" else 0
+                    creationflags=_new_console_flags()
                 )
                 
                 # Wait a moment for server to start
@@ -418,10 +428,11 @@ class ChatLauncher(QMainWindow):
             project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
             client_path = os.path.join(project_root, "client", "kakao", "app.py")
             
+            # 저장된 자동 로그인(예: 김명수)으로 바로 들어가지 않고 창마다 로그인 창 → 다른 사람으로 로그인 가능
             process = subprocess.Popen(
-                [sys.executable, client_path],
+                [sys.executable, client_path, '--no-auto-login'],
                 cwd=project_root,  # 작업 디렉토리를 프로젝트 루트로 설정
-                creationflags=subprocess.CREATE_NEW_CONSOLE if sys.platform == "win32" else 0
+                creationflags=_new_console_flags()
             )
             self.client_processes.append(process)
             self.update_client_count()
@@ -473,7 +484,16 @@ def main():
     if hasattr(Qt, 'AA_UseHighDpiPixmaps'):
         QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
     
+    # Dock 에 'Python' 대신 런처 이름 · KCS 아이콘 (QApplication 보다 먼저 이름을 바꾼다)
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+    from client.kakao.macos import set_app_name, set_dock_name
+    set_app_name('KCS Talk 런처')
     app = QApplication(sys.argv)
+    set_dock_name('케이씨에스 런처')   # Dock 툴팁 (QApplication 다음에)
+    from client.kakao import brand
+    app.setWindowIcon(brand.app_icon())
     
     # 더 나은 스타일과 폰트 설정
     app.setStyle('Fusion')

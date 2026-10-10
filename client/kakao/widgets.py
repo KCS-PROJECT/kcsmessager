@@ -8,14 +8,14 @@ import hashlib
 import math
 
 from PyQt5.QtCore import Qt, QRectF, QPointF, QSize, pyqtSignal
-from PyQt5.QtGui import (QPainter, QPainterPath, QPen, QColor, QIcon, QPixmap, QBrush)
+from PyQt5.QtGui import (QPainter, QPainterPath, QPen, QColor, QIcon, QPixmap, QBrush, QLinearGradient)
 from PyQt5.QtWidgets import QWidget, QPushButton, QLabel, QSizePolicy
 
 from client.kakao import theme
 
-# 흰색 굵은 이니셜과 대비 3:1 이상인 중간 명도 (이전 파스텔은 1.7~2.0:1)
-AVATAR_COLORS = ['#C46A1B', '#2F7BC0', '#2E8B57', '#C2453F', '#7254B8',
-                 '#B14382', '#1F8A84', '#9A6A2A', '#55708A']
+# KCS Ink 아바타: 채도를 눌러 네이비 CI 와 어울리는 잉크 톤 (흰 굵은 이니셜 4.5:1 이상)
+AVATAR_COLORS = ['#3E5BA9', '#2F767D', '#5B4FA0', '#A2533C', '#3B7353',
+                 '#8A4A78', '#5F6680', '#8C6420', '#2D6A99']
 
 
 # ---------------------------------------------------------------- 아이콘
@@ -228,6 +228,17 @@ def _icon_path(name):
         p.moveTo(14.5, 5)
         p.lineTo(7.5, 12)
         p.lineTo(14.5, 19)
+    elif name in ('eye', 'eye_off'):
+        p.moveTo(2.5, 12)
+        p.cubicTo(5, 7, 8.5, 5, 12, 5)
+        p.cubicTo(15.5, 5, 19, 7, 21.5, 12)
+        p.cubicTo(19, 17, 15.5, 19, 12, 19)
+        p.cubicTo(8.5, 19, 5, 17, 2.5, 12)
+        p.closeSubpath()
+        p.addEllipse(QRectF(9, 9, 6, 6))
+        if name == 'eye_off':
+            p.moveTo(4, 4)
+            p.lineTo(20, 20)
     else:
         p.addRect(QRectF(5, 5, 14, 14))
     return p, filled
@@ -313,7 +324,10 @@ def avatar_pixmap(username, display_name, size, online=None):
     base = QColor(avatar_color(username or '?'))
     path = QPainterPath()
     path.addRoundedRect(rect, radius, radius)
-    p.fillPath(path, base)   # 단색 (광택 하이라이트는 진한 팔레트에서 낡아 보여 제거)
+    grad = QLinearGradient(0, 0, 0, size)              # 위가 아주 조금 밝은 잉크 (광택 아닌 종이 위 농담)
+    grad.setColorAt(0, base.lighter(112))
+    grad.setColorAt(1, base)
+    p.fillPath(path, QBrush(grad))
     # 이름 첫 글자
     initial = (display_name or username or '?')[0]
     f = theme.font(max(9, int(size * 0.36)), bold=True)
@@ -359,6 +373,15 @@ def photo_avatar_pixmap(data, size):
     path.addRoundedRect(QRectF(0, 0, size, size), size * 0.38, size * 0.38)
     p.setClipPath(path)
     p.drawImage(QRectF(0, 0, size, size), image)
+    # 증명사진은 대부분 흰 배경이라 흰 목록 위에서 테두리가 사라져 이니셜 아바타보다 작아 보인다
+    # → 같은 모양의 가는 안쪽 선으로 사진 칸 크기를 드러낸다 (사진 · 빈 사진 같은 크기로 보이게, 2026-10-10)
+    p.setClipping(False)
+    edge = max(1.0, size / 44.0)
+    p.setPen(QPen(theme.qc('avatar_ring'), edge))
+    p.setBrush(Qt.NoBrush)
+    inset = edge / 2
+    r = size * 0.38 - inset
+    p.drawRoundedRect(QRectF(inset, inset, size - edge, size - edge), r, r)
     p.end()
     return pm
 

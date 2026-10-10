@@ -9,6 +9,8 @@ import os
 
 from PyQt5.QtCore import QObject, pyqtSignal
 
+from client.kakao import osenv
+
 DEFAULTS = {
     'favorites': [],
     'pinned_rooms': [],
@@ -18,6 +20,7 @@ DEFAULTS = {
     'font_scale': 1.0,
     'reduce_motion': False,      # 동작 줄이기 (녹음 표시 깜빡임·요약 진행 막대 정지)
     'notifications': True,
+    'blink_unread': True,        # 안 읽은 메시지가 있으면 앱 아이콘(트레이·Dock) 깜박임
     'brand_theme': 'kcs',
     'chat_wallpaper': None,
     'room_wallpapers': {},
@@ -26,6 +29,11 @@ DEFAULTS = {
     'hidden_story_users': [],
     'failed_messages': [],      # 연결이 끊겨 보내지 못한 메시지 (재전송/삭제 전까지 보존)   # 소식(펑)을 숨긴 친구 (카카오톡 2026 2차 업데이트)
     'alert_keywords': [],
+    'dnd_until': '',             # 방해금지: 이 시각까지 알림 일시중지 (§10.1)
+    'work_hours': {},            # 방해금지: 근무 시간에만 알림 {enabled, days, start, end}
+    'vip_users': [],             # 방해금지 중에도 알림을 받는 사람
+    'room_drafts': {},           # 방별 쓰다 만 글 (§10.8)
+    'saved_messages': [],        # 책갈피 - 저장한 메시지 (§10.7)
     'room_alert_modes': {},
     'bubble_style': 'basic',
     'lock_pin_hash': '',
@@ -36,23 +44,60 @@ DEFAULTS = {
 }
 
 
+_UNSAFE_FILE_CHARS = set('\\/:*?"<>|')
+
+
+def settings_file_name(username):
+    """사용자 이름 → 설정 파일 이름. 경로 구분자·예약 문자·제어 문자는 _XX 로 바꿔 디렉터리를 벗어나지 않게 한다"""
+    safe = ''.join(f'_{ord(ch):02X}' if ch in _UNSAFE_FILE_CHARS or ord(ch) < 32 else ch for ch in username)
+    if not safe or safe.startswith('.'):
+        safe = '_' + safe
+    return f'{safe}.json'
+
+
 class LocalSettings(QObject):
-    """키 단위 변경 시그널을 내보내는 간단한 설정 저장소"""
+    """키 단위 변경 시그널을 내보내는 간단한 설정 저장소.
+    저장은 임시 파일 → 교체(원자적)이고, 같은 사용자의 다른 실행이 쓴 키를 덮어쓰지 않도록 바꾼 키만 합쳐 쓴다."""
 
     changed = pyqtSignal(str)  # key
 
     def __init__(self, username, base_dir=None, parent=None):
         super().__init__(parent)
-        base_dir = base_dir or os.environ.get('KCS_MESSENGER_HOME') or os.path.join(os.path.expanduser('~'), '.kcs_messenger')
-        self.path = os.path.join(base_dir, f'{username}.json')
+        self.base_dir = base_dir or osenv.app_home()
+        self.username = username
+        self.path = os.path.join(self.base_dir, settings_file_name(username))
         self._data = dict(DEFAULTS)
+        self._data.update(self._read_file(keep_bad=True))
+
+    def use_user(self, username):
+        """로그인 아이디(계정)와 실제 사용자 이름이 다르면 사용자 이름 파일로 바꾼다 (welcome 직후).
+        예전 아이디 파일에만 있던 값은 사용자 파일에 없는 키만 옮긴다."""
+        path = os.path.join(self.base_dir, settings_file_name(username))
+        if path == self.path:
+            return
+        previous = self._read_file()
+        self.username, self.path = username, path
+        target = self._read_file(keep_bad=True)
+        self._data = dict(DEFAULTS)
+        self._data.update(previous)
+        self._data.update(target)
+        if set(previous) - set(target):
+            self._write({**previous, **target})
+
+    def _read_file(self, keep_bad=False):
         try:
             with open(self.path, encoding='utf-8') as f:
                 loaded = json.load(f)
-            if isinstance(loaded, dict):
-                self._data.update(loaded)
-        except (OSError, ValueError):
-            pass
+        except OSError:
+            return {}
+        except ValueError:
+            if keep_bad:   # 깨진 파일은 덮어쓰지 않고 따로 보관
+                try:
+                    os.replace(self.path, self.path + '.bak')
+                except OSError:
+                    pass
+            return {}
+        return loaded if isinstance(loaded, dict) else {}
 
     def get(self, key):
         value = self._data.get(key, DEFAULTS.get(key))
@@ -63,9 +108,11 @@ class LocalSettings(QObject):
         return value
 
     def set(self, key, value):
+        """값을 바꾸고 저장한다. 디스크 저장에 실패하면 False (값은 이번 실행 동안 유지)"""
         self._data[key] = value
-        self._save()
+        ok = self._save(key)
         self.changed.emit(key)
+        return ok
 
     def toggle_in(self, key, item):
         """리스트형 설정에서 item을 넣거나 뺀다. 결과 포함 여부를 돌려준다."""
@@ -82,10 +129,21 @@ class LocalSettings(QObject):
     def contains(self, key, item):
         return item in self._data.get(key, [])
 
-    def _save(self):
+    def _save(self, key=None):
+        data = self._read_file() if key is not None else {}
+        if key is None:
+            data = dict(self._data)
+        else:
+            data[key] = self._data[key]
+        return self._write(data)
+
+    def _write(self, data):
+        tmp = self.path + '.tmp'
         try:
             os.makedirs(os.path.dirname(self.path), exist_ok=True)
-            with open(self.path, 'w', encoding='utf-8') as f:
-                json.dump(self._data, f, ensure_ascii=False, indent=2)
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, self.path)
+            return True
         except OSError:
-            pass
+            return False

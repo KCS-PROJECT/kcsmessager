@@ -14,8 +14,10 @@ from PyQt5.QtGui import QPixmap, QPainter, QColor, QImage, QIcon, QLinearGradien
 
 from client.kakao import theme
 
-ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-BRAND_DIR = os.path.join(ROOT, 'assets', 'brand')
+from client.kakao import osenv  # noqa: E402
+
+ROOT = osenv.ROOT
+BRAND_DIR = osenv.resource_path('assets', 'brand')   # 빌드한 앱에서도 찾도록
 COMPANY_NAME = '(주)케이씨에스'
 # 세로형 로고에서 'KCS' 심볼 마크가 차지하는 영역(원본 413x231 기준, 가로형보다 2배 해상도)
 MARK_RECT = QRect(76, 27, 248, 123)

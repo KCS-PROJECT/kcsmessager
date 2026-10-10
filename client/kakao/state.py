@@ -18,11 +18,11 @@ MAX_ATTACHMENT = 10 * 1024 * 1024
 MAX_VOICE_SECONDS = 300   # 음성메시지 최대 5분 (명세 §9.3)
 FAILED_ID_BASE = 10 ** 12  # 보내지 못한 메시지의 로컬 id (서버 id 보다 항상 커서 대화 맨 아래에 놓인다)
 MAX_AVATAR = 512 * 1024
-PRESENCES = ('online', 'away', 'busy', 'meeting')
+PRESENCES = ('online', 'away', 'busy', 'meeting', 'vacation')
 PRESENCE_LABELS = {'online': '온라인', 'away': '자리비움', 'busy': '다른 용무 중',
-                   'meeting': '회의 중', 'offline': '오프라인'}
+                   'meeting': '회의 중', 'vacation': '휴가 중', 'offline': '오프라인'}
 PRESENCE_COLORS = {'online': '#3DD16B', 'away': '#F5B400', 'busy': '#FF4B3E',
-                   'meeting': '#8E6CEF', 'offline': '#BDBDBD'}
+                   'meeting': '#8E6CEF', 'vacation': '#1FA2B8', 'offline': '#BDBDBD'}
 BOT_NAME = 'AI 비서'
 URL_RE = re.compile(r'https?://[^\s<>"]+')
 
@@ -72,8 +72,15 @@ def parse_dt(value):
     return dt
 
 
+def _csv_safe(text):
+    """엑셀이 수식으로 실행하지 않도록 = + - @ 로 시작하는 칸 앞에 ' 를 붙인다 (CSV 수식 주입 방지)"""
+    text = text or ''
+    return "'" + text if text[:1] in ('=', '+', '-', '@', '\t', '\r') else text
+
+
 class AppState(QObject):
     welcomed = pyqtSignal()
+    login_failed = pyqtSignal(str)             # join 거절(아이디/비밀번호 오류 등) 사유
     connection_lost = pyqtSignal(str)
     users_changed = pyqtSignal()
     user_changed = pyqtSignal(str)
@@ -84,12 +91,21 @@ class AppState(QObject):
     message_added = pyqtSignal(str, dict)      # room_id, message
     message_updated = pyqtSignal(str, dict)
     history_loaded = pyqtSignal(str, list, bool)  # room_id, 이번에 받은 메시지, has_more
+    thread_loaded = pyqtSignal(str, int)         # room_id, 스레드 원글 msg_id (§10.4)
+    mentions_changed = pyqtSignal()              # 멘션 모아보기 목록이 바뀜 (§10.5)
+    saved_changed = pyqtSignal()                 # 책갈피 목록이 바뀜 (§10.7)
     read_changed = pyqtSignal(str)
     events_changed = pyqtSignal()
     event_reminder = pyqtSignal(dict, int)
     todos_changed = pyqtSignal()
     search_results = pyqtSignal(str, list)
     attachment_loaded = pyqtSignal(int, bytes, str, str)  # id, data, name, mime
+    admin_users_changed = pyqtSignal(list)   # 관리자 계정 목록 (명세 §4.2)
+    admin_done = pyqtSignal(dict)            # 관리자 요청 성공 {action, username?, ...}
+    org_changed = pyqtSignal()               # 조직도 그룹이 바뀜 (명세 §4.4)
+    admin_notice = pyqtSignal(dict)          # 관리자 전체 공지 {sender, content, timestamp}
+    account_disabled = pyqtSignal(str)       # 내 계정이 사용 중지됨 → 로그인 창으로
+    attachment_failed = pyqtSignal(str)   # attachment_get 오류 사유 (대화 저장이 어느 첨부가 빠졌는지 안다)
     scheduled_ok = pyqtSignal(dict)
     error = pyqtSignal(str)
     notify = pyqtSignal(str, str, str)         # 제목, 본문, room_id (트레이 알림)
@@ -119,11 +135,14 @@ class AppState(QObject):
         self.conn = conn
         self.settings = settings
         self.me = ''
+        self.login_token = ''  # 서버가 준 자동 로그인 토큰 (remember 로그인 때만)
         self.users = {}       # username -> User
+        self.mentions = []    # 나를 멘션한 메시지 (최신순, §10.5)
         self.rooms = {}       # room_id -> Room
         self._messages = {}   # room_id -> {msg_id: Message}
         self.has_more = {}    # room_id -> bool
         self.history_requested = set()
+        self._gap_fill = {}   # room_id → (재연결 전 마지막 msg_id, 그때 has_more)
         self.events = {}      # event_id -> Event
         self.todos = {}       # todo_id -> Todo
         self.attachments = {}  # attachment_id -> (bytes, name, mime)
@@ -143,6 +162,9 @@ class AppState(QObject):
         self._failed = None      # 보내지 못한 메시지 메모리 사본 (_failed_list)
         self._failed_rooms = {}  # room_id → 실패 메시지 수 (채팅 목록 행마다 O(1) 조회)
         self._export_parts = {}  # room_id → 받는 중인 내보내기 조각
+        self.quiet_attachment_errors = False
+        self.admin_users = []
+        self.admin_scope = ''   # 대화 저장(zip)이 첨부를 모으는 동안: 만료 첨부마다 오류 알림을 띄우지 않는다
         self._failed_saved_at = -1e9
         self._failed_save_timer = None
         self.active_rooms = set()  # 현재 창이 열려 화면에 보이는 방(알림 억제용)
@@ -161,10 +183,14 @@ class AppState(QObject):
     def _on_welcome(self, p):
         reconnected = bool(self.me)            # 두 번째 welcome = 다시 붙음
         self.me = p['me']['username']
+        if p.get('login_token'):
+            self.login_token = p['login_token']   # 자동 로그인 저장용 (명세 §4.1)
+        if self.settings is not None and hasattr(self.settings, 'use_user'):
+            self.settings.use_user(self.me)   # 계정(kmkim)으로 로그인해도 사용자 이름 설정 파일을 쓴다
         self.users = {u['username']: u for u in p.get('users', [])}
         self.users[self.me] = p['me']
         self.rooms = {r['room_id']: r for r in p.get('rooms', [])}
-        self.org = p.get('org') or {}   # {'holding': {...}|None, 'companies': [{name, business, units...}]}
+        self.org = p.get('org') or {}   # {'holding': {...}|None, 'companies': [...], 'groups': [...]}
         self.calls = {c['call_id']: c for c in p.get('calls', [])}
         self.blocked = set(p.get('blocked', []))
         self.my_friends = list(p.get('friends', []))
@@ -184,6 +210,9 @@ class AppState(QObject):
             # 끊긴 사이 온 메시지: 받아 둔 방마다 최근 대화를 다시 받아 합친다 (열린 채팅방은 history_loaded 로 갱신)
             for rid in list(self._messages):
                 if rid in self.rooms:
+                    known = [i for i in self._messages[rid] if isinstance(i, int) and i < FAILED_ID_BASE]
+                    if known:   # 최근 50개가 예전 캐시와 이어지지 않으면 이어질 때까지 더 받는다
+                        self._gap_fill[rid] = (max(known), self.has_more.get(rid, True))
                     self._send('history', room_id=rid, limit=50)
         self.calls_changed.emit()
 
@@ -225,8 +254,14 @@ class AppState(QObject):
 
     def _on_room_removed(self, p):
         rid = p['room_id']
+        if p.get('kicked'):
+            title = self.room_title(rid) if rid in self.rooms else '채팅방'
+            self.notify.emit('KCS Talk', f"'{title}' 채팅방에서 내보내졌습니다.", '')
         self.rooms.pop(rid, None)
         self._messages.pop(rid, None)
+        self.history_requested.discard(rid)   # 다시 초대되면 히스토리를 새로 받는다
+        self.has_more.pop(rid, None)
+        self._gap_fill.pop(rid, None)
         self.room_removed.emit(rid)
         self.rooms_changed.emit()
 
@@ -238,23 +273,37 @@ class AppState(QObject):
             self._decrypt(m)
         for m in batch:
             store[m['msg_id']] = m
-        self.has_more[rid] = bool(p.get('has_more'))
+        gap = self._gap_fill.get(rid)
+        if gap is not None:
+            known_max, had_more = gap
+            oldest = min((m['msg_id'] for m in batch), default=None)
+            if oldest is not None and oldest > known_max + 1 and p.get('has_more'):
+                self._send('history', room_id=rid, before_msg_id=oldest, limit=50)   # 끊긴 사이 빈 구간
+            else:
+                del self._gap_fill[rid]
+            self.has_more[rid] = had_more      # 더 이전 쪽은 예전 캐시 기준 그대로
+        else:
+            self.has_more[rid] = bool(p.get('has_more'))
         self.history_loaded.emit(rid, batch, self.has_more[rid])
 
     def _on_msg_new(self, p):
         m = p['message']
         self._decrypt(m)
         rid = m['room_id']
-        self._messages.setdefault(rid, {})[m['msg_id']] = m
+        store = self._messages.setdefault(rid, {})
+        duplicate = m['msg_id'] in store      # welcome 스냅숏에 이미 반영된 메시지가 push 로 또 올 수 있다
+        store[m['msg_id']] = m
         room = self.rooms.get(rid)
         if room is not None:
             room['last_message'] = m
-            if m['sender'] != self.me and m['kind'] != 'system':
+            if m['sender'] != self.me and m['kind'] != 'system' and not duplicate:
                 room['unread_count'] = room.get('unread_count', 0) + 1
             if m['sender'] == self.me:
                 room.setdefault('read_pointers', {})[self.me] = max(
                     room.get('read_pointers', {}).get(self.me, 0), m['msg_id'])
         self.message_added.emit(rid, m)
+        if not duplicate:
+            self._note_mention(m)
         self.rooms_changed.emit()
         if m['sender'] and m['sender'] != self.me and rid not in self.active_rooms and self.should_alert(rid, m):
             if self.locked:
@@ -386,7 +435,121 @@ class AppState(QObject):
     def _on_scheduled_ok(self, p):
         self.scheduled_ok.emit(p)
 
+    # ================= 관리자 (명세 §4.2) =================
+    def is_admin(self):
+        return bool(self.me and self.users.get(self.me, {}).get('is_admin'))
+
+    def admin_company(self):
+        """관리 범위: '' = 그룹 관리자(모든 계열사), '회사' = 회사 관리자 (명세 §4.3)"""
+        return (self.users.get(self.me, {}).get('admin_company') or '') if self.is_admin() else ''
+
+    def admin_member_create(self, username, fields):
+        self._send('admin_member_create', username=username, **fields)
+
+    def admin_member_update(self, username, fields):
+        self._send('admin_member_update', username=username, **fields)
+
+    def admin_member_delete(self, username):
+        self._send('admin_member_delete', username=username)
+
+    def admin_member_restore(self, username):
+        self._send('admin_member_restore', username=username)
+
+    def _on_user_removed(self, p):
+        """관리자가 구성원을 삭제: 사용자 목록·조직도·친구 목록에서 뺀다 (대화 기록의 이름은 그대로)"""
+        name = p.get('username')
+        if name in self.users:
+            del self.users[name]
+            self.avatars.pop(name, None)
+            self.user_changed.emit(name)
+            self.users_changed.emit()
+            self.rooms_changed.emit()
+
+    def admin_request_users(self):
+        self._send('admin_users')
+
+    def admin_reset_password(self, username, new_password):
+        self._send('admin_reset_password', username=username, new_password=new_password)
+
+    def admin_clear_password(self, username):
+        self._send('admin_clear_password', username=username)
+
+    def admin_set_disabled(self, username, disabled):
+        self._send('admin_set_disabled', username=username, disabled=bool(disabled))
+
+    def admin_set_admin(self, username, is_admin, company=''):
+        """company 가 있으면 그 회사의 회사 관리자, 없으면 그룹 관리자"""
+        extra = {'company': company} if is_admin and company else {}
+        self._send('admin_set_admin', username=username, is_admin=bool(is_admin), **extra)
+
+    def is_group_admin(self):
+        """그룹 관리자(모든 계열사) - 조직도 그룹 만들기 · 수정 · 삭제 (명세 §4.4)"""
+        return self.is_admin() and not self.admin_company()
+
+    def admin_group_create(self, name, description='', members=()):
+        self._send('admin_group_create', name=name, description=description, members=list(members))
+
+    def admin_group_update(self, group_id, name, description='', members=()):
+        self._send('admin_group_update', group_id=group_id, name=name, description=description,
+                   members=list(members))
+
+    def admin_group_reorder(self, group_ids):
+        """조직도 그룹 순서 변경 (끌어서 놓기). 화면은 바로 바꾸고, 서버가 모두에게 org_groups 로 확정한다"""
+        group_ids = [int(g) for g in group_ids]
+        by_id = {g.get('group_id'): g for g in (self.org or {}).get('groups') or []}
+        if set(group_ids) == set(by_id):
+            self.org = dict(self.org, groups=[by_id[g] for g in group_ids])
+            self.org_changed.emit()
+        self._send('admin_group_reorder', group_ids=group_ids)
+
+    def admin_group_delete(self, group_id):
+        self._send('admin_group_delete', group_id=group_id)
+
+    def admin_org_order(self, order):
+        """조직도 아래쪽 덩어리 순서 ["group:1", "company:게스트"] (그룹 관리자, 끌어서 놓기).
+        화면은 바로 바꾸고, 서버가 모두에게 org_groups 로 확정한다"""
+        order = [str(t) for t in order]
+        self.org = dict(self.org or {}, order=order)
+        self.org_changed.emit()
+        self._send('admin_org_order', order=order)
+
+    def _on_org_groups(self, p):
+        self.org = dict(self.org or {}, groups=list(p.get('groups') or []))
+        if 'order' in p:
+            self.org['order'] = list(p.get('order') or [])
+        self.org_changed.emit()
+
+    def admin_send_notice(self, content):
+        self._send('admin_notice', content=content)
+
+    def _on_admin_users(self, p):
+        self.admin_scope = p.get('scope') or ''
+        self.admin_users = list(p.get('users', []))
+        self.admin_users_changed.emit(list(self.admin_users))
+
+    def _on_admin_done(self, p):
+        self.admin_done.emit(dict(p))
+
+    def _on_admin_notice(self, p):
+        self.admin_notice.emit(dict(p))
+
+    def _on_account_disabled(self, p):
+        self.account_disabled.emit(p.get('message') or '사용이 중지된 계정입니다.')
+
+    def revoke_login_token(self, token):
+        """로그아웃: 저장된 자동 로그인 토큰을 서버에서 폐기"""
+        if token and self.conn is not None:
+            self.conn.send('login_token_revoke', token=token)
+
     def _on_error(self, p):
+        if p.get('req_type') in ('join', 'register'):
+            self.login_failed.emit(p.get('message', '로그인할 수 없습니다.'))
+            return
+        if p.get('req_type') == 'attachment_get':
+            quiet = self.quiet_attachment_errors   # 먼저 읽는다: 신호를 받은 저장 작업이 마지막 첨부면 바로 끝내며 끈다
+            self.attachment_failed.emit(p.get('message', '첨부 파일을 받을 수 없습니다.'))
+            if quiet:
+                return
         self.error.emit(p.get('message', '알 수 없는 오류'))
 
     # ================= 조회 =================
@@ -405,6 +568,8 @@ class AppState(QObject):
 
     def presence_of(self, username):
         user = self.user(username)
+        if user.get('presence') == 'vacation':
+            return 'vacation'   # 휴가 중은 접속하지 않아도 보인다 (명세 §7.4)
         if not user.get('online'):
             return 'offline'
         return user.get('presence') or 'online'
@@ -572,6 +737,25 @@ class AppState(QObject):
         # 보내지 못한 메시지는 서버 메시지 저장소와 따로 두고, 화면에는 항상 맨 아래에 붙인다
         return [store[k] for k in sorted(store) if k not in hidden] + self.failed_messages(room_id)
 
+    def timeline_messages(self, room_id):
+        """대화창 본문에 보이는 메시지 - 스레드 답글은 원글 아래 '답글 N개'로만 보인다 (§10.4)"""
+        return [m for m in self.room_messages(room_id) if m.get('thread_root') is None]
+
+    def thread_messages(self, room_id, root_id):
+        """받아 둔 스레드 답글 (오래된 순, 나에게서 삭제한 것 제외)"""
+        return [m for m in self.room_messages(room_id) if m.get('thread_root') == root_id]
+
+    def request_thread(self, root_id):
+        return self._send('thread_get', root_id=root_id) is not None
+
+    def _on_thread(self, p):
+        rid = p['room_id']
+        store = self._messages.setdefault(rid, {})
+        for m in [p['root']] + list(p.get('messages', [])):
+            self._decrypt(m)
+            store[m['msg_id']] = m
+        self.thread_loaded.emit(rid, int(p['root_id']))
+
     def find_message(self, room_id, msg_id):
         found = self._messages.get(room_id, {}).get(msg_id)
         if found is None and msg_id >= FAILED_ID_BASE:
@@ -587,6 +771,81 @@ class AppState(QObject):
             return 0
         pointers = room.get('read_pointers', {})
         return sum(1 for u in room.get('members', []) if pointers.get(u, 0) < message['msg_id'])
+
+    def unread_members(self, room_id, message):
+        """이 메시지를 아직 읽지 않은 사람 (이름순) - 읽음 숫자를 누르면 보인다 (§10.6)"""
+        if message.get('kind') == 'system' or message.get('failed'):
+            return []
+        room = self.rooms.get(room_id) or {}
+        pointers = room.get('read_pointers', {})
+        names = [u for u in room.get('members', []) if pointers.get(u, 0) < message['msg_id']]
+        return sorted(names, key=self.display_name)
+
+    # ================= v5: 입력 임시저장 (§10.8, 클라이언트 전용) =================
+    def room_draft(self, room_id):
+        drafts = (self.settings.get('room_drafts') if self.settings else None) or {}
+        return drafts.get(room_id, '')
+
+    def set_room_draft(self, room_id, text):
+        """쓰다 만 글 저장 (공백뿐이면 지움). 바뀌었으면 True"""
+        if not self.settings:
+            return False
+        drafts = self.settings.get('room_drafts') or {}
+        text = text if (text or '').strip() else ''
+        if drafts.get(room_id, '') == text:
+            return False
+        if text:
+            drafts[room_id] = text[:4000]
+        else:
+            drafts.pop(room_id, None)
+        self.settings.set('room_drafts', drafts)
+        self.rooms_changed.emit()
+        return True
+
+    # ================= v5: 멘션 모아보기 (§10.5) =================
+    def request_mentions(self, limit=100):
+        return self._send('mention_list', limit=limit) is not None
+
+    def _on_mention_list(self, p):
+        msgs = list(p.get('messages', []))
+        for m in msgs:
+            self._decrypt(m)
+        self.mentions = msgs
+        self.mentions_changed.emit()
+
+    def _note_mention(self, m):
+        """새로 받은 메시지가 나를 멘션하면 목록 맨 앞에 넣는다"""
+        if m.get('sender') != self.me and self.me in (m.get('mentions') or []) \
+                and all(x['msg_id'] != m['msg_id'] for x in self.mentions):
+            self.mentions.insert(0, m)
+            self.mentions_changed.emit()
+
+    # ================= v5: 책갈피 (§10.7, 클라이언트 전용) =================
+    SAVED_MAX = 200
+
+    def saved_messages(self):
+        """저장한 메시지 (최근에 저장한 것부터)"""
+        return list(self.settings.get('saved_messages') or []) if self.settings else []
+
+    def is_saved(self, room_id, msg_id):
+        return any(x.get('room_id') == room_id and x.get('msg_id') == msg_id for x in self.saved_messages())
+
+    def save_message(self, m):
+        if not self.settings or m.get('failed') or m.get('kind') == 'system' or self.is_saved(m['room_id'], m['msg_id']):
+            return False
+        entry = {'room_id': m['room_id'], 'msg_id': m['msg_id'], 'sender': m.get('sender', ''),
+                 'thread_root': m.get('thread_root'),
+                 'preview': self.message_preview(m)[:200], 'timestamp': m.get('timestamp', ''),
+                 'saved_at': datetime.now().isoformat(timespec='seconds')}
+        self.settings.set('saved_messages', ([entry] + self.saved_messages())[:self.SAVED_MAX])
+        self.saved_changed.emit()
+        return True
+
+    def unsave_message(self, room_id, msg_id):
+        items = [x for x in self.saved_messages() if not (x.get('room_id') == room_id and x.get('msg_id') == msg_id)]
+        if self.settings:
+            self.settings.set('saved_messages', items)
+        self.saved_changed.emit()
 
     def room_unread(self, room_id):
         room = self.rooms.get(room_id)
@@ -607,6 +866,8 @@ class AppState(QObject):
     def message_preview(self, m):
         if not m:
             return ''
+        if m.get('thread_root') is not None:   # 스레드 답글 (§10.4)
+            return '↳ ' + self.message_preview(dict(m, thread_root=None))
         if m.get('deleted'):
             return '메시지가 삭제되었습니다'
         kind = m.get('kind')
@@ -739,19 +1000,30 @@ class AppState(QObject):
     def rename_room(self, room_id, name):
         self._send('room_rename', room_id=room_id, name=name)
 
+    def room_owner(self, room_id):
+        """방장 (§10.3) - group/open 방만, 없으면 None"""
+        return (self.rooms.get(room_id) or {}).get('owner')
+
+    def kick_member(self, room_id, username):
+        self._send('room_kick', room_id=room_id, username=username)
+
+    def transfer_owner(self, room_id, username):
+        self._send('room_owner_set', room_id=room_id, username=username)
+
     def load_history(self, room_id, older=False, limit=50):
         """처음 열 때 한 번 최신 메시지 로드, older=True면 더 이전 메시지"""
         if older:
             loaded = self._messages.get(room_id) or {}
             if not loaded or not self.has_more.get(room_id, True):
-                return
-            self._send('history', room_id=room_id, before_msg_id=min(loaded), limit=limit)
-        else:
-            if room_id in self.history_requested:
-                self.history_loaded.emit(room_id, [], self.has_more.get(room_id, False))
-                return
-            self.history_requested.add(room_id)
-            self._send('history', room_id=room_id, limit=limit)
+                return False
+            return self._send('history', room_id=room_id, before_msg_id=min(loaded), limit=limit) is not None
+        if room_id in self.history_requested:
+            self.history_loaded.emit(room_id, [], self.has_more.get(room_id, False))
+            return True
+        if self._send('history', room_id=room_id, limit=limit) is None:
+            return False                      # 연결 없음 → 다음에 다시 요청할 수 있게 표시하지 않는다
+        self.history_requested.add(room_id)
+        return True
 
     def parse_mentions(self, room_id, text):
         room = self.rooms.get(room_id) or {}
@@ -762,7 +1034,7 @@ class AppState(QObject):
                     found.append(member)
         return found
 
-    def send_text(self, room_id, text, reply_to_id=None, send_at=None, silent=False):
+    def send_text(self, room_id, text, reply_to_id=None, send_at=None, silent=False, thread_root_id=None):
         text = text.strip()
         if not text:
             return
@@ -770,6 +1042,9 @@ class AppState(QObject):
                    'mentions': self.parse_mentions(room_id, text)}
         if reply_to_id:
             payload['reply_to_id'] = reply_to_id
+        if thread_root_id:
+            payload['thread_root_id'] = thread_root_id
+            return self._send('send', **payload) is not None   # 스레드 답글은 실패 보관 없이 창에서 안내
         if send_at:
             payload['send_at'] = send_at.isoformat(timespec='seconds')
         if silent:
@@ -974,6 +1249,10 @@ class AppState(QObject):
     def should_alert(self, room_id, message):
         if message.get('silent'):
             return False   # 조용히 보내기: 알림 없이 안 읽은 수에만 반영
+        if self.settings is not None:
+            from client.kakao import dnd
+            if dnd.suppresses(self.settings, message.get('sender')):
+                return False   # 방해금지 (§10.1): VIP 만 통과, 키워드·멘션도 막는다
         if self.keyword_hit(message):
             return True    # 키워드 알림은 알림 끈 방에서도 울린다
         mode = self.room_alert_mode(room_id)
@@ -1317,9 +1596,14 @@ class AppState(QObject):
             return '서버 연결이 끊겨 음성메시지를 보내지 못했습니다. 연결된 뒤 다시 보내 주세요.'
         return None
 
-    def request_export(self, room_id):
-        """대화 내보내기용 전체 기록 요청 → room_export_ready"""
-        self._send('room_export', room_id=room_id)
+    def request_export(self, room_id, since=None, until=None):
+        """대화 저장용 기록 요청 → room_export_ready. since/until(date, 그날 포함)을 주면 그 기간만 (명세 §9.5)"""
+        extra = {}
+        if since is not None:
+            extra['since'] = since.isoformat()
+        if until is not None:
+            extra['until'] = until.isoformat()
+        self._send('room_export', room_id=room_id, **extra)
 
     def _on_room_export(self, p):
         """조각(part)을 모아 done 이면 한 번에 알린다 (조각이 없는 예전 서버 응답도 그대로 처리)"""
@@ -1335,11 +1619,26 @@ class AppState(QObject):
         msgs = [m for m in msgs if m.get('msg_id') not in hidden]
         self.room_export_ready.emit(rid, msgs, bool(p.get('truncated')))
 
-    def export_text(self, room_id, messages, saved_at=None):
-        """카카오톡 PC '대화 내보내기' 형식의 텍스트"""
+    def export_body(self, room_id, m):
+        """대화 저장 한 줄의 내용 (텍스트·CSV 공용)"""
+        if m.get('deleted'):
+            return '삭제된 메시지입니다.'
+        if m.get('kind') == 'secret':
+            return m.get('secret_text', '')
+        if m.get('kind') in ('text', 'emoticon'):
+            return m.get('content', '')
+        return self.message_preview(m)
+
+    def export_text(self, room_id, messages, saved_at=None, files=None, period=''):
+        """카카오톡 PC '대화 내보내기' 형식의 텍스트.
+        files={msg_id: 'files/…' 또는 '(포함되지 않음: 사유)'} 이면 첨부 줄 끝에 붙인다 (사진·파일 포함 저장)"""
         saved_at = saved_at or datetime.now()
+        files = files or {}
         lines = [f'{self.room_title(room_id)} 님과 카카오톡 대화',
-                 f"저장한 날짜 : {saved_at.strftime('%Y-%m-%d %H:%M:%S')}", '']
+                 f"저장한 날짜 : {saved_at.strftime('%Y-%m-%d %H:%M:%S')}"]
+        if period:
+            lines.append(f'저장한 기간 : {period}')
+        lines.append('')
         day = None
         for m in messages:
             ts = parse_dt(m.get('timestamp'))
@@ -1352,17 +1651,37 @@ class AppState(QObject):
                 lines.append(m.get('content', ''))
                 continue
             when = fmt_ampm(ts)
-            if m.get('deleted'):
-                body = '삭제된 메시지입니다.'
-            elif m.get('kind') == 'secret':
-                body = m.get('secret_text', '')
-            elif m.get('kind') in ('text', 'emoticon'):
-                body = m.get('content', '')
-            else:
-                body = self.message_preview(m)
+            body = self.export_body(room_id, m)
+            if m.get('msg_id') in files:
+                body = f'{body} [{files[m["msg_id"]]}]'
             name = self.member_name(room_id, m.get('sender'))
             lines.append(f'[{name}] [{when}] {body}')
         return '\n'.join(lines) + '\n'
+
+    EXPORT_KIND_NAMES = {'text': '텍스트', 'emoticon': '이모티콘', 'image': '사진', 'file': '파일',
+                         'voice': '음성메시지', 'system': '알림', 'poll': '투표', 'event': '일정', 'call': '통화',
+                         'secret': '비밀채팅', 'ladder': '사다리', 'contact': '연락처', 'board': '게시판'}
+
+    def export_csv(self, room_id, messages, files=None):
+        """엑셀에서 바로 열리는 표 (UTF-8 BOM + 쉼표 구분): 날짜, 시각, 보낸 사람, 종류, 내용, 첨부 파일"""
+        import csv
+        import io
+        files = files or {}
+        out = io.StringIO()
+        writer = csv.writer(out, lineterminator='\r\n')
+        writer.writerow(['날짜', '시각', '보낸 사람', '종류', '내용', '첨부 파일'])
+        for m in messages:
+            ts = parse_dt(m.get('timestamp'))
+            if ts is None:
+                continue
+            kind = m.get('kind') or 'text'
+            sender = '' if kind == 'system' else self.member_name(room_id, m.get('sender'))
+            body = m.get('content', '') if kind == 'system' else self.export_body(room_id, m)
+            attachment = (m.get('attachment') or {}).get('name', '') if not m.get('deleted') else ''
+            writer.writerow([ts.strftime('%Y-%m-%d'), ts.strftime('%H:%M:%S'), sender,
+                             self.EXPORT_KIND_NAMES.get(kind, kind), _csv_safe(body),
+                             files.get(m.get('msg_id'), attachment)])
+        return '\ufeff' + out.getvalue()
 
     def org_text(self, username, sep=' · '):
         """'회사 · 부서 · 직함' (비어 있으면 '')"""

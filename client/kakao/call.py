@@ -294,8 +294,8 @@ def blur_image(image, factor=10):
 
 
 def recordings_dir():
-    home = os.environ.get('KCS_MESSENGER_HOME') or os.path.join(os.path.expanduser('~'), '.kcs_messenger')
-    return os.path.join(home, 'recordings')
+    from client.kakao import osenv
+    return osenv.app_path('recordings')
 
 
 class WavRecorder:

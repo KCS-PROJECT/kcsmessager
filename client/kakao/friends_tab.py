@@ -35,7 +35,7 @@ BOT_HINT = '문서를 보내면 학습하고, 질문에 답해요'
 
 # ================================================================ 상태(presence) 메뉴
 def presence_menu(state, parent=None, on_selected=None):
-    """온라인/자리비움/다른 용무 중/회의 중 선택 메뉴"""
+    """온라인/자리비움/다른 용무 중/회의 중/휴가 중 선택 메뉴"""
     menu = QMenu(parent)
     current = presence_of(state, state.me)
     for key, label, _color in PRESENCE_CHOICES:
@@ -316,6 +316,7 @@ class ProfileEditDialog(QDialog):
         photo_row.addStretch(1)
         self.photo_button = QPushButton('사진 변경')
         self.clear_photo_button = QPushButton('기본 이미지')
+        self.clear_photo_button.setToolTip('회사 조직도 사진으로 되돌립니다 (조직도 사진이 없으면 사진 없음)')
         photo_row.addWidget(self.photo_button)
         photo_row.addWidget(self.clear_photo_button)
         photo_row.addStretch(1)
@@ -748,23 +749,27 @@ class ProfileDialog(QDialog):
 
 
 # ================================================================ 행 위젯
+ROW_AVATAR = theme.AVATAR_ROW      # 친구 탭 모든 행(내 프로필 · AI 비서 · 친구)의 아바타 크기 - 테마 한 곳에서 정한다
+
+
 class MyProfileRow(QWidget):
     def __init__(self, state, parent=None):
         super().__init__(parent)
         me = state.user(state.me)
         row = QHBoxLayout(self)
-        row.setContentsMargins(16, 10, 16, 14)
-        row.setSpacing(14)
-        size = theme.px(58)
+        # 내 프로필도 아래 친구 · AI 비서 행과 같은 아바타 크기 · 간격 (예전 58px 은 혼자 커 보였다, 2026-10-10)
+        row.setContentsMargins(16, 8, 16, 8)
+        row.setSpacing(12)
+        size = theme.px(ROW_AVATAR)
         self.avatar = Avatar(size=size)
         self.avatar.setPixmap(user_pixmap(state, state.me, size))
         row.addWidget(self.avatar, 0, Qt.AlignVCenter)
         col = QVBoxLayout()
-        col.setSpacing(4)
+        col.setSpacing(2)
         col.addStretch(1)
-        self.name = ElidedLabel(state.display_name(state.me), 'title', 'text', bold=True)
+        self.name = ElidedLabel(state.display_name(state.me), 'emphasis', 'text', bold=True)
         col.addWidget(self.name)
-        self.status = ElidedLabel(me.get('status_message') or '상태메시지를 입력해 주세요', 12,
+        self.status = ElidedLabel(me.get('status_message') or '상태메시지를 입력해 주세요', 'meta',
                                   'text_sub' if me.get('status_message') else 'text_hint')
         col.addWidget(self.status)
         col.addStretch(1)
@@ -781,7 +786,7 @@ class FriendRow(QWidget):
         row = QHBoxLayout(self)
         row.setContentsMargins(16, 7, 16, 7)
         row.setSpacing(12)
-        size = theme.px(44)
+        size = theme.px(ROW_AVATAR)
         self.avatar = Avatar(size=size)
         self.avatar.setPixmap(user_pixmap(state, username, size, show_presence=(kind != 'bot')))
         row.addWidget(self.avatar, 0, Qt.AlignVCenter)
@@ -803,7 +808,7 @@ class FriendRow(QWidget):
         sub_row.setSpacing(6)
         presence = presence_of(state, username)
         self.presence_label = None
-        if kind != 'bot' and presence in ('away', 'busy', 'meeting'):
+        if kind != 'bot' and presence in ('away', 'busy', 'meeting', 'vacation'):
             self.presence_label = QLabel(PRESENCE_LABELS[presence])
             self.presence_label.setStyleSheet(
                 f"color: {PRESENCE_COLORS[presence]}; font-size: {theme.fs('caption')}px; font-weight: bold;")
@@ -857,7 +862,8 @@ class SectionHeader(QWidget):
         super().__init__(parent)
         self.collapsed = collapsed
         row = QHBoxLayout(self)
-        row.setContentsMargins(theme.GUTTER, theme.sp('xl') - 4, theme.GUTTER, theme.sp('xs'))
+        # 위아래 여백을 같게: 줄 전체가 눌림·마우스 강조 영역이므로 글자가 그 가운데에 와야 한다
+        row.setContentsMargins(theme.GUTTER, theme.sp('m'), theme.GUTTER, theme.sp('m'))
         row.setSpacing(theme.sp('xs') + 1)
         self.title = ElidedLabel(title, 'meta', 'text_sub', bold=True)
         self.title.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
@@ -930,7 +936,8 @@ class FriendsTab(QWidget):
 
         self.search_button.clicked.connect(self.toggle_search)
         self.group_button.clicked.connect(self.show_create_dialog)
-        self.add_friend_button.clicked.connect(self.show_add_friend)
+        # clicked 는 checked(False)를 넘기므로 감싸서 부른다 (그대로 연결하면 exec_=False 가 되어 창이 안 뜬다)
+        self.add_friend_button.clicked.connect(lambda _checked=False: self.show_add_friend())
         if hasattr(state, 'my_friends_changed'):
             state.my_friends_changed.connect(self.refresh)
         self.search_edit.textChanged.connect(lambda _t: self.refresh())

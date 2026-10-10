@@ -26,7 +26,7 @@ from PyQt5.QtWidgets import (QWidget, QFrame, QLabel, QVBoxLayout, QHBoxLayout, 
                              QSizePolicy, QShortcut, QListView, QAbstractItemView, QStackedWidget,
                              QActionGroup, QAbstractButton, QBoxLayout)
 
-from client.kakao import theme
+from client.kakao import theme, osenv
 
 try:  # 일부 PyQt5 빌드(macOS 휠 등)에는 접근성 이벤트 API가 없다 → 이름만 바꾸고 알림 이벤트는 생략
     from PyQt5.QtGui import QAccessible, QAccessibleEvent
@@ -53,7 +53,7 @@ def keyword_text_color():
 LADDER_ROWS = 10
 LADDER_COLORS = ['#E8504A', '#2F7DE1', '#2DB36B', '#F0A019', '#8E5FE0',
                  '#E2549B', '#17A6B8', '#7A8B23', '#C2652E', '#5866C9']
-SILENT_KEYS = '⌘⇧Enter' if sys.platform == 'darwin' else 'Ctrl+Shift+Enter'
+SILENT_KEYS = osenv.shortcut_text('Ctrl+Shift+Enter')   # macOS '⇧⌘Enter'
 
 
 def _wallpaper_api():
@@ -99,11 +99,11 @@ def _presence_dot(color, size=13):
 
 
 # ---------------------------------------------------------------- 상수
-AV = 36            # 프로필 크기
+AV = theme.AVATAR_ROW   # 프로필 크기 - 친구 · 채팅 목록 · 조직도와 같은 사진 크기 (2026-10-10)
 TAIL = 6           # 말풍선 꼬리 폭
 PAD_H = 10         # 말풍선 좌우 여백
 PAD_V = 7          # 말풍선 상하 여백
-RADIUS = 13        # 말풍선 모서리
+RADIUS = 17        # 말풍선 모서리 (KCS Ink: 더 둥글게, 첫 말풍선은 말한 쪽 위만 4px)
 CARD_W = 250       # 투표/일정/파일 카드 기본 폭
 REACTIONS = ['❤️', '👍', '😆', '😮', '😢', '✅']
 # 더 많은 공감 (카카오톡 v26.4.0: 6종 → 114종, 말풍선당 최대 30종). 자주 쓰는 업무·감정 위주 72종
@@ -123,7 +123,7 @@ EMOTICONS = ['😀', '😂', '🤣', '😊', '😍', '🥰', '😘', '😎', '�
              '🌸', '☕', '🍺', '🍗', '🐶', '🐱', '⭐', '✅', '❌', '💯']
 RSVP_LABELS = [('yes', '참석'), ('no', '불참'), ('maybe', '미정')]
 LONG_TOKEN_RE = re.compile(r'\S{22,}')
-EMOJI_FAMILIES = ['Apple Color Emoji', 'Segoe UI Emoji', 'Noto Color Emoji']
+EMOJI_FAMILIES = osenv.emoji_families()   # 이 OS 이모지 글꼴 먼저
 # 이모지 표현 선택자(U+FE0F)가 붙은 글자는 한글 폰트 체인에서 대체 글꼴을 못 찾아 □로 보이므로
 # 이모지 폰트를 명시한다
 VS16_RE = re.compile('(.\ufe0f(?:\u200d.\ufe0f?)*)')
@@ -305,6 +305,18 @@ def _label(text='', name='', parent=None, wrap=False, rich=False):
     lab.setWordWrap(wrap)
     lab.setText(text)
     return lab
+
+
+class _ClickLabel(QLabel):
+    """누를 수 있는 글자 (읽음 숫자 → 안 읽은 사람 보기)"""
+    clicked = pyqtSignal()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mousePressEvent(event)
 
 
 def icon_pixmap(name, color, size, bg=None):
@@ -544,34 +556,40 @@ class Bubble(Clickable):
             self.update()
 
     def paintEvent(self, event):
+        # KCS Ink: 카카오 꼬리 대신, 묶음 첫 말풍선은 말한 사람 쪽 위 모서리만 작게 꺾는다 (말하는 방향)
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         r = QRectF(self.rect())
         body = r.adjusted(0, 0, -TAIL, 0) if self.mine else r.adjusted(TAIL, 0, 0, 0)
-        path = QPainterPath()
-        path.addRoundedRect(body, self.radius, self.radius)
-        if self.tail:
-            t = QPainterPath()
-            top = body.top()
-            if self.mine:
-                x = body.right()
-                t.moveTo(x + TAIL - 0.5, top + 2)
-                t.lineTo(x - 7, top + 2)
-                t.lineTo(x - 3, top + 15)
-                t.quadTo(x + 1, top + 6, x + TAIL - 0.5, top + 2)
-            else:
-                x = body.left()
-                t.moveTo(x - TAIL + 0.5, top + 2)
-                t.lineTo(x + 7, top + 2)
-                t.lineTo(x + 3, top + 15)
-                t.quadTo(x - 1, top + 6, x - TAIL + 0.5, top + 2)
-            path = path.united(t)
+        body = body.adjusted(0, 0, 0, -1)                     # 아래 1px 은 그림자 자리
+        big = min(self.radius, body.height() / 2, body.width() / 2)
+        small = min(4.0, big) if self.tail else big
+        path = corner_path(body, small if not self.mine else big, small if self.mine else big, big, big)
         fill = to_qcolor(self.fill) if self.fill else theme.qc('bubble_mine' if self.mine else 'bubble_other')
+        if not self.mine and not self.fill:
+            p.fillPath(path.translated(0, 1), theme.qc('bubble_shadow'))   # 받은 말풍선만 종이 위로 살짝 뜬다
         p.fillPath(path, fill)
         if self.outline:
             line = to_qcolor(self.outline)
             line.setAlphaF(0.75)                       # 칩이 주 신호, 테두리는 보조 (impeccable quieter)
             p.strokePath(path, QPen(line, 1.0))
+
+
+def corner_path(rect, tl, tr, br, bl):
+    """모서리마다 반지름이 다른 둥근 사각형 경로"""
+    path = QPainterPath()
+    x, y, w, h = rect.x(), rect.y(), rect.width(), rect.height()
+    path.moveTo(x + tl, y)
+    path.lineTo(x + w - tr, y)
+    path.arcTo(QRectF(x + w - 2 * tr, y, 2 * tr, 2 * tr), 90, -90)
+    path.lineTo(x + w, y + h - br)
+    path.arcTo(QRectF(x + w - 2 * br, y + h - 2 * br, 2 * br, 2 * br), 0, -90)
+    path.lineTo(x + bl, y + h)
+    path.arcTo(QRectF(x, y + h - 2 * bl, 2 * bl, 2 * bl), 270, -90)
+    path.lineTo(x, y + tl)
+    path.arcTo(QRectF(x, y, 2 * tl, 2 * tl), 180, -90)
+    path.closeSubpath()
+    return path
 
 
 class VoteBar(QWidget):
@@ -748,20 +766,16 @@ class EventCard(QFrame):
         h = QHBoxLayout(self)
         h.setContentsMargins(1, 1, 0, 1)
         h.setSpacing(0)
-        stripe = QFrame(self)
-        stripe.setFixedWidth(6)
+        # 일정 색은 옆 줄무늬 대신 '일정' 글자 앞 점 하나로 (KCS Ink: 카드 옆 색 막대 금지)
         color = (ev or {}).get('color') or theme.c('yellow')
-        stripe.setStyleSheet(f'background: {color}; border: none; border-top-left-radius: 11px;'
-                             f' border-bottom-left-radius: 11px;')
-        h.addWidget(stripe)
         body = QVBoxLayout()
-        body.setContentsMargins(12, 11, 14, 12)
+        body.setContentsMargins(14, 12, 14, 12)
         body.setSpacing(6)
         h.addLayout(body, 1)
         head = QHBoxLayout()
         head.setSpacing(5)
         ic = QLabel(self)
-        ic.setPixmap(icon_pixmap('calendar', theme.c('text_sub'), 16))
+        ic.setPixmap(icon_pixmap('calendar', color, 16))
         head.addWidget(ic)
         head.addWidget(_label('일정', 'cardSub', self))
         head.addStretch(1)
@@ -854,7 +868,7 @@ class LinkPreviewCard(Clickable):
 
     def open(self):
         if self.url:
-            QDesktopServices.openUrl(QUrl(self.url))
+            osenv.open_url(self.url)
 
     def relayout(self, width):
         width = max(80, int(width))
@@ -1436,6 +1450,24 @@ class ChipRow(QWidget):
             w = max(120, int(view_w * 0.85))
             fit_text(self.label, w, pad_x=24, pad_y=8)
 
+    def paintEvent(self, event):
+        """날짜 구분선(KCS Ink 시그니처): 칩 양옆으로 가는 잉크 선이 종이를 가른다"""
+        if self.msg is not None:
+            return
+        outer = getattr(self.window(), '_outer', None) or {}
+        color = to_qcolor(outer.get('chip_bg') or theme.c('date_chip_bg'))
+        color.setAlphaF(min(1.0, color.alphaF() * 1.6))
+        geo = self.label.geometry()
+        y = geo.center().y() + 0.5
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(QPen(color, 1.0))
+        left, right = 16, self.width() - 16
+        if geo.left() - 10 > left:
+            p.drawLine(QPointF(left, y), QPointF(geo.left() - 10, y))
+        if geo.right() + 10 < right:
+            p.drawLine(QPointF(geo.right() + 10, y), QPointF(right, y))
+
     def set_run(self, first, last):
         pass
 
@@ -1511,7 +1543,11 @@ class MessageRow(QWidget):
         meta.setSpacing(0)
         meta.addStretch(1)
         align = Qt.AlignRight if self.mine else Qt.AlignLeft
-        self.unread_label = _label('', 'unreadNum', self)
+        self.unread_label = _ClickLabel(self)
+        self.unread_label.setObjectName('unreadNum')
+        self.unread_label.setCursor(Qt.PointingHandCursor)
+        self.unread_label.setToolTip('안 읽은 사람 보기')
+        self.unread_label.clicked.connect(lambda: self.win.show_unread_members(self.msg))
         self.time_label = _label(fmt_time(msg.get('timestamp')), 'timeLabel', self)
         # 시간 줄: [조용히 보낸 표시][수정됨][시간] (내 메시지) / [시간][수정됨] (상대 메시지)
         self.meta_line = QWidget(self)
@@ -1577,6 +1613,20 @@ class MessageRow(QWidget):
         self.reaction_bar = self._build_reactions()
         if self.reaction_bar is not None:
             col.addWidget(self.reaction_bar, 0, align)
+        self.thread_link = None
+        if int(msg.get('thread_count') or 0) > 0:   # 스레드 답글 (§10.4)
+            last = f" · 마지막 {fmt_time(msg.get('thread_last_at'))}" if msg.get('thread_last_at') else ''
+            self.thread_link = QPushButton(f"답글 {int(msg['thread_count'])}개{last}", self)
+            self.thread_link.setObjectName('threadLink')
+            self.thread_link.setCursor(Qt.PointingHandCursor)
+            self.thread_link.setAccessibleName(f"스레드 답글 {int(msg['thread_count'])}개 보기")
+            self.thread_link.setStyleSheet(
+                f"QPushButton#threadLink {{ border: none; background: transparent; padding: 0 2px;"
+                f" color: {theme.c('link')};"
+                f" font-size: {theme.fs('caption')}px; font-weight: bold; text-align: left; }}"
+                f" QPushButton#threadLink:hover {{ text-decoration: underline; }}")
+            self.thread_link.clicked.connect(lambda: self.win.open_thread(self.msg))
+            col.addWidget(self.thread_link, 0, align)
         self.root.addLayout(col, 1)
         self.refresh_unread()
         self._kb = False
@@ -1614,7 +1664,7 @@ class MessageRow(QWidget):
             self.bubble = self._new_bubble()
             v = QVBoxLayout(self.bubble)
             v.setContentsMargins(0, 0, 0, 0)
-            lab = _label(DELETED_TEXT, 'deletedTextMine' if self.mine else 'deletedText', self.bubble)
+            lab = _label(DELETED_TEXT, 'deletedTextMine' if self.mine else 'deletedText', self.bubble, wrap=True)
             v.addWidget(lab)
             self._fit.append((lab, 'text', None))
             return self.bubble
@@ -1754,7 +1804,7 @@ class MessageRow(QWidget):
         self.text_label.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.LinksAccessibleByMouse)
         self.text_label.setContextMenuPolicy(Qt.NoContextMenu)
         self.text_label.setOpenExternalLinks(False)
-        self.text_label.linkActivated.connect(lambda url: QDesktopServices.openUrl(QUrl(url)))
+        self.text_label.linkActivated.connect(osenv.open_url)
         self.text_label.setCursor(Qt.IBeamCursor)
         v.addWidget(self.text_label)
         self._fit.append((self.text_label, 'text', None))
@@ -1839,6 +1889,7 @@ class MessageRow(QWidget):
         n = self.state.message_unread(self.win.room_id, self.msg)
         self.unread_label.setText(str(n) if n > 0 else '')
         self.unread_label.setVisible(n > 0)
+        self.unread_label.setAccessibleName(f'안 읽은 사람 {n}명 보기' if n > 0 else '')
 
     def relayout(self, max_w, view_w=None):
         inner = max_w - Bubble.hpad()
@@ -1893,13 +1944,15 @@ class MessageRow(QWidget):
         self.update()
 
     def paintEvent(self, event):
+        kb = getattr(self, '_kb', False)
+        if not (self._flash or kb):
+            return
+        p = QPainter(self)   # 한 위젯에 painter 는 하나만 (강조 중에도 포커스 테두리가 그려지게)
         if self._flash:
-            p = QPainter(self)
             color = theme.qc('yellow')
             color.setAlpha(70)
             p.fillRect(self.rect(), color)
-        if getattr(self, '_kb', False):   # 키보드로 고른 메시지: 2px 포커스 테두리
-            p = QPainter(self)
+        if kb:   # 키보드로 고른 메시지: 2px 포커스 테두리
             p.setRenderHint(QPainter.Antialiasing)
             p.setPen(QPen(theme.qc('yellow_dark'), 2))
             p.setBrush(Qt.NoBrush)
@@ -2169,8 +2222,8 @@ class InviteRow(QWidget):
         h.setContentsMargins(10, 6, 12, 6)
         h.setSpacing(10)
         av = QLabel(self)
-        av.setFixedSize(36, 36)
-        av.setPixmap(user_avatar_pixmap(state, username, 36, show_presence=True))
+        av.setFixedSize(AV, AV)
+        av.setPixmap(user_avatar_pixmap(state, username, AV, show_presence=True))
         h.addWidget(av)
         v = QVBoxLayout()
         v.setSpacing(1)
@@ -2178,7 +2231,7 @@ class InviteRow(QWidget):
         self.name = _label(state.display_name(username) + (' · AI 비서' if state.is_bot(username) else ''),
                            'inviteName', self)
         org = state.org_text(username)
-        self.org = _label(org, 'inviteOrg', self)
+        self.org = _label(org, 'inviteOrg', self, wrap=True)
         self.org.setVisible(bool(org))
         v.addWidget(self.name)
         v.addWidget(self.org)
@@ -2254,7 +2307,7 @@ class InviteDialog(_Dialog):
         self.chip_area = QScrollArea(self)
         self.chip_area.setWidgetResizable(True)
         self.chip_area.setFrameShape(QFrame.NoFrame)
-        self.chip_area.setFixedHeight(40)
+        self.chip_area.setFixedHeight(theme.px(40))   # 칩 글자 배율에 맞춘다
         self.chip_area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.chip_area.setObjectName('chipArea')
         self.chip_area.viewport().setObjectName('chipViewport')
@@ -2342,6 +2395,9 @@ class InviteDialog(_Dialog):
             self.chip_layout.addWidget(chip)
             self.chips[u] = chip
         self.chip_layout.addStretch(1)
+        if self.chips:   # 칩 실제 높이(+위아래 여백)보다 낮아 잘리지 않게
+            chip_h = max(ch.sizeHint().height() for ch in self.chips.values()) + 4
+            self.chip_area.setFixedHeight(max(theme.px(40), chip_h))
         self.chip_area.setVisible(bool(self._order))
         n = len(self._order)
         self.ok.setText(f'초대 ({n})' if n else '초대')
@@ -2366,6 +2422,11 @@ class MembersPopup(QFrame):
             QPushButton#memInvite {{ background: transparent; color: {c('text')}; border: none; text-align: left;
                 padding: 8px 10px; font-size: {theme.fs('body')}px; border-radius: 6px; }}
             QPushButton#memInvite:hover {{ background: {c('bg_hover')}; }}
+            QLabel#memOwner {{ color: {c('on_accent')}; background: {c('yellow')}; border-radius: 4px;
+                padding: 0px 4px; font-size: {theme.fs('micro')}px; font-weight: bold; }}
+            QToolButton#memMore {{ border: none; background: transparent; color: {c('text_sub')};
+                font-size: {theme.fs('body')}px; padding: 0 4px; }}
+            QToolButton#memMore:hover {{ color: {c('text')}; }}
             {theme.scrollbar_qss()}
         """)
         room = self.state.room(win.room_id) or {}
@@ -2400,6 +2461,9 @@ class MembersPopup(QFrame):
         hv.setContentsMargins(0, 0, 0, 0)
         hv.setSpacing(0)
         self.member_rows = []
+        self.owner = room.get('owner')
+        self.manage_buttons = {}
+        i_am_owner = self.owner == self.state.me and room.get('type') in ('group', 'open')
         for u in members:
             row = QWidget(host)
             h = QHBoxLayout(row)
@@ -2413,11 +2477,27 @@ class MembersPopup(QFrame):
             tv.setSpacing(0)
             me = ' (나)' if u == self.state.me else ''
             bot = '🤖 ' if self.state.is_bot(u) else ''
-            tv.addWidget(_label(bot + self.state.display_name(u) + me, 'memName', row))
+            name_row = QHBoxLayout()
+            name_row.setSpacing(4)
+            name_row.addWidget(_label(bot + self.state.display_name(u) + me, 'memName', row))
+            if u == self.owner:
+                name_row.addWidget(_label('방장', 'memOwner', row))
+            name_row.addStretch(1)
+            tv.addLayout(name_row)
             org = self.state.org_text(u)
             if org:
                 tv.addWidget(_label(org, 'memOrg', row))
             h.addLayout(tv, 1)
+            if i_am_owner and u != self.state.me:
+                more = QToolButton(row)
+                more.setObjectName('memMore')
+                more.setText('⋯')
+                more.setToolTip('방장 넘기기 · 내보내기')
+                more.setAccessibleName(f'{self.state.display_name(u)} 관리')
+                more.setCursor(Qt.PointingHandCursor)
+                more.clicked.connect(lambda _c=False, name=u, btn=more: self._manage_menu(name, btn))
+                h.addWidget(more)
+                self.manage_buttons[u] = more
             hv.addWidget(row)
             self.member_rows.append(u)
         hv.addStretch(1)
@@ -2429,6 +2509,59 @@ class MembersPopup(QFrame):
     def _invite(self):
         self.close()
         self.win.open_invite_dialog()
+
+    def _manage_menu(self, username, button):
+        """방장 전용 (§10.3): 방장 넘기기 · 내보내기"""
+        menu = QMenu(self)
+        if not self.state.is_bot(username):
+            menu.addAction('방장 넘기기', lambda: (self.close(), self.win.transfer_owner(username)))
+        menu.addAction('내보내기', lambda: (self.close(), self.win.kick_member(username)))
+        menu.exec_(button.mapToGlobal(button.rect().bottomLeft()))
+
+
+class UnreadMembersPopup(QFrame):
+    """읽음 숫자를 누르면 뜨는 '안 읽은 사람' 목록 (§10.6)"""
+
+    def __init__(self, win, message, parent=None):
+        super().__init__(parent, Qt.Popup)
+        self.win, self.state = win, win.state
+        self.setObjectName('unreadPopup')
+        c = theme.c
+        self.setStyleSheet(f"""
+            QFrame#unreadPopup {{ background: {c('bg')}; border: 1px solid {c('border')}; border-radius: 8px; }}
+            QLabel {{ background: transparent; }}
+            QLabel#memHead {{ color: {c('text_sub')}; font-size: {theme.fs('meta')}px; font-weight: bold; }}
+            QLabel#memName {{ color: {c('text')}; font-size: {theme.fs('body')}px; }}
+            QLabel#memOrg {{ color: {c('text_sub')}; font-size: {theme.fs('caption')}px; }}
+        """)
+        self.names = self.state.unread_members(win.room_id, message)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(10, 8, 10, 8)
+        v.setSpacing(4)
+        v.addWidget(_label(f'안 읽은 사람 {len(self.names)}', 'memHead', self))
+        for u in self.names[:50]:
+            row = QHBoxLayout()
+            row.setSpacing(8)
+            av = QLabel(self)
+            av.setFixedSize(28, 28)
+            av.setPixmap(user_avatar_pixmap(self.state, u, 28, show_presence=True))
+            row.addWidget(av)
+            col = QVBoxLayout()
+            col.setSpacing(0)
+            col.addWidget(_label(self.state.member_name(win.room_id, u), 'memName', self))
+            org = self.state.org_text(u)
+            if org:
+                col.addWidget(_label(org, 'memOrg', self, wrap=True))
+            row.addLayout(col, 1)
+            v.addLayout(row)
+        if len(self.names) > 50:
+            v.addWidget(_label(f'외 {len(self.names) - 50}명', 'memOrg', self))
+        if not self.names:
+            v.addWidget(_label('모두 읽었습니다', 'memOrg', self))
+        self.setMinimumWidth(theme.px(220))
+
+    def member_names(self):
+        return list(self.names)
 
 
 class ImageViewer(_Dialog):
@@ -2460,7 +2593,8 @@ class ImageViewer(_Dialog):
         v.addLayout(h)
 
     def save(self):
-        path, _ = QFileDialog.getSaveFileName(self, '사진 저장', self.name or 'image.png')
+        path, _ = QFileDialog.getSaveFileName(self, '사진 저장', os.path.join(osenv.user_dir('pictures'),
+                                                                         osenv.safe_filename(self.name, 'image.png')))
         if path:
             with open(path, 'wb') as f:
                 f.write(self.data)
@@ -2521,7 +2655,7 @@ class DrawerDialog(_Dialog):
             item = QListWidgetItem(f"{url}\n{self.state.display_name(m['sender'])} · {fmt_time(m['timestamp'])}")
             item.setData(Qt.UserRole, url)
             self.links.addItem(item)
-        self.links.itemDoubleClicked.connect(lambda it: QDesktopServices.openUrl(QUrl(it.data(Qt.UserRole))))
+        self.links.itemDoubleClicked.connect(lambda it: osenv.open_url(it.data(Qt.UserRole)))
         self.tabs.addTab(self._wrap(self.links, links, '링크가 없습니다.'), f'링크 {len(links)}')
         # 일정 (이 채팅방에서 만든 일정, 지난 일정은 흐리게)
         events = self.state.events_in_room(win.room_id) if hasattr(self.state, 'events_in_room') else []
@@ -3073,10 +3207,11 @@ class ReactionPicker(_Dialog):
                 badge.setObjectName('pickerCount')
                 badge.setAlignment(Qt.AlignCenter)
                 badge.setStyleSheet(f"background: {theme.c('yellow')}; color: {theme.c('on_accent')};"
-                                    f" border-radius: 7px; font-size: {theme.fs('micro')}px; font-weight: bold; padding: 0 3px;")
+                                    f" border-radius: {theme.px(7)}px; font-size: {theme.fs('micro')}px; font-weight: bold; padding: 0 3px;")
                 badge.adjustSize()
-                badge.setFixedHeight(14)
-                badge.move(b.width() - badge.width() - 2, b.height() - 16)
+                bh = max(theme.px(14), badge.sizeHint().height())   # 글자 배율을 따라 높이도 커진다
+                badge.setFixedHeight(bh)
+                badge.move(b.width() - badge.width() - 2, b.height() - bh - 2)
             grid.addWidget(b, i // 8, i % 8)
             self.buttons[emo] = b
         v.addLayout(grid)
@@ -3121,6 +3256,8 @@ class EmoticonPopup(QFrame):
 # ---------------------------------------------------------------- 창
 class ChatRoomWindow(QWidget):
     """카카오톡 채팅방 창 (최상위 창)"""
+
+    HEADER_TOP = 10   # 헤더 위 여백 (macOS 별도 창이면 신호등 버튼 높이만큼 더한다)
 
     def __init__(self, state, room_id, parent=None):
         super().__init__(parent)
@@ -3196,6 +3333,8 @@ class ChatRoomWindow(QWidget):
         s.room_summary_ready.connect(self._on_summary_ready)
         s.message_removed.connect(self._on_message_removed)
         s.room_export_ready.connect(self._on_export_ready)
+        if hasattr(s, 'connection_lost'):
+            s.connection_lost.connect(self._on_connection_lost)
         if hasattr(s, 'avatar_changed'):
             s.avatar_changed.connect(self._on_avatar_changed)
         if s.settings is not None:
@@ -3211,9 +3350,9 @@ class ChatRoomWindow(QWidget):
         self.header = QFrame(self)
         self.header.setObjectName('header')
         hh = QHBoxLayout(self.header)
-        hh.setContentsMargins(14, 10, 10, 10)
+        hh.setContentsMargins(14, self.HEADER_TOP, 10, 10)
         hh.setSpacing(10)
-        self.avatar = Avatar(size=42, parent=self.header)
+        self.avatar = Avatar(size=AV, parent=self.header)
         hh.addWidget(self.avatar)
         tv = QVBoxLayout()
         tv.setSpacing(2)
@@ -3459,12 +3598,23 @@ class ChatRoomWindow(QWidget):
         self.edit.cursorPositionChanged.connect(self._update_mention_popup)
         self.edit.popup_handler = self._mention_key
         self.edit.mime_handler = self.handle_mime
+        # KCS Ink 입력창: 종이(채팅 배경) 위에 뜬 둥근 카드 한 장 - 글자 칸 + 도구 줄 + 전송
+        self.composer = QFrame(self.input_area)
+        self.composer.setObjectName('composer')
+        self.composer.setProperty('focused', False)
+        cv = QVBoxLayout(self.composer)
+        cv.setContentsMargins(0, 0, 0, 0)
+        cv.setSpacing(0)
+        cwrap = QVBoxLayout()
+        cwrap.setContentsMargins(12, 4, 12, 12)
+        cwrap.addWidget(self.composer)
         ev = QVBoxLayout()
-        ev.setContentsMargins(10, 8, 10, 0)
+        ev.setContentsMargins(12, 10, 12, 0)
         ev.addWidget(self.edit)
-        iv.addLayout(ev)
+        cv.addLayout(ev)
+        self.edit.installEventFilter(self)
         tb = QHBoxLayout()
-        tb.setContentsMargins(8, 2, 10, 10)
+        tb.setContentsMargins(6, 2, 8, 8)
         tb.setSpacing(0)
         self.emoji_btn = IconButton('smile', '이모티콘', 20, self.input_area)
         self.file_btn = IconButton('clip', '파일 보내기', 20, self.input_area)
@@ -3502,7 +3652,8 @@ class ChatRoomWindow(QWidget):
         self.send_btn.setContextMenuPolicy(Qt.CustomContextMenu)
         self.send_btn.customContextMenuRequested.connect(self._show_send_menu)
         tb.addWidget(self.send_btn)
-        iv.addLayout(tb)
+        cv.addLayout(tb)
+        iv.addLayout(cwrap)
         root.addWidget(self.input_area)
 
         # 오버레이: 새 메시지 알림, 토스트, 멘션 자동완성
@@ -3550,7 +3701,7 @@ class ChatRoomWindow(QWidget):
         if spec is None:
             dark = theme.is_dark()
             return dict(title=c('text'), sub=c('text_sub'), icon=c('text_sub'),
-                        name=c('text_sub') if dark else '#4A4F55', time=c('text_sub') if dark else '#55606B',
+                        name=c('text_sub') if dark else '#3B4462', time=c('text_sub') if dark else '#586079',
                         chip_bg=c('date_chip_bg'), chip_fg=c('system_text'))
         dark = api.is_dark_wallpaper(spec) if hasattr(api, 'is_dark_wallpaper') else True
         if dark:
@@ -3608,7 +3759,8 @@ class ChatRoomWindow(QWidget):
             QLabel#noticeText {{ {fam} color: {c('text')}; font-size: {theme.fs('body')}px; }}
             QLabel#noticeSub {{ {fam} color: {c('text_sub')}; font-size: {theme.fs('caption')}px; }}
             QToolButton#noticeBtn {{ border: none; background: transparent; color: {c('text_sub')};
-                font-size: {theme.fs('meta')}px; padding: 2px 5px; border-radius: 4px; }}
+                font-size: {theme.fs('meta')}px; padding: 2px 5px; border-radius: 4px;
+                min-width: 24px; min-height: 24px; }}
             QToolButton#noticeBtn:hover {{ background: {c('bg_hover')}; }}
             QLabel#chip {{ {fam} background: {o['chip_bg']}; color: {o['chip_fg']};
                 border-radius: 11px; padding: 4px 12px; font-size: {theme.fs('meta')}px; }}
@@ -3675,17 +3827,20 @@ class ChatRoomWindow(QWidget):
                 background: transparent; }}
             QLabel#linkDesc {{ {fam} color: {c('text_sub')}; font-size: {theme.fs('meta')}px; background: transparent; }}
             QLabel#linkDescMine {{ {fam} color: {mc['sub']}; font-size: {theme.fs('meta')}px; background: transparent; }}
-            QFrame#inputArea {{ background: {c('input_bg')}; border-top: 1px solid {c('border')}; }}
-            QFrame#replyBar {{ background: {c('bg_alt')}; border-bottom: 1px solid {c('border')}; }}
+            QFrame#inputArea {{ background: transparent; border: none; }}
+            QFrame#composer {{ background: {c('input_bg')}; border: 1px solid {c('border')}; border-radius: 16px; }}
+            QFrame#composer[focused="true"] {{ border: 1px solid {c('yellow')}; }}
+            QFrame#replyBar {{ background: {c('bg')}; border: 1px solid {c('border')}; border-radius: 12px;
+                margin: 0px 12px 6px 12px; }}
             QLabel#replyTitle {{ {fam} color: {c('text')}; font-size: {theme.fs('meta')}px; font-weight: bold; }}
             QLabel#replyPreview {{ {fam} color: {c('text_sub')}; font-size: {theme.fs('meta')}px; }}
             QTextEdit#compose {{ {fam} background: transparent; color: {c('text')}; border: none;
                 font-size: {theme.fs('emphasis')}px; selection-background-color: {c('yellow')}; selection-color: {theme.c('on_accent')}; }}
-            QPushButton#sendBtn {{ {fam} background: {c('yellow')}; color: {theme.c('on_accent')}; border: none; border-radius: 5px;
-                padding: 6px 16px; font-size: {theme.fs('body')}px; font-weight: bold; }}
+            QPushButton#sendBtn {{ {fam} background: {c('yellow')}; color: {theme.c('on_accent')}; border: none; border-radius: 10px;
+                padding: 7px 18px; font-size: {theme.fs('body')}px; font-weight: bold; }}
             QPushButton#sendBtn:hover {{ background: {c('yellow_dark')}; }}
-            QPushButton#sendBtn:disabled {{ background: {c('bg_alt')}; color: {c('text_hint')};
-                border: 1px solid {c('border')}; }}
+            QPushButton#sendBtn:focus {{ border: 2px solid {c('text')}; }}
+            QPushButton#sendBtn:disabled {{ background: {c('bg_alt')}; color: {c('text_hint')}; border: none; }}
             QPushButton#newPill {{ {fam} background: {c('bg')}; color: {c('text')}; border: 1px solid {c('border')};
                 border-radius: 15px; padding: 6px 14px; font-size: {theme.fs('meta')}px; }}
             QLabel#toast {{ {fam} background: rgba(30,30,30,0.85); color: #FFFFFF; border-radius: 14px;
@@ -3723,7 +3878,16 @@ class ChatRoomWindow(QWidget):
             b.refresh_icon(c('text_sub'))
         self.notice_icon.setPixmap(icon_pixmap('notice', c('text_sub'), 18))
         self.edit_bar_icon.setPixmap(pencil_pixmap(c('text_sub'), 16))
+        self._refresh_bar_icons()
         self.edit.adjust_height()
+
+    def _refresh_bar_icons(self):
+        """검색·공지·답장·수정 바 아이콘을 현재 테마 색으로 다시 그린다 (다크 모드 전환 시)"""
+        sub = theme.c('text_sub')
+        self.search_up.setIcon(QIcon(chevron_pixmap(sub, 16, up=True)))
+        self.search_down.setIcon(QIcon(chevron_pixmap(sub, 16)))
+        for b in (self.search_close, self.notice_close, self.reply_cancel, self.edit_cancel):
+            b.setIcon(make_icon('close', sub, 14))
 
     def apply_theme(self):
         """다크 모드 전환 등 테마 변경 시 색상을 다시 읽고 전체를 다시 그린다"""
@@ -3763,7 +3927,7 @@ class ChatRoomWindow(QWidget):
             self.count_label.setToolTip(', '.join(names[m] for m in members))
         else:
             target = next((m for m in members if m != self.state.me), self.state.me)
-            self.avatar.setPixmap(user_avatar_pixmap(self.state, target, 42, show_presence=room['type'] == 'direct'))
+            self.avatar.setPixmap(user_avatar_pixmap(self.state, target, AV, show_presence=room['type'] == 'direct'))
             info = self.state.user(target)
             if room['type'] == 'self':
                 self.count_label.setIcon(QIcon())
@@ -3897,7 +4061,13 @@ class ChatRoomWindow(QWidget):
         self.notice_toggle.setAccessibleName('공지 접기' if self._notice_expanded else '공지 펼치기')
         self.notice_text.setWordWrap(self._notice_expanded)
         self.notice_sub.setVisible(self._notice_expanded)
-        width = max(80, self.width() - 20 - 12 - 18 - 10 - 6 - 2 * 26 - 12)
+        # 글자 폭 = 공지 상자 안쪽 - 아이콘 - 펼치기·닫기 버튼 - 간격 (실제 위젯 크기로 계산, 확대해도 맞음)
+        nh = self.notice.layout()
+        m = nh.contentsMargins()
+        used = (m.left() + m.right() + self.notice_icon.sizeHint().width() + self.notice_toggle.sizeHint().width()
+                + self.notice_close.sizeHint().width() + 3 * nh.spacing() + 4)
+        box = self.notice.width() if self.notice.width() > 50 else self.width() - 20
+        width = max(80, box - used)
         if self._notice_expanded:
             self.notice_text.setText(text)
             self.notice_text.setMinimumWidth(0)
@@ -3975,7 +4145,7 @@ class ChatRoomWindow(QWidget):
 
     def _rebuild(self):
         """받아 둔 메시지 중 최근 _render_count 개로 목록을 다시 배치(기존 행 위젯은 재사용)"""
-        all_msgs = self.state.room_messages(self.room_id)
+        all_msgs = self.state.timeline_messages(self.room_id)
         msgs = all_msgs[-self._render_count:] if self._render_count < len(all_msgs) else all_msgs
         self._hidden_older = len(all_msgs) - len(msgs)
         lay = self.list_layout
@@ -4144,12 +4314,24 @@ class ChatRoomWindow(QWidget):
             return True
         if self._loading_older or not self.state.has_more.get(self.room_id) or not self._order:
             return False
+        if not self._online():
+            # 끊긴 상태면 요청이 버려져 플래그가 계속 남으므로 걸지 않는다 (다시 연결되면 스크롤로 재시도)
+            return False
         sb = self.scroll.verticalScrollBar()
         self._loading_older = True
         self._stick_bottom = False
         self._anchor = sb.maximum() - sb.value()
         self.state.load_history(self.room_id, older=True)
         return True
+
+    def _online(self):
+        conn = getattr(self.state, 'conn', None)
+        return conn is not None and bool(getattr(conn, 'is_connected', False))
+
+    def _on_connection_lost(self, *_):
+        """연결이 끊기면 응답이 오지 않으므로 이전 대화 로딩 플래그를 풀어 둔다"""
+        self._loading_older = False
+        self._anchor = None
 
     def scroll_to_bottom(self):
         self._stick_bottom = True
@@ -4174,14 +4356,20 @@ class ChatRoomWindow(QWidget):
         go()
         QTimer.singleShot(0, go)
 
-    def focus_message(self, msg_id):
-        """메시지로 스크롤하고 잠시 강조. 아직 로드되지 않았으면 이전 대화를 더 불러온다."""
+    def focus_message(self, msg_id, hint=None):
+        """메시지로 스크롤하고 잠시 강조. 아직 로드되지 않았으면 이전 대화를 더 불러온다.
+        hint = 검색 결과 등 이미 받은 메시지 (아직 받지 않은 스레드 답글도 바로 스레드를 연다)"""
         if msg_id is None:
             return False
         row = self.rows.get(msg_id)
+        target = (self.state.find_message(self.room_id, msg_id) or hint) if row is None else None
+        if target is not None and target.get('thread_root') is not None:   # 스레드 답글이면 스레드를 연다
+            root = self.state.find_message(self.room_id, target['thread_root']) or {'msg_id': target['thread_root']}
+            self.open_thread(root)
+            return self.focus_message(target['thread_root'])
         if row is None:
             # 받아 두었지만 아직 그리지 않은 오래된 메시지면 거기까지 그린다
-            all_ids = [m['msg_id'] for m in self.state.room_messages(self.room_id)]
+            all_ids = [m['msg_id'] for m in self.state.timeline_messages(self.room_id)]
             if msg_id in all_ids:
                 self._render_count = max(self._render_count, len(all_ids) - all_ids.index(msg_id))
                 self._rebuild()
@@ -4194,7 +4382,7 @@ class ChatRoomWindow(QWidget):
         oldest = self._order[0]['msg_id'] if self._order else None
         if self.state.has_more.get(self.room_id) and (oldest is None or msg_id < oldest):
             self._pending_focus = msg_id
-            if not self._loading_older:
+            if not self._loading_older and self._online():
                 self._loading_older = True
                 self.state.load_history(self.room_id, older=True)
             return False
@@ -4215,8 +4403,9 @@ class ChatRoomWindow(QWidget):
             QTimer.singleShot(150, self._clear_anchor)
         if self._pending_focus is not None:
             target = self._pending_focus
-            if target in self.rows:
-                self.focus_message(target)
+            found = self.state.find_message(self.room_id, target)
+            if target in self.rows or (found is not None and found.get('thread_root') is not None):
+                self.focus_message(target)   # 스레드 답글이면 스레드 창을 연다 (§10.4)
             elif has_more and batch:
                 self._loading_older = True
                 self.state.load_history(self.room_id, older=True)
@@ -4230,6 +4419,9 @@ class ChatRoomWindow(QWidget):
 
     def _on_message_added(self, rid, m):
         if rid != self.room_id:
+            return
+        if m.get('thread_root') is not None:   # 스레드 답글은 원글의 '답글 N개'로만 (§10.4)
+            self._maybe_mark_read()
             return
         mine = m.get('sender') == self.state.me
         follow = self._stick_bottom or self._near_bottom() or mine
@@ -4246,7 +4438,7 @@ class ChatRoomWindow(QWidget):
         self._maybe_mark_read()
 
     def _on_message_updated(self, rid, m):
-        if rid != self.room_id:
+        if rid != self.room_id or m.get('thread_root') is not None:
             return
         settings = self.state.settings
         hidden = settings is not None and settings.contains('hidden_messages', m['msg_id'])
@@ -4329,15 +4521,16 @@ class ChatRoomWindow(QWidget):
             folder = os.path.join(tempfile.gettempdir(), 'kcs_talk_files')
             try:
                 os.makedirs(folder, exist_ok=True)
-                path = os.path.join(folder, os.path.basename(name) or f'file_{aid}')
+                path = os.path.join(folder, osenv.safe_filename(name, f'file_{aid}'))   # 다른 OS 에서 온 이름도
                 with open(path, 'wb') as f:
                     f.write(data)
-                QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+                osenv.open_path(path)
             except OSError as e:
                 self.toast(f'파일을 열 수 없습니다: {e}')
         if aid in self._pending_save:
             self._pending_save.discard(aid)
-            path, _ = QFileDialog.getSaveFileName(self, '파일 저장', name)
+            path, _ = QFileDialog.getSaveFileName(self, '파일 저장',
+                                                  os.path.join(osenv.user_dir('downloads'), osenv.safe_filename(name)))
             if path:
                 try:
                     with open(path, 'wb') as f:
@@ -4354,6 +4547,20 @@ class ChatRoomWindow(QWidget):
         if self.isVisible():
             self.toast(message)
 
+    def _fit_title_bar(self):
+        """macOS 별도 창: 회색 제목 표시줄 대신 헤더가 창 맨 위(신호등 버튼 뒤)까지 (로그인·메인 창과 같은 모양).
+        분할 화면(메인 창 안)에 들어가 있으면 원래 여백. 창을 꺼내면 새 네이티브 창이 생기므로 그때마다 다시 적용"""
+        from client.kakao import macos
+        top = self.HEADER_TOP
+        if self.isWindow():
+            native = int(self.winId())
+            if getattr(self, '_unified_native', None) == native or macos.unify_title_bar(self):
+                self._unified_native = native
+                top += macos.TITLE_BAR_HEIGHT
+        margins = self.header.layout().contentsMargins()
+        if margins.top() != top:
+            self.header.layout().setContentsMargins(margins.left(), top, margins.right(), margins.bottom())
+
     def _maybe_mark_read(self):
         if self.isVisible() and self.isActiveWindow() and not self.isMinimized():
             self.state.mark_read(self.room_id)
@@ -4361,22 +4568,47 @@ class ChatRoomWindow(QWidget):
     # ================= 창 이벤트 =================
     def showEvent(self, event):
         super().showEvent(event)
+        self._fit_title_bar()
         self.state.active_rooms.add(self.room_id)
         if not self._history_requested:
             self._history_requested = True
             self.state.load_history(self.room_id)
+        if not getattr(self, '_draft_restored', False):
+            self._draft_restored = True
+            self.restore_draft()
         self._relayout_timer.start()
         QTimer.singleShot(0, self._position_overlays)
         self.edit.setFocus()
 
     def hideEvent(self, event):
         self.state.active_rooms.discard(self.room_id)
+        self.save_draft()
         super().hideEvent(event)
 
     def closeEvent(self, event):
         self.state.active_rooms.discard(self.room_id)
         self.mention_popup.hide()
+        self.save_draft()
         super().closeEvent(event)
+
+    # ================= 입력 임시저장 (§10.8) =================
+    def save_draft(self):
+        """쓰다 만 글을 방별로 저장 (수정 중이면 수정 전 입력 내용).
+        기다리던 자동 저장 타이머는 멈춘다 - 닫힌 창의 타이머가 늦게 울려 다른 창에서 지운 임시저장을
+        옛 글로 되살리지 않게"""
+        timer = self.__dict__.get('_draft_timer')
+        if timer is not None:
+            timer.stop()
+        text = self._edit_draft if self._editing else self.edit.toPlainText()
+        self.state.set_room_draft(self.room_id, text)
+
+    def restore_draft(self):
+        draft = self.state.room_draft(self.room_id)
+        if draft and not self.edit.toPlainText():
+            self.edit.setPlainText(draft)
+            cursor = self.edit.textCursor()
+            cursor.movePosition(cursor.End)
+            self.edit.setTextCursor(cursor)
 
     def changeEvent(self, event):
         super().changeEvent(event)
@@ -4397,6 +4629,10 @@ class ChatRoomWindow(QWidget):
         elif obj is self.search_edit and event.type() == QEvent.KeyPress and event.key() == Qt.Key_Escape:
             self.close_search()
             return True
+        elif obj is getattr(self, 'edit', None) and event.type() in (QEvent.FocusIn, QEvent.FocusOut):
+            self.composer.setProperty('focused', event.type() == QEvent.FocusIn)   # 입력 중이면 테두리가 잉크색
+            self.composer.style().unpolish(self.composer)
+            self.composer.style().polish(self.composer)
         return super().eventFilter(obj, event)
 
     def _position_overlays(self):
@@ -4470,6 +4706,14 @@ class ChatRoomWindow(QWidget):
     def _on_text_changed(self):
         self.send_btn.setEnabled(bool(self.edit.toPlainText().strip()))
         self._update_mention_popup()
+        if getattr(self, '_draft_restored', False):   # 입력이 멈추면 임시저장 (앱이 갑자기 꺼져도 남게)
+            timer = self.__dict__.get('_draft_timer')
+            if timer is None:
+                timer = self._draft_timer = QTimer(self)
+                timer.setSingleShot(True)
+                timer.setInterval(800)
+                timer.timeout.connect(self.save_draft)
+            timer.start()
 
     def send_current(self, silent=False):
         text = self.edit.toPlainText()
@@ -4847,6 +5091,8 @@ class ChatRoomWindow(QWidget):
                 menu.addAction('답장', lambda: self.start_reply(m))
             if self.state.can_edit(m):
                 menu.addAction('수정', lambda: self.start_edit(m))
+            if not secret and m.get('thread_root') is None and not m.get('failed'):
+                menu.addAction('스레드로 답장', lambda: self.open_thread(m))
             sub = menu.addMenu('공감')
             sub.setStyleSheet(menu.styleSheet() + f'QMenu {{ {emoji_css()} }}')
             mine = {e for e, users in (m.get('reactions') or {}).items() if self.state.me in users}
@@ -4863,6 +5109,11 @@ class ChatRoomWindow(QWidget):
                 menu.addAction('나에게 보내기', lambda: self.send_to_me(m))
             if not secret:
                 menu.addAction('공지 등록', lambda: self.state.set_notice(self.room_id, m['msg_id']))
+            if not m.get('failed'):
+                if self.state.is_saved(self.room_id, m['msg_id']):
+                    menu.addAction('책갈피 해제', lambda: self.state.unsave_message(self.room_id, m['msg_id']))
+                else:
+                    menu.addAction('책갈피', lambda: self._save_bookmark(m))
             if m.get('sender') and m.get('sender') != self.state.me:
                 menu.addAction('프로필 보기', lambda: self.open_profile(m['sender']))
         dsub = menu.addMenu('삭제')
@@ -4925,7 +5176,7 @@ class ChatRoomWindow(QWidget):
             menu.addAction('게시판', lambda: self.open_board())
         if room.get('type') != 'secret':
             menu.addAction('대화 요약', lambda: self.show_summary())
-        menu.addAction('대화 내보내기 (.txt)', lambda: self.export_chat())
+        menu.addAction('대화 내용 저장… (텍스트 · 엑셀 · 사진 포함)', lambda: self.show_export_dialog())
         if self.state.settings is not None:
             alert = menu.addMenu('알림 설정')
             alert.setStyleSheet(menu.styleSheet())
@@ -4990,6 +5241,21 @@ class ChatRoomWindow(QWidget):
         names = ', '.join(self.state.display_name(u) for u in usernames)
         self.toast(f'{names}님과 새 그룹 채팅방을 만듭니다.' if created else f'{names}님을 초대했습니다.')
         return created
+
+    def _save_bookmark(self, m):
+        if self.state.save_message(m):
+            self.toast('책갈피에 저장했습니다. 채팅 탭 ⋯ → 책갈피에서 볼 수 있습니다.')
+
+    def show_unread_members(self, message):
+        """읽음 숫자 → 안 읽은 사람 목록 팝업 (§10.6)"""
+        popup = UnreadMembersPopup(self, message, self)
+        popup.adjustSize()
+        row = self.rows.get(message.get('msg_id'))
+        anchor = row.unread_label if row is not None and hasattr(row, 'unread_label') else self
+        pos = anchor.mapToGlobal(anchor.rect().bottomLeft())
+        popup.move(pos)
+        popup.show()
+        return popup
 
     def build_members_popup(self):
         return MembersPopup(self, self)
@@ -5124,6 +5390,36 @@ class ChatRoomWindow(QWidget):
         if self.confirm('채팅방 나가기', '채팅방을 나가면 대화 내용이 모두 삭제됩니다. 나갈까요?'):
             self.state.leave_room(self.room_id)
 
+    def open_thread(self, m):
+        """스레드 창 (§10.4) - 원글마다 하나, 이미 열려 있으면 앞으로"""
+        from client.kakao.thread_view import ThreadDialog
+        root_id = m.get('thread_root') or m['msg_id']
+        dialogs = self.__dict__.setdefault('_thread_dialogs', {})
+        dlg = dialogs.get(root_id)
+        try:
+            if dlg is not None and dlg.isVisible():
+                dlg.raise_()
+                dlg.activateWindow()
+                return dlg
+        except RuntimeError:   # 닫혀서 지워진 창
+            pass
+        dlg = ThreadDialog(self, root_id, self)
+        dialogs[root_id] = dlg
+        dlg.show()
+        return dlg
+
+    def kick_member(self, username):
+        """방장: 대화상대 내보내기 (§10.3)"""
+        name = self.state.display_name(username)
+        if self.confirm('내보내기', f'{name}님을 이 채팅방에서 내보낼까요?'):
+            self.state.kick_member(self.room_id, username)
+
+    def transfer_owner(self, username):
+        """방장: 방장 넘기기 (§10.3)"""
+        name = self.state.display_name(username)
+        if self.confirm('방장 넘기기', f'{name}님에게 방장을 넘길까요? 넘기면 내보내기·방장 넘기기를 할 수 없습니다.'):
+            self.state.transfer_owner(self.room_id, username)
+
     def open_drawer(self):
         dlg = DrawerDialog(self, self)
         dlg.exec_()
@@ -5191,7 +5487,11 @@ class ChatRoomWindow(QWidget):
         self.search_list.blockSignals(False)
         self.search_up.setEnabled(idx < len(self._search_results) - 1)
         self.search_down.setEnabled(idx > 0)
-        self.focus_message(self._search_results[idx]['msg_id'])
+        found = self._search_results[idx]
+        if found.get('thread_root') is not None:   # 아직 받지 않은 스레드 답글도 바로 스레드를 연다
+            self.focus_message(found['msg_id'], hint=found)
+        else:
+            self.focus_message(found['msg_id'])
 
     def search_prev(self):
         """▲ 더 오래된 결과"""
@@ -5258,35 +5558,82 @@ class ChatRoomWindow(QWidget):
             self._summary_dialog = SummaryDialog(self.state, self.room_id, self)
         return self._summary_dialog
 
-    def export_chat(self, path=None):
-        """대화 내보내기: 전체 기록을 받아 카카오톡 형식 .txt 로 저장"""
+    def show_export_dialog(self, exec_=True):
+        """대화 내용 저장: 형식(텍스트/엑셀용 표/사진·파일 포함)과 기간을 고른 뒤 저장 위치를 묻는다 (명세 §9.5)"""
+        from client.kakao.chat_export import ExportDialog
+        dlg = ExportDialog(self.state.room_title(self.room_id), self)
+        self.export_dialog = dlg
+        if exec_ and dlg.exec_() == ExportDialog.Accepted:
+            self.export_chat(**dlg.options())
+        return dlg
+
+    def export_chat(self, path=None, fmt='txt', since=None, until=None, period=''):
+        """대화 저장: 서버에서 (기간의) 기록을 받아 fmt('txt'|'csv'|'zip')로 저장. path 가 없으면 받은 뒤 저장 창"""
+        if self._export_requested:
+            self.toast('대화 내용을 저장하는 중입니다. 잠시만 기다려 주세요.')
+            return
+        if not self.state.is_connected():
+            self.toast('서버에 연결되어 있지 않아 대화 내용을 저장할 수 없습니다.')
+            return
         self._export_path = path
+        self._export_options = {'fmt': fmt, 'period': period}
         self._export_requested = True
-        self.state.request_export(self.room_id)
+        self._export_token = getattr(self, '_export_token', 0) + 1
+        token = self._export_token
+        QTimer.singleShot(self.EXPORT_TIMEOUT_MS, lambda: self._export_timed_out(token))
+        self.state.request_export(self.room_id, since=since, until=until)
         self.toast('대화 내용을 모으는 중입니다…', 1500)
 
-    def default_export_name(self):
-        title = re.sub(r'[\\/:*?"<>|]', '_', self.state.room_title(self.room_id)) or '채팅방'
-        return f"KCS Talk_{title}_{datetime.now():%Y%m%d_%H%M%S}.txt"
+    EXPORT_TIMEOUT_MS = 60000   # 서버가 기록을 보내지 않으면(오류·끊김) 저장 중 상태를 푼다
+
+    def _export_timed_out(self, token):
+        if self._export_requested and token == getattr(self, '_export_token', 0) \
+                and getattr(self, '_export_collector', None) is None:
+            self._export_requested = False
+            self.toast('서버가 응답하지 않아 대화 내용을 저장하지 못했습니다. 다시 시도해 주세요.')
+
+    def default_export_name(self, fmt='txt'):
+        from client.kakao.chat_export import default_file_name
+        return default_file_name(self.state.room_title(self.room_id), fmt, datetime.now())
 
     def _on_export_ready(self, room_id, messages, truncated):
         if room_id != self.room_id or not self._export_requested:
             return
-        self._export_requested = False
+        from client.kakao.chat_export import format_info, ensure_extension, AttachmentCollector
+        options = getattr(self, '_export_options', None) or {'fmt': 'txt', 'period': ''}
+        fmt = options['fmt']
         path = self._export_path
         if path is None:
-            start = os.path.join(os.path.expanduser('~'), 'Documents', self.default_export_name())
-            path, _ = QFileDialog.getSaveFileName(self, '대화 내보내기', start, '텍스트 파일 (*.txt)')
+            start = os.path.join(osenv.user_dir('documents'), self.default_export_name(fmt))
+            path, _ = QFileDialog.getSaveFileName(self, '대화 내용 저장', start, format_info(fmt)[3])
             if not path:
+                self._export_requested = False
                 return
+            path = ensure_extension(path, fmt)
+        if fmt == 'zip' and messages:
+            collector = AttachmentCollector(self.state, messages, self)
+            self._export_collector = collector
+            collector.progress.connect(lambda done, total: total and self.toast(
+                f'사진·파일을 받는 중입니다… {done}/{total}', 1500))
+            collector.finished.connect(lambda files, notes: self._finish_export(
+                path, fmt, messages, truncated, options['period'], files, notes))
+            collector.start()
+            return
+        self._finish_export(path, fmt, messages, truncated, options['period'], {}, {})
+
+    def _finish_export(self, path, fmt, messages, truncated, period, files, notes):
+        from client.kakao.chat_export import write_export
+        self._export_requested = False
+        self._export_collector = None
         try:
-            with open(path, 'w', encoding='utf-8') as f:
-                f.write(self.state.export_text(self.room_id, messages))
+            write_export(path, fmt, self.state, self.room_id, messages, period=period, files=files, notes=notes)
         except OSError as e:
             self.toast(f'저장하지 못했습니다: {e}')
             return
         note = ' (최근 2만 개까지)' if truncated else ''
-        self.toast(f'대화 {len(messages)}개를 내보냈습니다{note}.')
+        extra = f' · 사진·파일 {len(files)}개' if fmt == 'zip' else ''
+        missing = f' · 빠진 첨부 {len(notes)}개' if notes else ''
+        self.toast(f'대화 {len(messages)}개를 저장했습니다{extra}{missing}{note}.')
         self.last_export_path = path
 
     def show_reaction_picker(self, m, exec_=True):

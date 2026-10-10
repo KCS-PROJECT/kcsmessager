@@ -11,7 +11,7 @@ from PyQt5.QtGui import QPainter, QColor, QLinearGradient, QPixmap, QPainterPath
 from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
                              QGridLayout, QFileDialog, QWidget, QSizePolicy)
 
-from client.kakao import theme
+from client.kakao import theme, osenv
 
 COLOR_PRESETS = ['#BACEE0', '#9BBBD4', '#C4D7B2', '#F5E1A4', '#F7C8C8',
                  '#D9CFF0', '#E8E8E8', '#3A4A5C', '#2B2F33', '#1E1E1E']
@@ -251,7 +251,7 @@ class WallpaperDialog(QDialog):
         self._refresh()
 
     def _pick_image(self):
-        path, _ = QFileDialog.getOpenFileName(self, '배경 사진 선택', os.path.expanduser('~'),
+        path, _ = QFileDialog.getOpenFileName(self, '배경 사진 선택', osenv.user_dir('pictures'),
                                               '이미지 (*.png *.jpg *.jpeg *.bmp *.gif *.webp)')
         if path:
             self.choose_image(path)

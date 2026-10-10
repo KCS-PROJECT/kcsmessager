@@ -8,10 +8,12 @@
 
 엑셀 형식('사내전화번호' 시트): 5열 블록(직급 | 이름 | 계정 | 내선 | 휴대폰)이 가로로 여러 개 있고,
 블록 안에서 값이 첫 칸에만 있는 행은 조직 단위 제목이다(예: '영 업 부(t-sales)', '영업 1 본부(t-sale1)', '1팀(보안)').
-이름·직급의 '(*)'는 겸직 표시다. 같은 계정이 여러 조직에 나오면 겸직이 아닌 곳을 주소속으로 한다.
+이름·직급의 '(*)'는 겸직 표시다. 같은 계정이 여러 조직에 나오면 겸직이 아닌 곳을 주소속으로 하고,
+나머지 조직은 모두 겸직으로 둔다(같은 부서의 다른 팀도 각각). 엑셀은 본부장·실장 같은 부서장을
+첫 팀 블록 안에 적으므로, 부서장 직함이 팀 안에 있으면 부서 바로 아래(부서장 자리)와 그 팀 두 곳에 둔다.
 
 org.json 에는 개인 연락처가 들어가므로 저장소에 커밋하지 않는다(server_data/ 는 .gitignore 대상).
-계열사 목록은 회사 홈페이지(kcins.co.kr › 계열사) 기준이며 --affiliates 로 바꿀 수 있다.
+계열사 목록은 한국지주 사업보고서(DART) '계열회사 현황' 13곳 기준이며 --affiliates 로 바꿀 수 있다.
 """
 
 import argparse
@@ -22,32 +24,55 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# 회사 홈페이지(https://kcins.co.kr/partners/affiliates) 기준 그룹 구조
+# 그룹 구조: 한국지주(주) 2025 사업보고서(DART rcpNo 20260331001700, 2025-12-31 기준) '계열회사 현황' 13곳
+# (상장 5 · 비상장 8, 지주사 자신은 목록에 없음). 연락처는 DART 기업정보 기준(그룹 홈페이지 계열사 안내는 오래됨),
+# 비상장사는 확인된 사실(상장 여부 · 지분 관계)만 적는다 - 확인되지 않은 홈페이지·전화는 넣지 않는다.
 HOLDING = {'name': '한국지주', 'business': '지주회사업', 'homepage': 'www.kchi.co.kr', 'phone': '02-398-1712'}
 AFFILIATES = [
-    {'name': '한국컴퓨터', 'business': 'LCD Module·PDP 부품', 'homepage': 'www.koreatronics.com', 'phone': '041-589-3300'},
-    {'name': '한네트', 'business': '부가통신업 (현금서비스·예금인출)', 'homepage': 'www.hannet.net', 'phone': '02-2125-6000'},
-    {'name': '로지시스', 'business': '금융단말 보수정비, CD/ATM 운영대행', 'homepage': 'www.logisys.co.kr', 'phone': '02-2125-6300'},
-    {'name': '케이씨티', 'business': '금융자동화 시스템 공급 사업', 'homepage': 'www.kctinc.co.kr', 'phone': '02-6377-5600'},
+    # 상장 (코스닥)
+    {'name': '한국컴퓨터', 'business': 'LCD 모듈·PDP 부품 · 코스닥', 'homepage': 'www.kci.co.kr', 'phone': '041-589-3320'},
+    {'name': '한네트', 'business': '점외 CD/ATM 현금서비스 VAN · 코스닥', 'homepage': 'www.hannet.net', 'phone': '02-2125-6000'},
+    {'name': '로지시스', 'business': '금융단말 유지보수·CD/ATM 운영대행 · 코스닥', 'homepage': 'www.logisys.co.kr',
+     'phone': '02-2125-6300'},
+    {'name': '케이씨티', 'business': '금융자동화 시스템 공급 사업 · 코스닥', 'homepage': 'www.kctinc.co.kr',
+     'phone': '02-6377-5622'},
     {'name': '케이씨에스', 'business': '시스템 통합·정보보호·양자암호 솔루션', 'homepage': 'kcins.co.kr', 'phone': '02-6377-5001'},
+    # 비상장 (국내)
+    {'name': '한국문학사', 'business': '비상장 · 한국지주 100%'},
+    {'name': '한국상역개발', 'business': '비상장 · 한국지주 40.03%'},
+    {'name': '상화원', 'business': '비상장', 'homepage': 'www.sanghwawon.com'},
+    {'name': '제주상화원', 'business': '비상장'},
+    {'name': '한상개발', 'business': '비상장'},
+    {'name': '상화공익', 'business': '비상장'},
+    # 해외 현지법인 (한국컴퓨터 100% 자회사)
+    {'name': 'KCI VINA', 'business': '해외 현지법인 (베트남) · 한국컴퓨터 100%'},
+    {'name': 'Pacom International', 'business': '해외 현지법인 · 한국컴퓨터 100%'},
 ]
 
 # 사내 그룹웨어 조직도 화면과 같은 부서 체계 (부서 1단계, 팀은 프로필에만)
-GROUPWARE_GROUP = '케이씨에스'           # 최상위 묶음 이름
-GROUPWARE_LEGAL = '주식회사케이씨에스'   # 회사(법인) 이름
+# 조직도 탭에서는 그룹사(지주사) 아래 계열사 자리에 '케이씨에스' 한 단계로 표시한다 (법인명 단계 없음)
+GROUPWARE_GROUP = '케이씨에스'           # 회사 이름
 GROUPWARE_DEPTS = ['관리팀', '마케팅팀', '신사업팀', 'MICE사업팀', '영업1부', '영업2부', '영업3부',
                    '기술연구소1실', '기술연구소2실', '기술연구소3실']
 GROUPWARE_ROOT_MEMBERS = ['김광묵', 'KCS관리자']   # 부서 없이 회사 바로 아래 표시
 # 사내 그룹웨어 조직도(2026-10 화면) 기준 보정 - 엑셀(2026-09-01)과 다른 소속
-# 이 보정을 적용하면 부서별 인원(관리팀 5, 마케팅팀 3, 신사업팀 3, MICE사업팀 2, 영업1부 2, 영업2부 4, 영업3부 5,
-# 기술연구소1실 8, 2실 13, 3실 10)과 전체 52명이 그룹웨어 화면과 같아진다.
+# 그룹웨어 화면 숫자: 관리팀 5, 마케팅팀 3, 신사업팀 3, MICE사업팀 2, 영업1부 2, 영업2부 4, 영업3부 5,
+# 기술연구소1실 8, 2실 13, 3실 10, 전체 52명. 엑셀 그대로면 관리팀 4 · MICE사업팀 3 으로 한 명씩 다르지만,
+# 화면에는 숫자만 있어 MICE사업팀의 누구(정민정·김가연·류병두)가 관리팀으로 갔는지 알 수 없으므로 보정하지 않는다
+# (예전에 근거 없이 류병두를 관리팀으로 옮겼던 보정은 2026-10-09 삭제 - 엑셀 두 버전 모두 MICE 사업팀).
+# 실제 이동한 사람이 확인되면 여기에 {'이름': {'dept': '관리팀'}} 를 추가한다.
 GROUPWARE_OVERRIDES = {
-    '류병두': {'dept': '관리팀'},                                   # MICE사업팀 → 관리팀
-    '엄태식': {'dept': '신사업팀', 'drop': ['기술연구소1실']},        # 주소속 신사업팀, 1실 겸직 제외
-    '윤성목': {'drop': ['기술연구소2실']},                           # 2실 겸직 제외 (영업3부)
+    '엄태식': {'dept': '신사업팀', 'keep_old': True},               # 주소속 신사업팀, 연구1실(실장·1팀·AI/AX)은 겸직으로
 }
+# 엑셀 조직 이름 → 실제 쓰는 이름 (엑셀은 예전 이름 그대로인 곳). 단계 판정(unit_level) 뒤에 바꾼다
+UNIT_RENAMES = {
+    '2팀(SI)': 'AI/AX 솔루션사업팀',          # 기술연구소 연구1실 (2026-10 변경)
+}
+# 부서장 직함: 엑셀에서 팀 블록 안에 있어도 부서(본부·실) 바로 아래에도 둔다 (부서장 + 팀 겸직)
+HEAD_TITLES = ('본부장', '실장', '상무이사', '상무', '전무', '이사')
 
-ADMIN_ACCOUNT = {'username': 'KCS관리자', 'title': '', 'account': 'kcsadmin', 'extension': '', 'mobile': ''}
+# 관리자 계정: 다른 사람의 조직도에는 숨기고(hidden_members), 관리자 본인으로 로그인하면 전체가 보인다
+ADMIN_ACCOUNT = {'username': 'KCS관리자', 'title': '', 'account': 'kcs_administrator', 'extension': '', 'mobile': ''}
 
 BLOCK = 5            # 직급 | 이름 | 계정 | 내선 | 휴대폰
 MAX_BLOCKS = 3       # A-E, F-J, K-O (P열 이후는 팩스·출입문 등 부가 정보)
@@ -99,7 +124,8 @@ def parse_sheet(ws):
             if first not in (None, '') and not rest:
                 # 조직 단위 제목
                 name = clean_unit(first)
-                level = unit_level(name)
+                level = unit_level(name)          # '2팀(SI)' → 팀 단계로 판정한 뒤
+                name = UNIT_RENAMES.get(name, name)   # 지금 쓰는 이름으로
                 stack = stacks[b]
                 while stack and stack[-1][0] >= level:
                     stack.pop()
@@ -225,6 +251,27 @@ def to_groupware_path(path):
     return [path[0].replace(' ', '')] + path[1:]
 
 
+def place_department_heads(user):
+    """부서장 직함이 팀 안에 있으면 부서 바로 아래에도 둔다: 주소속은 [부서](부서장), 팀은 겸직.
+    겸직 목록은 주소속과 경로가 다른 것만, 경로마다 한 번씩 (같은 부서의 다른 팀은 각각 남는다)"""
+    placements = [(list(user['org_path']), user['title'])] + [(list(c['org_path']), c['title'])
+                                                             for c in user['concurrent']]
+    expanded = []
+    for path, title in placements:
+        if title in HEAD_TITLES and len(path) >= 2:
+            expanded.append((path[:1], title))
+        expanded.append((path, title))
+    primary_path, primary_title = expanded[0]
+    seen, concurrent = {tuple(primary_path)}, []
+    for path, title in expanded[1:]:
+        if path and tuple(path) not in seen:
+            seen.add(tuple(path))
+            concurrent.append({'org_path': path, 'title': title})
+    user['org_path'], user['title'] = primary_path, primary_title
+    user['department'] = primary_path[0] if primary_path else ''
+    user['concurrent'] = concurrent
+
+
 def apply_groupware_layout(users):
     """사용자 조직 경로를 그룹웨어 체계로 바꾸고 관리자 계정을 더한다"""
     out = []
@@ -233,26 +280,19 @@ def apply_groupware_layout(users):
         u['org_path'] = to_groupware_path(u['org_path'])
         u['department'] = u['org_path'][0] if u['org_path'] else ''
         u['concurrent'] = [dict(c, org_path=to_groupware_path(c['org_path'])) for c in u['concurrent']]
-        # 같은 부서 겸직(예: 같은 실의 다른 팀)은 부서 화면에서 중복되므로 뺀다
-        seen = {tuple(u['org_path'][:1])}
-        kept = []
-        for c in u['concurrent']:
-            dept = tuple(c['org_path'][:1])
-            if c['org_path'] and dept not in seen:   # 부서 단위로 한 번만 (예: 2실의 두 팀 겸직 → 2실 한 번)
-                seen.add(dept)
-                kept.append(c)
-        u['concurrent'] = kept
         out.append(u)
     for u in out:
         fix = GROUPWARE_OVERRIDES.get(u['username'])
         if not fix:
             continue
         if fix.get('dept') and (u['org_path'][:1] != [fix['dept']]):
+            if fix.get('keep_old') and u['org_path']:      # 옮기기 전 소속은 겸직으로 남긴다
+                u['concurrent'] = [{'org_path': u['org_path'], 'title': u['title']}] + u['concurrent']
             team = u['org_path'][1:] if u['org_path'][:1] == [fix['dept']] else []
             u['org_path'] = [fix['dept']] + team
             u['department'] = fix['dept']
-        drop = set(fix.get('drop', [])) | {u['department']}
-        u['concurrent'] = [c for c in u['concurrent'] if c['org_path'][:1] and c['org_path'][0] not in drop]
+    for u in out:
+        place_department_heads(u)
     if not any(u['username'] == ADMIN_ACCOUNT['username'] for u in out):
         company = out[0]['company'] if out else '케이씨에스'
         out.append(dict(ADMIN_ACCOUNT, company=company, department='', org_path=[], concurrent=[]))
@@ -291,11 +331,12 @@ def main(argv=None):
         if a['name'] == args.company:
             a['units'] = unit_order
             if args.layout == 'groupware':
-                a.update({'group_name': GROUPWARE_GROUP, 'legal_name': GROUPWARE_LEGAL, 'depth': 1,
+                a.update({'group_name': GROUPWARE_GROUP, 'depth': 1,
                           'root_members': GROUPWARE_ROOT_MEMBERS,
+                          'hidden_members': [ADMIN_ACCOUNT['username']],
                           'count_excludes_root': True})   # 회사 인원 = 부서 소속 인원 (그룹웨어와 같게)
     org = {'version': 2, 'holding': HOLDING, 'companies': affiliates,
-           'include_demo_users': False, 'users': users}
+           'include_demo_users': False, 'admins': [ADMIN_ACCOUNT['username']], 'users': users}   # 관리자 권한 (명세 §4.2)
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     with open(args.out, 'w', encoding='utf-8') as f:
         json.dump(org, f, ensure_ascii=False, indent=2)
