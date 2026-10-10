@@ -63,7 +63,8 @@ MAPPING = [
     (r'test_kakao_v4\..*org_contact', 'contact_share'),
     (r'test_kakao_org_groupware\.|test_kakao_org_groups\.', 'org_chart'),
     (r'test_kakao_friend_add\.', 'friend_add'),
-    (r'test_kakao_osenv\.', 'platforms'),   # OS 공통 계층 · kcs.py · 빌드 · 바로가기
+    (r'test_kakao_osenv\.', 'platforms'),
+    (r'test_kakao_login_perf\.', 'font_size'),   # 로그인 직후 사진이 몰려와도 화면이 멈추지 않음   # OS 공통 계층 · kcs.py · 빌드 · 바로가기
     # v3 화면 (이 스크립트와 함께 만든 테스트)
     (r'test_kakao_tour\.OpenChatTests', 'open_chat'),
     (r'test_kakao_tour\.TalkDrawerTests', 'talk_drawer'),

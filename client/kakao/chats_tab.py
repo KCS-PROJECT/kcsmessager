@@ -10,7 +10,7 @@ import copy
 import os
 from datetime import datetime, date, timedelta
 
-from PyQt5.QtCore import Qt, QObject, QSize, QRectF, QPoint, QPointF, pyqtSignal, pyqtSlot
+from PyQt5.QtCore import Qt, QObject, QSize, QRectF, QPoint, QPointF, pyqtSignal, pyqtSlot, QTimer
 from PyQt5.QtGui import QPainter, QFontMetrics, QColor, QPen, QPixmap, QIcon, QPainterPath
 from PyQt5.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QListWidget, QListWidgetItem,
                              QLineEdit, QLabel, QMenu, QMessageBox, QDialog, QPushButton,
@@ -391,15 +391,32 @@ class CompanyChip(QWidget):
 
 class _AvatarRelay(QObject):
     """avatar_changed(str) → 인자 없는 slot() 중계. slot 의 주인(QObject)의 자식이라
-    주인이 사라지면 함께 사라지고 연결도 자동으로 끊긴다 (짧게 열리는 대화상자 누수 방지)"""
+    주인이 사라지면 함께 사라지고 연결도 자동으로 끊긴다 (짧게 열리는 대화상자 누수 방지).
+
+    로그인 직후에는 구성원 사진 수십 장이 한꺼번에 도착한다. 사진마다 탭 전체를 다시 만들면
+    (조직도 · 친구 · 채팅 목록 …) 메인 스레드가 1초 넘게 막혀 빈 창에 로딩 커서만 돌았다 (2026-10-10).
+    그래서 COALESCE_MS 안에 몰려온 알림은 모아서 한 번만 slot() 을 부른다."""
+
+    COALESCE_MS = 50
 
     def __init__(self, slot, parent=None):
         super().__init__(parent)
         self._slot = slot
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(self.COALESCE_MS)
+        self._timer.timeout.connect(self._slot)
 
     @pyqtSlot(str)
     def fire(self, _username=''):
-        self._slot()
+        if not self._timer.isActive():
+            self._timer.start()
+
+    def flush(self):
+        """기다리는 갱신이 있으면 지금 바로 (테스트 · 닫기 직전용)"""
+        if self._timer.isActive():
+            self._timer.stop()
+            self._slot()
 
 
 def connect_avatar_changed(state, slot):

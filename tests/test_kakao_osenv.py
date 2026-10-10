@@ -210,6 +210,18 @@ class StartupTest(unittest.TestCase):
             osenv.configure_app(qapp)
             self.assertEqual(qapp.desktopFileName(), osenv.DESKTOP_FILE)
 
+    def test_console_output_is_utf8(self):
+        """빌드 exe(Windows cp1252 출력)에서도 '✓' · 한글 출력이 앱을 멈추지 않는다"""
+        import io
+        import client.kakao.app as app_mod
+        raw = io.BytesIO()
+        cp = io.TextIOWrapper(raw, encoding='cp1252')
+        with mock.patch.object(sys, 'stdout', cp), mock.patch.object(sys, 'stderr', cp):
+            app_mod._attach_log_when_no_console()
+            print('✓ 글꼴 폴더')
+            sys.stdout.flush()
+        self.assertIn('✓ 글꼴 폴더'.encode('utf-8'), raw.getvalue())
+
     def test_relaunch_command(self):
         with mock.patch.object(sys, 'frozen', False, create=True):
             prog, args = osenv.relaunch_command(['client/kakao/app.py', '--port', '5555'])

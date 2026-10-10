@@ -19,6 +19,13 @@ if ROOT not in sys.path:
 def _attach_log_when_no_console():
     """콘솔 없이 실행된 빌드 앱(Windows 창 모드 exe 등)은 sys.stdout/stderr 가 None 이라 출력 · 오류가 사라진다.
     그럴 때는 데이터 폴더의 logs/kcs_talk.log 에 남긴다 (문제가 생긴 PC 에서 원인을 찾을 수 있게)"""
+    for stream in (sys.stdout, sys.stderr):
+        # Windows 빌드 exe 의 출력은 cp1252 라 '✓' · 한글을 쓰면 UnicodeEncodeError 로 앱이 멈췄다 (CI windows-latest)
+        if stream is not None and hasattr(stream, 'reconfigure'):
+            try:
+                stream.reconfigure(encoding='utf-8', errors='replace')
+            except (ValueError, OSError):
+                pass
     if sys.stdout is not None and sys.stderr is not None:
         return None
     from client.kakao import osenv as _osenv           # (PyQt 를 부르지 않는 가벼운 모듈)
