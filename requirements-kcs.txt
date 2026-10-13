@@ -1,0 +1,16 @@
+# KCS Talk (client/kakao + server/kakao) - Windows · macOS · Linux 공통
+# 설치: python -m pip install -r requirements-kcs.txt   (Windows: py -m pip install -r requirements-kcs.txt)
+# (requirements.txt 는 예전 로드맵용 목록이라 KCS Talk 실행에는 이 파일을 쓴다)
+
+# 필수
+PyQt5>=5.15.9          # 화면 (QtMultimedia 포함 - 보이스톡 · 음성메시지)
+cryptography>=41       # 비밀채팅 암호화 (X25519 + AES-GCM)
+
+# 권장 (없어도 실행됨)
+numpy>=1.24            # 통화 소리 처리
+pypdf>=4               # 서버: AI 비서 PDF 학습
+anthropic>=0.40        # 서버: AI 비서 답변 (ANTHROPIC_API_KEY 필요)
+openpyxl>=3.1          # 관리자: 회사 조직도 엑셀 가져오기 (scripts/import_org_xlsx.py)
+
+# 실행 파일 만들 때만 (python kcs.py build)
+pyinstaller>=6.3

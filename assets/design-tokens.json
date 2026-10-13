@@ -1,0 +1,140 @@
+{
+  "name": "KCS Talk",
+  "source": "client/kakao/theme.py",
+  "summary_tags": {
+    "light": {
+      "결정": [
+        "#1F2E6B",
+        "#E3E8F7"
+      ],
+      "요청": [
+        "#7A4300",
+        "#FCEBD2"
+      ],
+      "일정": [
+        "#0B5D52",
+        "#D7F1EC"
+      ],
+      "질문": [
+        "#5B2C8A",
+        "#EDE3F7"
+      ]
+    },
+    "dark": {
+      "결정": [
+        "#C9D4FF",
+        "#2A3560"
+      ],
+      "요청": [
+        "#FFD39A",
+        "#4A3416"
+      ],
+      "일정": [
+        "#9FE6D8",
+        "#163F39"
+      ],
+      "질문": [
+        "#E0C8FF",
+        "#3B2856"
+      ]
+    }
+  },
+  "type_scale": {
+    "micro": 10,
+    "caption": 11,
+    "meta": 12,
+    "body": 13,
+    "emphasis": 14,
+    "title": 15,
+    "lead": 16,
+    "heading": 17,
+    "headline": 19,
+    "display": 22,
+    "numeral": 26
+  },
+  "space": {
+    "xxs": 2,
+    "xs": 4,
+    "s": 8,
+    "m": 12,
+    "l": 16,
+    "xl": 24,
+    "xxl": 32
+  },
+  "radius": {
+    "xs": 4,
+    "s": 6,
+    "m": 8,
+    "card": 12,
+    "bubble": 16,
+    "pill": 15
+  },
+  "light": {
+    "yellow": "#2a386c",
+    "yellow_dark": "#1e2955",
+    "on_accent": "#ffffff",
+    "bg": "#ffffff",
+    "bg_alt": "#f5f7fb",
+    "chat_bg": "#ebeff6",
+    "text": "#171b2b",
+    "text_sub": "#586079",
+    "text_hint": "#626a80",
+    "border": "#e3e7f0",
+    "badge": "#d93025",
+    "danger_text": "#b3261e"
+  },
+  "dark": {
+    "yellow": "#536ed4",
+    "yellow_dark": "#4a62c2",
+    "on_accent": "#ffffff",
+    "bg": "#161a28",
+    "bg_alt": "#1b2030",
+    "chat_bg": "#10131d",
+    "text": "#e9ecf5",
+    "text_sub": "#a5acc2",
+    "text_hint": "#a0a7bd",
+    "border": "#2a3145",
+    "badge": "#d93025",
+    "danger_text": "#ff8a80"
+  },
+  "shadcn": {
+    "light": {
+      "background": "#ffffff",
+      "foreground": "#171b2b",
+      "card": "#ffffff",
+      "card-foreground": "#171b2b",
+      "primary": "#2a386c",
+      "primary-foreground": "#ffffff",
+      "secondary": "#f5f7fb",
+      "secondary-foreground": "#171b2b",
+      "muted": "#f5f7fb",
+      "muted-foreground": "#586079",
+      "accent": "#eef1f8",
+      "accent-foreground": "#171b2b",
+      "destructive": "#d93025",
+      "destructive-foreground": "#ffffff",
+      "border": "#e3e7f0",
+      "input": "#e3e7f0",
+      "ring": "#1e2955"
+    },
+    "dark": {
+      "background": "#161a28",
+      "foreground": "#e9ecf5",
+      "card": "#242b40",
+      "card-foreground": "#e9ecf5",
+      "primary": "#536ed4",
+      "primary-foreground": "#ffffff",
+      "secondary": "#1b2030",
+      "secondary-foreground": "#e9ecf5",
+      "muted": "#1b2030",
+      "muted-foreground": "#a5acc2",
+      "accent": "#222839",
+      "accent-foreground": "#e9ecf5",
+      "destructive": "#d93025",
+      "destructive-foreground": "#ffffff",
+      "border": "#2a3145",
+      "input": "#2a3145",
+      "ring": "#4a62c2"
+    }
+  }
+}

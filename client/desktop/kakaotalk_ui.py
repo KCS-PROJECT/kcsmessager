@@ -635,7 +635,7 @@ class KakaoTalkMainWindow(QMainWindow):
 def main():
     """Main entry point"""
     app = QApplication(sys.argv)
-    app.setApplicationName("KakaoTalk")
+    app.setApplicationName("KCS Talk")
     
     # Set Korean font as default
     font = QFont("맑은 고딕", 10)

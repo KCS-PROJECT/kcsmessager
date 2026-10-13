@@ -13,6 +13,16 @@ from PyQt5.QtCore import *
 from PyQt5.QtGui import *
 import os
 
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+from client.kakao import osenv  # noqa: E402  - OS 차이는 공통 계층에서
+
+
+def _new_console_flags():
+    """Windows 는 서버 · 클라이언트를 새 콘솔 창으로, 그 밖 OS 는 0"""
+    return getattr(subprocess, 'CREATE_NEW_CONSOLE', 0) if osenv.is_windows() else 0
+
 
 class ChatLauncher(QMainWindow):
     """Launcher window for managing chat server and clients"""
@@ -25,10 +35,7 @@ class ChatLauncher(QMainWindow):
         
     def init_ui(self):
         """Initialize launcher UI"""
-        self.setWindowTitle("KakaoTalk Real Chat Launcher")
-        # 충분한 크기 설정 - 모든 요소가 잘 보이도록 조정
-        self.setMinimumSize(600, 500)
-        self.resize(650, 550)
+        self.setWindowTitle("KCS Talk")
         
         # 윈도우 아이콘 설정 (옵션)
         self.setWindowIcon(self.style().standardIcon(QStyle.SP_ComputerIcon))
@@ -39,23 +46,39 @@ class ChatLauncher(QMainWindow):
         
         # Main layout - 더 넉넉한 여백과 간격 설정
         layout = QVBoxLayout(central)
-        layout.setSpacing(20)
-        layout.setContentsMargins(30, 30, 30, 30)
+        layout.setSpacing(16)
+        layout.setContentsMargins(30, 24, 30, 24)
+        # 창 최소 크기를 내용물 크기에 맞춰 위젯이 찌그러지지 않게 함
+        layout.setSizeConstraint(QLayout.SetMinimumSize)
         
+        # 회사 CI 로고
+        logo_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                                 "assets", "brand", "ci_horizontal.png")
+        logo_pixmap = QPixmap(logo_path)
+        if not logo_pixmap.isNull():
+            logo = QLabel()
+            ratio = self.devicePixelRatioF()
+            # PNG 위아래 투명 여백이 커서(로고는 높이의 약 1/3) 넉넉히 키운 뒤 여백을 잘라낸다
+            logo_pixmap = logo_pixmap.copy(0, 40, logo_pixmap.width(), 80)
+            scaled = logo_pixmap.scaledToHeight(int(48 * ratio), Qt.SmoothTransformation)
+            scaled.setDevicePixelRatio(ratio)
+            logo.setPixmap(scaled)
+            logo.setAlignment(Qt.AlignCenter)
+            layout.addWidget(logo)
+
         # Title - 더 나은 타이포그래피
-        title = QLabel("KakaoTalk 실시간 채팅 런처")
+        title = QLabel("KCS Talk")
         title.setAlignment(Qt.AlignCenter)
         title.setStyleSheet("""
             QLabel {
                 font-size: 22px;
                 font-weight: bold;
-                color: #2C2C2C;
-                margin: 10px 0px 20px 0px;
+                color: #FFFFFF;
                 padding: 12px;
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #FFE400, stop:1 #FFD700);
+                    stop:0 #34478F, stop:1 #2A386C);
                 border-radius: 8px;
-                border: 1px solid #E6C200;
+                border: 1px solid #1E2955;
             }
         """)
         layout.addWidget(title)
@@ -122,7 +145,6 @@ class ChatLauncher(QMainWindow):
             QPushButton:hover {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 #45A049, stop:1 #3E8E41);
-                transform: translateY(-1px);
             }
             QPushButton:pressed {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
@@ -152,7 +174,6 @@ class ChatLauncher(QMainWindow):
             QPushButton:hover {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 #E53935, stop:1 #D32F2F);
-                transform: translateY(-1px);
             }
             QPushButton:pressed {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
@@ -220,8 +241,8 @@ class ChatLauncher(QMainWindow):
         self.open_client_btn.setStyleSheet("""
             QPushButton {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #FFE400, stop:1 #FFD700);
-                color: #2C2C2C;
+                    stop:0 #4A62C2, stop:1 #3B51A8);
+                color: white;
                 border: none;
                 border-radius: 6px;
                 padding: 14px 28px;
@@ -231,12 +252,11 @@ class ChatLauncher(QMainWindow):
             }
             QPushButton:hover {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #FFD700, stop:1 #FFC107);
-                transform: translateY(-1px);
+                    stop:0 #3B51A8, stop:1 #33478F);
             }
             QPushButton:pressed {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #FFC107, stop:1 #FF9800);
+                    stop:0 #33478F, stop:1 #2A386C);
             }
         """)
         self.open_client_btn.clicked.connect(self.open_client)
@@ -258,7 +278,6 @@ class ChatLauncher(QMainWindow):
             QPushButton:hover {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 #1976D2, stop:1 #1565C0);
-                transform: translateY(-1px);
             }
             QPushButton:pressed {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
@@ -276,26 +295,22 @@ class ChatLauncher(QMainWindow):
         self.quick_start_btn.setStyleSheet("""
             QPushButton {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #9C27B0, stop:1 #7B1FA2);
+                    stop:0 #34478F, stop:1 #2A386C);
                 color: white;
                 border: none;
                 border-radius: 10px;
                 padding: 18px 36px;
                 font-size: 16px;
                 font-weight: bold;
-                margin: 20px 0px 15px 0px;
                 min-height: 30px;
             }
             QPushButton:hover {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #7B1FA2, stop:1 #6A1B9A);
-                transform: translateY(-2px);
-                box-shadow: 0px 4px 8px rgba(0,0,0,0.2);
+                    stop:0 #2A386C, stop:1 #1E2955);
             }
             QPushButton:pressed {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #6A1B9A, stop:1 #4A148C);
-                transform: translateY(0px);
+                    stop:0 #1E2955, stop:1 #141C3D);
             }
         """)
         self.quick_start_btn.clicked.connect(self.quick_start)
@@ -312,26 +327,25 @@ class ChatLauncher(QMainWindow):
             QLabel {
                 color: #555555;
                 font-size: 12px;
-                line-height: 1.4;
                 padding: 16px 20px;
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 #F8F9FA, stop:1 #E9ECEF);
                 border: 1px solid #DEE2E6;
                 border-radius: 8px;
-                margin-top: 5px;
             }
         """)
         instructions.setWordWrap(True)
         layout.addWidget(instructions)
+        layout.addStretch()
         
         # Apply global style - 더 나은 전체 테마
         self.setStyleSheet("""
             QMainWindow {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 #FFFFFF, stop:1 #F8F9FA);
-                font-family: "Malgun Gothic", "맑은 고딕", sans-serif;
             }
         """)
+        self.resize(650, self.minimumSizeHint().height())
     
     def start_server(self):
         """Start the chat server"""
@@ -344,7 +358,7 @@ class ChatLauncher(QMainWindow):
                 self.server_process = subprocess.Popen(
                     [sys.executable, server_path],
                     cwd=project_root,  # 작업 디렉토리를 프로젝트 루트로 설정
-                    creationflags=subprocess.CREATE_NEW_CONSOLE if sys.platform == "win32" else 0
+                    creationflags=_new_console_flags()
                 )
                 
                 # Wait a moment for server to start
@@ -412,12 +426,13 @@ class ChatLauncher(QMainWindow):
         try:
             # 프로젝트 루트 디렉토리 기준으로 경로 설정
             project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-            client_path = os.path.join(project_root, "client", "realtime", "chat_client.py")
+            client_path = os.path.join(project_root, "client", "kakao", "app.py")
             
+            # 저장된 자동 로그인(예: 김명수)으로 바로 들어가지 않고 창마다 로그인 창 → 다른 사람으로 로그인 가능
             process = subprocess.Popen(
-                [sys.executable, client_path],
+                [sys.executable, client_path, '--no-auto-login'],
                 cwd=project_root,  # 작업 디렉토리를 프로젝트 루트로 설정
-                creationflags=subprocess.CREATE_NEW_CONSOLE if sys.platform == "win32" else 0
+                creationflags=_new_console_flags()
             )
             self.client_processes.append(process)
             self.update_client_count()
@@ -461,6 +476,9 @@ class ChatLauncher(QMainWindow):
         event.accept()
 
 
+LAUNCHER_NAME = 'KCS Talk'   # Dock 툴팁 · 메뉴 막대 이름 (번들 ID 로 메신저와 구분)
+
+
 def main():
     """Run the launcher"""
     # High DPI 지원 설정
@@ -469,22 +487,32 @@ def main():
     if hasattr(Qt, 'AA_UseHighDpiPixmaps'):
         QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
     
+    # Dock 에 'Python' 대신 런처 이름 · KCS 아이콘 (QApplication 보다 먼저 이름을 바꾼다)
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+    from client.kakao import osenv
+    from client.kakao.macos import run_in_app_bundle, set_app_name, set_dock_name
+    run_in_app_bundle(LAUNCHER_NAME, osenv.APP_ID + '.launcher', osenv.app_home())   # Dock 툴팁 (되면 번들에서 다시 시작)
+    set_app_name(LAUNCHER_NAME)
     app = QApplication(sys.argv)
+    set_dock_name(LAUNCHER_NAME)   # 번들로 못 옮겼을 때 (QApplication 다음에)
+    from client.kakao import brand
+    app.setWindowIcon(brand.app_icon())
     
     # 더 나은 스타일과 폰트 설정
     app.setStyle('Fusion')
     
-    # 시스템에 맞는 폰트 설정
-    if os.name == 'nt':  # Windows
-        font = QFont("Malgun Gothic", 9)
-    else:  # macOS, Linux
-        font = QFont("Arial", 9)
-    
+    # 한글 폰트 체인 설정 (OS별 첫 번째로 존재하는 폰트 사용)
+    font = QFont()
+    font.setFamilies(['맑은 고딕', 'Malgun Gothic', 'Apple SD Gothic Neo',
+                      'Nanum Gothic', 'Noto Sans CJK KR', 'Arial'])
+    font.setPointSize(10)
     font.setStyleHint(QFont.SansSerif)
     app.setFont(font)
     
     # 애플리케이션 정보 설정
-    app.setApplicationName("KakaoTalk Real Chat Launcher")
+    app.setApplicationName("KCS Talk")
     app.setApplicationVersion("1.0")
     app.setOrganizationName("KCS Messenger")
     

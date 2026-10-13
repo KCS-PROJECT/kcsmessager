@@ -1,0 +1,7 @@
+# 세 OS 공통 실행 파일 줄끝 고정 (Windows 배치는 CRLF, 셸 스크립트는 LF)
+*.bat     text eol=crlf
+*.cmd     text eol=crlf
+*.sh      text eol=lf
+*.command text eol=lf
+kcs.py    text eol=lf
+*.otf     binary

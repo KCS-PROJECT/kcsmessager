@@ -1,186 +1,64 @@
 #!/usr/bin/env python
+# -*- coding: utf-8 -*-
 """
-Simple Chat Server for Real-Time Communication
-Handles multiple client connections and broadcasts messages
+KCS Messenger 서버 진입점.
+
+실제 구현은 ``server/kakao`` 패키지(KakaoServer)에 있으며, 구버전 클라이언트
+(join / message / all_users_list / user_status_changed)와도 호환된다.
+
+사용법:
+    python server/chat/chat_server.py [--host 127.0.0.1] [--port 5555] [--db server_data/kakao.db] [--retention-days 90] [--no-portal]
 """
 
-import socket
-import threading
-import json
-from datetime import datetime
+import argparse
+import logging
+import os
+import sys
 
-class ChatServer:
-    """Simple chat server for handling multiple clients"""
-    
-    def __init__(self, host='127.0.0.1', port=5555):
-        self.host = host
-        self.port = port
-        self.clients = {}  # {client_socket: {"username": name, "address": addr}}
-        self.server_socket = None
-        self.running = False
-        
-    def start(self):
-        """Start the chat server"""
-        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        
-        try:
-            self.server_socket.bind((self.host, self.port))
-            self.server_socket.listen(5)
-            self.running = True
-            
-            print(f"[SERVER] Chat server started on {self.host}:{self.port}")
-            print("[SERVER] Waiting for connections...")
-            
-            # Accept connections in main thread
-            while self.running:
-                try:
-                    client_socket, address = self.server_socket.accept()
-                    print(f"[SERVER] New connection from {address}")
-                    
-                    # Handle each client in a separate thread
-                    client_thread = threading.Thread(
-                        target=self.handle_client,
-                        args=(client_socket, address)
-                    )
-                    client_thread.daemon = True
-                    client_thread.start()
-                    
-                except socket.error:
-                    if self.running:
-                        print("[SERVER] Socket error occurred")
-                    break
-                    
-        except Exception as e:
-            print(f"[SERVER] Error starting server: {e}")
-        finally:
-            self.stop()
-    
-    def handle_client(self, client_socket, address):
-        """Handle individual client connection"""
-        try:
-            # Wait for username
-            data = client_socket.recv(1024).decode('utf-8')
-            if data:
-                message = json.loads(data)
-                if message['type'] == 'join':
-                    username = message['username']
-                    
-                    # Store client info
-                    self.clients[client_socket] = {
-                        'username': username,
-                        'address': address
-                    }
-                    
-                    print(f"[SERVER] {username} joined the chat")
-                    
-                    # Notify all clients about new user
-                    join_msg = {
-                        'type': 'user_joined',
-                        'username': username,
-                        'timestamp': datetime.now().isoformat()
-                    }
-                    self.broadcast_message(json.dumps(join_msg), client_socket)
-                    
-                    # Send current users list to new client
-                    users_list = {
-                        'type': 'users_list',
-                        'users': [client['username'] for client in self.clients.values()]
-                    }
-                    client_socket.send(json.dumps(users_list).encode('utf-8'))
-            
-            # Handle messages
-            while self.running:
-                try:
-                    data = client_socket.recv(1024).decode('utf-8')
-                    if not data:
-                        break
-                    
-                    message = json.loads(data)
-                    
-                    if message['type'] == 'message':
-                        # Add server timestamp
-                        message['timestamp'] = datetime.now().isoformat()
-                        message['sender'] = self.clients[client_socket]['username']
-                        
-                        print(f"[SERVER] {message['sender']}: {message['content']}")
-                        
-                        # Broadcast to all clients (including sender for consistency)
-                        self.broadcast_message(json.dumps(message), exclude_socket=None)
-                        
-                except socket.timeout:
-                    continue
-                except Exception as e:
-                    print(f"[SERVER] Error handling message: {e}")
-                    break
-                    
-        except Exception as e:
-            print(f"[SERVER] Error with client {address}: {e}")
-        finally:
-            self.remove_client(client_socket)
-    
-    def broadcast_message(self, message, exclude_socket=None):
-        """Broadcast message to all connected clients"""
-        disconnected_clients = []
-        
-        for client_socket in self.clients:
-            if exclude_socket is None or client_socket != exclude_socket:
-                try:
-                    client_socket.send(message.encode('utf-8'))
-                except:
-                    disconnected_clients.append(client_socket)
-        
-        # Remove disconnected clients
-        for client_socket in disconnected_clients:
-            self.remove_client(client_socket)
-    
-    def remove_client(self, client_socket):
-        """Remove a client from the server"""
-        if client_socket in self.clients:
-            username = self.clients[client_socket]['username']
-            del self.clients[client_socket]
-            
-            # Notify others about user leaving
-            leave_msg = {
-                'type': 'user_left',
-                'username': username,
-                'timestamp': datetime.now().isoformat()
-            }
-            self.broadcast_message(json.dumps(leave_msg))
-            
-            print(f"[SERVER] {username} left the chat")
-            
-            try:
-                client_socket.close()
-            except:
-                pass
-    
-    def stop(self):
-        """Stop the server"""
-        self.running = False
-        
-        # Close all client connections
-        for client_socket in list(self.clients.keys()):
-            self.remove_client(client_socket)
-        
-        # Close server socket
-        if self.server_socket:
-            try:
-                self.server_socket.close()
-            except:
-                pass
-        
-        print("[SERVER] Server stopped")
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+from server.kakao.portal import load_config as load_portal_config  # noqa: E402
+from server.kakao.server import DEFAULT_DB_PATH, KakaoServer  # noqa: E402
 
 
-def main():
-    """Run the chat server"""
-    server = ChatServer()
-    
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description='KCS Messenger 채팅 서버')
+    parser.add_argument('--host', default='127.0.0.1', help='바인드 주소 (기본: 127.0.0.1)')
+    parser.add_argument('--port', type=int, default=5555, help='포트 (기본: 5555)')
+    parser.add_argument('--db', default=DEFAULT_DB_PATH, help=f'SQLite DB 경로 (기본: {DEFAULT_DB_PATH})')
+    parser.add_argument('--no-briefing', action='store_true', help='AI 비서의 오늘의 브리핑(선톡) 끄기')
+    parser.add_argument('--no-link-preview', action='store_true', help='URL 미리보기 끄기')
+    parser.add_argument('--allow-passwordless', action='store_true',
+                        help='비밀번호 없는 구버전 클라이언트 로그인 허용 (기본: 비밀번호 필수)')
+    parser.add_argument('--no-portal', action='store_true',
+                        help='사내 포털(portal.kcins.co.kr) RAG 연동 끄기 - AI 비서가 메신저 자료로만 답함')
+    parser.add_argument('--portal-config', default=None,
+                        help='포털 연동 설정 파일 (기본: DB 폴더의 portal.json, 없으면 기본값 + 환경변수)')
+    parser.add_argument('--retention-days', type=float, default=90,
+                        help='받은 파일(첨부) 보관 기간, 일 단위 (기본: 90)')
+    return parser.parse_args(argv)
+
+
+def main(argv=None):
+    """채팅 서버 실행 (Ctrl+C 로 종료)."""
+    args = parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format='[SERVER] %(asctime)s %(levelname)s %(message)s')
+    portal = None
+    if not args.no_portal:
+        portal = load_portal_config(args.portal_config or
+                                    os.path.join(os.path.dirname(os.path.abspath(args.db)), 'portal.json'))
+    server = KakaoServer(host=args.host, port=args.port, db_path=args.db,
+                         daily_briefing=not args.no_briefing,
+                         link_preview=False if args.no_link_preview else None,
+                         retention_days=args.retention_days,
+                         require_password=not args.allow_passwordless,
+                         portal=portal)
     try:
         server.start()
     except KeyboardInterrupt:
-        print("\n[SERVER] Shutting down...")
+        print('\n[SERVER] Shutting down...')
         server.stop()
 
 

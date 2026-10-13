@@ -1,0 +1,16 @@
+{
+  "enabled": true,
+  "base_url": "https://portal.kcins.co.kr",
+  "token": "",
+  "api_style": "kcs",
+  "ask_path": "/api/rag/ask",
+  "save_path": "/api/rag/conversations",
+  "model": "",
+  "auth_header": "Authorization",
+  "auth_scheme": "Bearer",
+  "headers": {},
+  "timeout": 30,
+  "verify_tls": true,
+  "save_conversations": true,
+  "retry_seconds": 60
+}

@@ -23,6 +23,20 @@ server/
 tests/             # Test suite
 ```
 
+## KCS Talk 2.0 (current client/server)
+
+The maintained implementation is `client/kakao/` (PyQt5 client) + `server/kakao/` (TCP NDJSON server, SQLite, RAG bot).
+- Protocol & feature contract: `claudedocs/KAKAO_FEATURE_SPEC.md` — server, client `AppState`, and tests all follow it; update it first when changing the protocol.
+- UI never touches sockets: widgets call `client/kakao/state.py` (`AppState`) actions and listen to its signals.
+- Colors/fonts only via `client/kakao/theme.py`; icons/avatars via `client/kakao/widgets.py` (QPainter, no image assets).
+- Product name shown to users is **KCS Talk**. Company CI (㈜케이씨에스) assets live in `assets/brand/`; render them only via `client/kakao/brand.py`. Default accent theme is `kcs` (navy #2A386C); `theme.c('yellow')` means "primary accent" and text on it must use `theme.c('on_accent')`, my-bubble text `theme.c('bubble_mine_text')` — never hardcode `#191919` on accent colors.
+- Run (same on Windows · macOS · Linux; Windows uses `py`): `python3 kcs.py server` then `python3 kcs.py` (client). `kcs.py doctor` checks the PC, `kcs.py build [--server]` makes this OS's executable (PyInstaller), `kcs.py shortcut` adds desktop/start-menu/app-list shortcuts; double-click launchers in `launch/{windows,macos,linux}/`; deps in `requirements-kcs.txt`. Old entry points (`client/kakao/app.py`, `server/chat/chat_server.py`) still work. User guide: `docs/KCS_TALK_GUIDE.md`, OS guide: `docs/CROSS_PLATFORM.md`.
+- OS differences live only in `client/kakao/osenv.py` (data dir `app_home()`, `resource_path()` for assets incl. frozen builds, `user_dir()`, `open_path/open_url`, font/emoji chains, `shortcut_text()`, `prepare_process()/configure_app()`). Never use `sys.platform`/`os.name` elsewhere in `client/kakao/` (`tests/test_kakao_osenv.py` enforces; macOS-only ctypes tweaks stay in `macos.py`).
+- Tests: `python3 scripts/verify_features.py` (all tests → per-feature table in claudedocs/FEATURE_VERIFICATION.md; add new tests to its mapping) or `QT_QPA_PLATFORM=offscreen python3 -m unittest discover -s tests -p 'test_*.py'`. `python3 scripts/demo.py --headless-check` exercises the real server end to end. `tests/kakao_fakes.py` provides `make_demo_state()` for UI tests without a server. `tests/__init__.py` must stay (a site-packages `tests` package shadows it otherwise).
+- Quality harness: `python3 scripts/harness/score_messenger.py` (real server + real `Session` clients; 12 areas: messaging, read counts, message ops, reconnect, 12-client load, performance, persistence, server fuzzing, UI stability, regression, design quality via `scripts/harness/design_probe.py` (WCAG contrast, accessible names, 24px targets, no clipped text at 100%/200%), work features (threads, room owner, vacation, DND, unread members, drafts, mentions, bookmarks)) → score = mean of areas × 10 and `claudedocs/HARNESS_SCORE.md`. Keep it at 10.0; `--quick` skips the slow regression area.
+- Visual language is **KCS Ink** (`claudedocs/design/12_kcs_ink_redesign.md`): navy ink on cool paper chat background, bundled Pretendard font (`assets/fonts`, loaded by `theme.load_bundled_fonts()`), tail-less bubbles with a 4px speaker corner, date dividers with hairlines. No colored side-stripes on cards, no accent bar before titles.
+- Avoid fixed window sizes (`setFixedSize`/`setMinimumSize` with literals) — they clipped widgets before; size from layouts.
+
 ## Core Components
 
 ### Server Architecture
