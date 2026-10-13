@@ -24,7 +24,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 os.environ['KCS_LINK_PREVIEW'] = 'off'   # 테스트는 외부 네트워크에 접속하지 않는다
-from server.kakao.server import (KakaoServer, compute_ladder_mapping, fetch_link_preview,  # noqa: E402
+from server.kakao.server import (KakaoServer, compute_ladder_mapping, fetch_link_preview, preview_host_allowed,  # noqa: E402
                                  generate_ladder_rungs)
 
 import logging  # noqa: E402
@@ -197,7 +197,7 @@ ROOM_KEYS = {'room_id', 'type', 'name', 'members', 'created_at', 'notice', 'last
              'read_pointers', 'unread_count', 'description', 'tags', 'nicknames', 'owner'}
 USER_KEYS = {'username', 'display_name', 'status_message', 'birthday', 'online', 'avatar_id', 'presence',
              'company', 'department', 'title', 'is_bot', 'org_path', 'account', 'employee_no', 'extension', 'mobile', 'concurrent', 'email',
-             'public_key', 'is_admin', 'admin_company'}
+             'public_key', 'is_admin', 'admin_company', 'deputies'}
 BOT = 'AI 비서'
 MB = 1024 * 1024
 PNG_1PX = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGBgAAAABQABpfZFQAAAAABJRU5ErkJggg==')
@@ -576,6 +576,9 @@ class LoginTests(ServerTestBase):
         token = w['login_token']
         c = self.connect(join=False)
         base = {'type': 'password_reset', 'username': name, 'email': f'{name}@KCS.test', 'new_password': 'new-pass'}
+        self.assertIn('재설정 코드', c.expect_error(base)['message'])           # 이메일만으로는 바꾸지 못한다
+        code, _until = self.server.store.issue_reset_code(name, '관리자')
+        base['code'] = code.lower().replace('-', ' ')                          # 대소문자 · 구분 기호 무시
         ok = c.request(base, 'password_reset_ok')                             # 이메일은 대소문자 무시
         self.assertEqual(ok['username'], name)
         c.assert_no('welcome')                                                # 재설정은 로그인하지 않는다
@@ -585,9 +588,10 @@ class LoginTests(ServerTestBase):
         login, payload = self.join(name, 'new-pass')
         self.assertEqual(login.request(payload, 'welcome')['me']['username'], name)
         # 이메일·아이디가 틀리면 같은 문구 (계정이 있는지 드러내지 않는다) + 실패 횟수에 센다
-        for bad in ({'email': 'other@kcs.test'}, {'username': uname('없는')}):
+        mismatch = '아이디 · 가입한 이메일 · 재설정 코드가 맞지 않습니다. 코드는 관리자에게 받고 30분 동안 한 번만 쓸 수 있습니다.'
+        for bad in ({'email': 'other@kcs.test'}, {'username': uname('없는')}, {}):   # {} = 이미 쓴 코드
             err = c.expect_error({**base, **bad})
-            self.assertEqual((err['req_type'], err['message']), ('password_reset', '아이디 또는 가입한 이메일이 일치하지 않습니다.'))
+            self.assertEqual((err['req_type'], err['message']), ('password_reset', mismatch))
         self.assertTrue(store.check_password('new-pass', store.password_hash(name)))   # 그대로
         self.assertTrue(self.server._login_failures.get(f'id:{name.lower()}'))
         self.assertIn('4~64자', c.expect_error({**base, 'new_password': '12'})['message'])
@@ -596,7 +600,8 @@ class LoginTests(ServerTestBase):
         name = uname('rst')
         self.register(name, 'old-pass', email=f'{name}@kcs.test')
         c = self.connect(join=False)
-        base = {'type': 'password_reset', 'username': name, 'email': 'wrong@kcs.test', 'new_password': 'new-pass'}
+        base = {'type': 'password_reset', 'username': name, 'email': 'wrong@kcs.test', 'new_password': 'new-pass',
+                'code': 'ABCD-EFGH'}
         for _ in range(self.server.LOGIN_MAX_FAILURES['id']):
             c.expect_error(base)
         err = c.expect_error({**base, 'email': f'{name}@kcs.test'})
@@ -1112,8 +1117,8 @@ class TestRagBot(ServerTestBase):
         ans = self._bot_msg(a, rid)
         self.assertTrue(ans['content'].startswith("📚 'guide.txt' 문서를 학습했습니다 ("), ans['content'])
         a.send({'type': 'send', 'room_id': rid, 'kind': 'file', 'content': '',
-                'attachment': {'name': 'x.exe', 'mime': 'application/octet-stream',
-                               'data_b64': base64.b64encode(b'MZ').decode()}})
+                'attachment': {'name': 'x.dwg', 'mime': 'application/octet-stream',   # 실행 파일은 보안 정책이 먼저 막는다 (§10.10)
+                               'data_b64': base64.b64encode(b'AC1032').decode()}})
         self.assertEqual(self._bot_msg(a, rid)['content'], '지원하지 않는 파일 형식입니다.')
 
         docs = a.request({'type': 'rag_doc_list'}, 'rag_doc_list')['docs']
@@ -1369,13 +1374,17 @@ class TestLinkPreviewAndBriefing(unittest.TestCase):
 
     def test_fetch_link_preview_parses_og_tags(self):
         self.server = KakaoServer(port=0, db_path=os.path.join(self.tmpdir, 'x.db'))
-        prev = fetch_link_preview(self.url)
+        prev = fetch_link_preview(self.url, block_internal=False)
         self.assertEqual(prev, {'url': self.url, 'title': 'KCS 공지 & 소식',
                                 'description': '사내 공지사항입니다', 'site': 'KCS'})
-        self.assertIsNone(fetch_link_preview('http://127.0.0.1:9/nothing'))
+        self.assertIsNone(fetch_link_preview('http://127.0.0.1:9/nothing', block_internal=False))
+        self.assertIsNone(fetch_link_preview(self.url))                       # 기본: 서버 자신은 가져가지 않는다
+        for url in ('http://169.254.169.254/latest/meta-data/', 'http://[::1]/', 'http://0.0.0.0/', 'ftp://x/'):
+            self.assertFalse(preview_host_allowed(url), url)
+        self.assertTrue(preview_host_allowed('http://10.1.2.3/groupware'))    # 사내망 그룹웨어는 미리보기
 
     def test_link_preview_pushed_as_msg_updated(self):
-        self.start(link_preview=True)
+        self.start(link_preview=True, preview_fetcher=lambda url: fetch_link_preview(url, block_internal=False))
         a, b = self.connect(), self.connect()
         a.send({'type': 'room_open_direct', 'target': b.username})
         rid = a.wait_for('room_updated')['room']['room_id']

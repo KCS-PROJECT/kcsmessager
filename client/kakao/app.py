@@ -46,7 +46,7 @@ _LOG = _attach_log_when_no_console()
 # High DPI 설정은 QApplication 생성 전에 해야 한다 (자세한 OS 별 보정은 osenv.prepare_process)
 os.environ.setdefault('QT_AUTO_SCREEN_SCALE_FACTOR', '1')
 
-from PyQt5.QtCore import Qt, QTimer, QCoreApplication  # noqa: E402
+from PyQt5.QtCore import QTimer, QCoreApplication  # noqa: E402
 from PyQt5.QtWidgets import QApplication, QMessageBox, QDialog  # noqa: E402
 
 from client.kakao import theme, osenv  # noqa: E402
@@ -54,8 +54,9 @@ from client.kakao import theme, osenv  # noqa: E402
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description='KCS Talk 클라이언트')
-    parser.add_argument('--host', default='127.0.0.1', help='서버 주소 (기본 127.0.0.1)')
-    parser.add_argument('--port', type=int, default=5555, help='서버 포트 (기본 5555)')
+    parser.add_argument('--host', default=None,
+                        help='서버 주소 (관리자 비상용 - 없으면 더보기 → 정보에서 그룹 관리자가 정한 주소, 기본 127.0.0.1)')
+    parser.add_argument('--port', type=int, default=None, help='서버 포트 (기본 5555)')
     parser.add_argument('--user', default='', help='로그인 아이디 (생략 시 로그인 창)')
     parser.add_argument('--password', default='', help='비밀번호 (틀리거나 필요하면 로그인 창)')
     parser.add_argument('--no-auto-login', action='store_true',
@@ -87,24 +88,18 @@ def setup_high_dpi():
 
 
 def ask_connection_failure(host, port, error):
-    """연결 실패 안내. 'retry' / 'settings' / 'quit'"""
+    """연결 실패 안내. 'retry' / 'quit' (서버 주소는 그룹 관리자만 더보기 → 정보에서 바꾼다)"""
     box = QMessageBox()
     box.setIcon(QMessageBox.Warning)
     box.setWindowTitle('서버 연결 실패')
     box.setText('서버에 연결할 수 없습니다.')
-    box.setInformativeText(f'{host}:{port}\n서버가 실행 중인지, 주소와 포트가 맞는지 확인해 주세요.')
+    box.setInformativeText(f'{host}:{port}\n잠시 후 다시 시도해 보고, 계속 안 되면 관리자에게 문의해 주세요.')
     box.setDetailedText(str(error))
     retry = box.addButton('다시 시도', QMessageBox.AcceptRole)
-    settings = box.addButton('서버 설정', QMessageBox.ActionRole)
     box.addButton('종료', QMessageBox.RejectRole)
     box.setDefaultButton(retry)
     box.exec_()
-    clicked = box.clickedButton()
-    if clicked is retry:
-        return 'retry'
-    if clicked is settings:
-        return 'settings'
-    return 'quit'
+    return 'retry' if box.clickedButton() is retry else 'quit'
 
 
 class Session:
@@ -128,7 +123,6 @@ class Session:
         self.window = None
         self.on_relogin_needed = None   # 재연결이 거절되면(비밀번호 변경 등) 부를 함수(사유)
         # 자동 재연결: 예기치 않게 끊기면 1·2·4·8·10초… 간격으로 다시 붙는다 (직접 닫은 연결은 제외)
-        from PyQt5.QtCore import QTimer
         self._closing = False
         self._retry = 0
         self._retry_timer = QTimer()
@@ -152,7 +146,7 @@ class Session:
         self._retry_timer.start(delay * 1000)
 
     def _auto_reconnect(self):
-        if self._closing:
+        if self._closing or self.conn.is_connected:
             return
         ok, _msg = self.reconnect()
         if ok:
@@ -180,26 +174,30 @@ class Session:
         """같은 host/port/user로 새 연결을 만들어 상태에 붙인다 → (성공, 메시지)
         join 이 거절되면 login_failed → _on_login_failed 가 처리한다"""
         from client.kakao.net import ChatConnection
+        from client.kakao.widgets import disconnect_signals
         conn = ChatConnection()
+        old = self.conn
+        # join 을 보내기 전에 붙인다: 읽기 스레드가 welcome 을 받는 순간 아무도 듣고 있지 않으면 그 응답은 사라진다.
+        # welcome 처리 중 보내는 요청(일정 · 할 일 · 히스토리)도 새 연결로 가야 한다
+        conn.event_received.connect(self.state.handle)
+        conn.disconnected.connect(self.state.connection_lost)
+        self.state.conn = conn
+        self.state.history_requested.clear()  # 열려 있는 방은 다시 히스토리를 받는다
         try:
             conn.connect_to(self.host, self.port, self.state.me or self.username, **self._credentials())
         except OSError as e:
+            disconnect_signals((conn.event_received, self.state.handle),
+                               (conn.disconnected, self.state.connection_lost))
+            self.state.conn = old
             return False, f'재연결 실패: {e}'
-        old = self.conn
-        try:
-            old.event_received.disconnect(self.state.handle)
-            old.disconnected.disconnect(self.state.connection_lost)
-        except TypeError:
-            pass
+        disconnect_signals((old.event_received, self.state.handle), (old.disconnected, self.state.connection_lost))
         try:
             old.close()           # 수동 재연결이면 예전 연결이 아직 살아 있을 수 있다
         except Exception:
             pass
-        conn.event_received.connect(self.state.handle)
-        conn.disconnected.connect(self.state.connection_lost)
         self.conn = conn
-        self.state.conn = conn
-        self.state.history_requested.clear()  # 열려 있는 방은 다시 히스토리를 받는다
+        self._retry = 0
+        self._retry_timer.stop()  # 수동 재연결이 먼저 성공했으면 예약된 자동 재연결이 새 연결을 끊지 않게
         return True, ''
 
     def _on_login_failed(self, reason):
@@ -308,6 +306,27 @@ def install_korean_qt_translation(app):
     return False
 
 
+def install_crash_guard():
+    """슬롯 · 타이머 · 이벤트 처리 중 잡지 못한 예외가 앱 전체를 끄지 않게 한다.
+    PyQt5 는 기본 excepthook 이면 슬롯에서 빠져나온 예외에 qFatal 로 프로세스를 끝낸다 -
+    서버가 보낸 예상 밖의 값 하나, 쓸 수 없는 저장 경로 하나로 메신저가 꺼졌다. 기록(stderr · 로그 파일)만 남기고 계속한다"""
+    import traceback
+
+    def hook(exc_type, exc, tb):
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc, tb)
+            return
+        try:
+            sys.stderr.write('[KCS Talk] 처리하지 못한 오류 (앱은 계속 실행):\n'
+                             + ''.join(traceback.format_exception(exc_type, exc, tb)))
+            sys.stderr.flush()
+        except (OSError, ValueError, AttributeError):
+            pass
+
+    sys.excepthook = hook
+    return hook
+
+
 def main(argv=None):
     args = parse_args(argv)
     setup_high_dpi()                  # macOS 메뉴 막대 이름 · Windows 작업 표시줄 묶음 (QApplication 보다 먼저)
@@ -321,6 +340,7 @@ def main(argv=None):
             traceback.print_exc()
             return 1
     install_korean_qt_translation(app)
+    install_crash_guard()
 
     from client.kakao.login import LoginDialog, talk_icon
     from client.kakao.main_window import apply_app_theme
@@ -328,19 +348,30 @@ def main(argv=None):
     apply_app_theme(None)
 
     from client.kakao import login as login_mod
-    host, port, username, password = args.host, args.port, args.user.strip(), args.password
+    from client.kakao.settings import load_server_address, DEFAULT_HOST, DEFAULT_PORT
+    # 접속 주소: 명령줄 → 이 PC 의 server.json(그룹 관리자가 정함) → 저장된 로그인 → 기본값 (명세 §4.3)
+    configured = load_server_address()
+    fixed = args.host is not None or args.port is not None or configured is not None
+    host = args.host or (configured[0] if configured else DEFAULT_HOST)
+    port = args.port or (configured[1] if configured else DEFAULT_PORT)
+    username, password = args.user.strip(), args.password
     saved = login_mod.load_saved_login() if not username else None
+
+    def saved_address(host, port):
+        if fixed or not saved:
+            return host, port
+        return saved['host'] or host, saved['port'] or port
     token, remember, auto_login = '', False, False
     if saved and saved['auto_login'] and not args.no_auto_login:   # 자동 로그인: 로그인 창 없이 저장된 토큰으로
         username, token, remember, auto_login = saved['login_id'], saved['token'], True, True
-        host, port = saved['host'] or host, saved['port'] or port
+        host, port = saved_address(host, port)
     need_login = not username
     error = ''
     registration = None
     while True:
         if need_login:
             if saved and not args.user and not args.no_auto_login:
-                host, port = saved['host'] or host, saved['port'] or port
+                host, port = saved_address(host, port)
             # 런처(--no-auto-login)로 연 창은 처음 로그인 상태: 아이디·비밀번호를 비우고 저장된 로그인을 쓰지 않는다
             dlg = LoginDialog(host, port, username, registration=registration,   # 등록 실패면 등록 화면 그대로
                               fresh=args.no_auto_login)
@@ -359,7 +390,7 @@ def main(argv=None):
             choice = ask_connection_failure(host, port, e)
             if choice == 'quit':
                 return 1
-            need_login, error = choice == 'settings', ''
+            error = ''
             continue
         outcome, detail = wait_for_login(session.state)
         if outcome == 'ok':

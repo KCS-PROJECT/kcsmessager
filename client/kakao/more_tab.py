@@ -8,10 +8,10 @@ from PyQt5.QtCore import Qt, QSize, QRectF, pyqtProperty, QPropertyAnimation, QE
 from PyQt5.QtGui import QPainter, QColor
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox,
                              QScrollArea, QFrame, QAbstractButton, QDialog, QListWidget,
-                             QListWidgetItem, QFileDialog, QSizePolicy, QMessageBox)
+                             QListWidgetItem, QFileDialog, QSizePolicy, QMessageBox, QLineEdit)
 
 from client.kakao import theme
-from client.kakao.widgets import Avatar, make_icon
+from client.kakao.widgets import Avatar, make_icon, FlowWidget, disconnect_signals
 from client.kakao.chats_tab import ElidedLabel, TabHeader, user_pixmap, connect_avatar_changed
 from client.kakao.friends_tab import ProfileEditDialog, PresenceButton
 
@@ -290,14 +290,14 @@ class MoreTab(QWidget):
         self.logout_button.setToolTip('로그아웃하고 로그인 화면으로 돌아갑니다')
         col.addWidget(SettingRow('현재 계정', self.logout_button, '로그아웃하면 저장된 로그인·자동 로그인도 해제'))
         self.admin_button = ChevronButton('계정 관리')
-        self.admin_button.setToolTip('관리자: 계정 비밀번호 재설정 · 사용 중지 · 관리자 지정 · 전체 공지')
-        self.admin_row = SettingRow('관리자', self.admin_button, '계정 관리 · 전체 공지 (관리자에게만 보입니다)')
+        self.admin_button.setToolTip('관리자: 계정 비밀번호 재설정 · 사용 중지 · 관리자 지정 · 전체 공지 · 파일 전송 보안')
+        self.admin_row = SettingRow('관리자', self.admin_button, '계정 관리 · 전체 공지 · 파일 전송 보안 (관리자에게만 보입니다)')
         col.addWidget(self.admin_row)
 
         # ---- 설정 ----
         col.addWidget(self._section('상태 · 화면'))
         self.presence_button = PresenceButton(state)
-        col.addWidget(SettingRow('내 상태', self.presence_button, '10분간 입력이 없으면 자리비움으로 바뀝니다'))
+        col.addWidget(SettingRow('내 상태', self.presence_button, '10분간 마우스 움직임이 없으면 자리비움, 움직이면 온라인'))
         self.dark_toggle = ToggleSwitch(bool(settings.get('dark_mode')))
         col.addWidget(SettingRow('다크 모드', self.dark_toggle))
         self.font_combo = ArrowComboBox()
@@ -361,15 +361,21 @@ class MoreTab(QWidget):
         self.version_value = QLabel(APP_VERSION)
         col.addWidget(SettingRow('KCS Talk', self.version_value, '버전'))
         self.server_value = QLabel(server_address or '-')
-        col.addWidget(SettingRow('서버 주소', self.server_value))
+        col.addWidget(SettingRow('서버 주소', self.server_value, '지금 연결된 서버'))
+        col.addWidget(self._server_editor())
+        self.info_section = self.section_labels[-1]
         col.addStretch(1)
         self._group_rows(col)
+        self.info_group = self.groups[-1]       # 정보 묶음 카드 - 그룹 관리자에게만 보인다
 
         self.edit_button.clicked.connect(self.edit_profile)
         self.logout_button.clicked.connect(self._confirm_logout)
         self.admin_button.clicked.connect(lambda: self.open_admin())
         state.users_changed.connect(self._refresh_admin_row)
         state.welcomed.connect(self._refresh_admin_row)
+        self.server_save_button.clicked.connect(self.save_server_address)
+        self.server_host_edit.returnPressed.connect(self.save_server_address)
+        self.server_port_edit.returnPressed.connect(self.save_server_address)
         self._refresh_admin_row()
         self.avatar.clicked.connect(self.edit_profile)
         self.dark_toggle.toggled.connect(lambda on: settings.set('dark_mode', bool(on)))
@@ -442,12 +448,82 @@ class MoreTab(QWidget):
             self.logout_requested.emit()
 
     def _refresh_admin_row(self):
-        """관리자에게만 '관리자' 줄을 보인다 (권한은 서버가 요청마다 다시 검사한다 - 명세 §4.2)"""
+        """관리자에게만 '관리자' 줄을 보인다 (권한은 서버가 요청마다 다시 검사한다 - 명세 §4.2).
+        정보 구역(로고 · 버전 · 서버 주소)은 그룹 관리자에게만 보인다 (명세 §4.3)"""
         visible = self.state.is_admin()
         self.admin_row.setVisible(visible)
         divider = getattr(self, '_admin_divider', None)
         if divider is not None:
             divider.setVisible(visible)
+        info = self.can_edit_server()
+        self.info_section.setVisible(info)
+        self.info_group.setVisible(info)
+
+    # ---- 서버 주소 (그룹 관리자만, 이 PC 의 server.json - 다음 로그인부터) ----
+    def can_edit_server(self):
+        check = getattr(self.state, 'is_group_admin', None)
+        return bool(check and check())
+
+    def _server_editor(self):
+        """[서버 주소] [포트] [저장] + 결과 안내 한 줄"""
+        from client.kakao.settings import load_server_address, DEFAULT_HOST, DEFAULT_PORT
+        box = QWidget()
+        col = QVBoxLayout(box)
+        col.setContentsMargins(theme.sp('m') + 2, 0, theme.sp('m'), theme.sp('s') + 2)
+        col.setSpacing(theme.sp('xs'))
+        row = QHBoxLayout()
+        row.setSpacing(theme.sp('s'))
+        current = load_server_address()
+        if current is None and ':' in (self.server_address or ''):
+            host, _, port = self.server_address.rpartition(':')
+            current = (host, port)
+        host, port = current or (DEFAULT_HOST, DEFAULT_PORT)
+        self.server_host_edit = QLineEdit(str(host))
+        self.server_host_edit.setPlaceholderText('서버 주소 (예: 192.168.0.10)')
+        self.server_host_edit.setAccessibleName('서버 주소')
+        self.server_host_edit.setMaxLength(253)
+        self.server_port_edit = QLineEdit(str(port))
+        self.server_port_edit.setPlaceholderText('포트')
+        self.server_port_edit.setAccessibleName('포트')
+        self.server_port_edit.setMaxLength(5)
+        self.server_port_edit.setMaximumWidth(theme.px(72))
+        self.server_save_button = QPushButton('저장')
+        self.server_save_button.setCursor(Qt.PointingHandCursor)
+        self.server_save_button.setAccessibleName('서버 주소 저장')
+        row.addWidget(self.server_host_edit, 1)
+        row.addWidget(self.server_port_edit)
+        row.addWidget(self.server_save_button)
+        col.addLayout(row)
+        self.server_status = QLabel('바꾸면 이 PC 에서 다음 로그인부터 이 주소로 연결합니다.')
+        self.server_status.setWordWrap(True)
+        self.server_status.setObjectName('serverStatus')
+        col.addWidget(self.server_status)
+        return box
+
+    def save_server_address(self):
+        """그룹 관리자만 저장. 성공하면 True (안내 줄에 결과)"""
+        from client.kakao.settings import save_server_address
+        if not self.can_edit_server():
+            self._server_message('그룹 관리자만 서버 주소를 바꿀 수 있습니다.', error=True)
+            return False
+        try:
+            host, port = save_server_address(self.server_host_edit.text(), self.server_port_edit.text())
+        except ValueError as exc:
+            self._server_message(str(exc), error=True)
+            return False
+        except OSError as exc:
+            self._server_message(f'저장하지 못했습니다: {exc}', error=True)
+            return False
+        self.server_host_edit.setText(host)
+        self.server_port_edit.setText(str(port))
+        self._server_message(f'저장했습니다. 다음 로그인부터 {host}:{port} 로 연결합니다.')
+        return True
+
+    def _server_message(self, text, error=False):
+        self.server_status.setText(text)
+        self.server_status.setProperty('error', bool(error))
+        self.server_status.setStyleSheet(
+            f"color: {theme.c('danger_text') if error else theme.c('text_hint')}; font-size: {theme.fs('meta')}px;")
 
     def open_admin(self, exec_=True):
         from client.kakao.admin import AdminDialog
@@ -588,6 +664,7 @@ class MoreTab(QWidget):
                 f" QFrame#settingsDivider {{ background: {theme.c('border')}; margin: 0 {theme.sp('m')}px; }}")
         for value in (self.version_value, self.server_value):
             value.setStyleSheet(f"color: {theme.c('text_sub')}; font-size: {theme.fs('body')}px;")
+        self._server_message(self.server_status.text(), error=bool(self.server_status.property('error')))
         for btn in (self.wallpaper_button, self.rag_button, self.multi_profile_button, self.friend_manage_button,
                     self.keyword_button, self.dnd_button, self.bubble_button, self.lock_button, self.tour_button):
             btn.setStyleSheet(f"color: {theme.c('text_sub')}; font-size: {theme.fs('body')}px;")
@@ -714,10 +791,19 @@ class MultiProfileDialog(QDialog):
             edit.textEdited.connect(lambda _t: self._write_back())
         self.viewers_list.itemChanged.connect(lambda _i: self._write_back())
         state.multi_profiles_changed.connect(self._on_loaded)
-        state.attachment_loaded.connect(lambda *_: self._refresh_avatar())
+        state.attachment_loaded.connect(self._on_attachment_loaded)
         self.set_profiles(getattr(state, 'multi_profiles', []) or [])
         self._dirty = False
         state.request_multi_profiles()
+
+    def _on_attachment_loaded(self, *_args):
+        self._refresh_avatar()
+
+    def done(self, result):
+        # 창은 닫혀도 지워지지 않는다 - 끊지 않으면 열 때마다 숨은 창이 쌓여 첨부가 올 때마다 모두 다시 그렸다
+        disconnect_signals((self.state.multi_profiles_changed, self._on_loaded),
+                           (self.state.attachment_loaded, self._on_attachment_loaded))
+        super().done(result)
 
     # ---- 데이터 ----
     def _fill_viewers(self):
@@ -981,8 +1067,18 @@ class FriendManageDialog(QDialog):
         state.blocked_changed.connect(self.refresh)
         state.users_changed.connect(self.refresh)
         if state.settings is not None:
-            state.settings.changed.connect(lambda key: self.refresh() if key == 'hidden_friends' else None)
+            state.settings.changed.connect(self._on_setting_changed)
         self.refresh()
+
+    def _on_setting_changed(self, key):
+        if key == 'hidden_friends':
+            self.refresh()
+
+    def done(self, result):
+        disconnect_signals((self.state.blocked_changed, self.refresh), (self.state.users_changed, self.refresh))
+        if self.state.settings is not None:
+            disconnect_signals((self.state.settings.changed, self._on_setting_changed))
+        super().done(result)
 
     def _page(self, lst, hint_text):
         page = QWidget()
@@ -1076,44 +1172,6 @@ class KeywordChip(QFrame):
         row.addWidget(self.remove_button)
         self.setStyleSheet(f"QFrame#keywordChip {{ background: {theme.c('bg_alt')};"
                            f" border: 1px solid {theme.c('border')}; border-radius: 13px; }}")
-
-
-class FlowWidget(QWidget):
-    """자식 위젯을 줄바꿈하며 배치하는 간단한 흐름 레이아웃"""
-
-    def __init__(self, parent=None, spacing=6):
-        super().__init__(parent)
-        self.items = []
-        self.spacing = spacing
-
-    def set_widgets(self, widgets):
-        for w in self.items:
-            w.hide()
-            w.deleteLater()
-        self.items = list(widgets)
-        for w in self.items:
-            w.setParent(self)
-            w.show()
-        self._relayout()
-
-    def _relayout(self):
-        x = y = 0
-        line_h = 0
-        width = max(self.width(), 200)
-        for w in self.items:
-            hint = w.sizeHint()
-            if x and x + hint.width() > width:
-                x = 0
-                y += line_h + self.spacing
-                line_h = 0
-            w.setGeometry(x, y, hint.width(), hint.height())
-            x += hint.width() + self.spacing
-            line_h = max(line_h, hint.height())
-        self.setMinimumHeight(y + line_h)
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._relayout()
 
 
 class KeywordAlertDialog(QDialog):

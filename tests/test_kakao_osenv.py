@@ -96,6 +96,27 @@ class PathTest(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(theme.FONT_DIR, 'Pretendard-Regular.otf')))
         self.assertTrue(os.path.isdir(brand.BRAND_DIR))
 
+    def test_pretendard_all_weights_300_to_900(self):
+        """기본 글꼴 Pretendard: assets/fonts 에 300~900 정적 글꼴 7종 + OFL 라이선스, 굵기마다 그 파일로 그린다"""
+        from PyQt5.QtGui import QFontInfo, QFontDatabase
+        from client.kakao import theme
+        app()
+        self.assertEqual(sorted(theme.FONT_WEIGHTS), [300, 400, 500, 600, 700, 800, 900])
+        for name in theme.BUNDLED_FONTS:
+            self.assertTrue(os.path.getsize(os.path.join(theme.FONT_DIR, name)) > 1_000_000, name)
+        with open(os.path.join(theme.FONT_DIR, 'Pretendard-OFL.txt'), encoding='utf-8') as f:
+            self.assertIn('SIL OPEN FONT LICENSE', f.read().upper())
+        theme.load_bundled_fonts()
+        self.assertEqual(set(QFontDatabase().styles('Pretendard')),
+                         {'Light', 'Regular', 'Medium', 'SemiBold', 'Bold', 'ExtraBold', 'Black'})
+        self.assertEqual(theme.font_families()[0], 'Pretendard')                  # 기본 글꼴
+        self.assertEqual(QFontInfo(theme.font()).family(), 'Pretendard')
+        for weight, style in theme.PRETENDARD_STYLES.items():
+            self.assertEqual(QFontInfo(theme.font('body', weight=weight)).styleName(), style, weight)
+        self.assertEqual(QFontInfo(theme.font(bold=True)).styleName(), 'Bold')
+        with self.assertRaises(ValueError):
+            theme.font(weight=450)
+
     def test_display_path_other_drive(self):
         """Windows: 저장소(D:)와 다른 드라이브(C:) 경로도 오류 없이 보여 준다"""
         self.assertEqual(osenv.display_path(os.path.join(ROOT, 'claudedocs', 'x.md')), os.path.join('claudedocs', 'x.md'))
@@ -315,7 +336,7 @@ class LauncherTest(unittest.TestCase):
     def test_doctor_ok_here(self):
         lines = []
         self.assertEqual(self.kcs.doctor(out=lines.append), 0)
-        self.assertTrue(any('Pretendard 3/3' in line for line in lines))
+        self.assertTrue(any('Pretendard 7/7' in line for line in lines))        # 300~900 일곱 굵기
 
     def test_command_routing(self):
         calls = []
@@ -341,6 +362,30 @@ class LauncherTest(unittest.TestCase):
             self.assertNotIn(b'\r\n', data, path)
             if not sys.platform.startswith('win'):
                 self.assertTrue(os.access(full, os.X_OK), path)
+
+
+
+class SystemIdleTests(unittest.TestCase):
+    """컴퓨터 전체 무입력 시간 (자동 자리비움이 다른 앱에서의 마우스 움직임도 세도록)"""
+
+    def test_returns_seconds_or_none(self):
+        value = osenv.system_idle_seconds()
+        self.assertTrue(value is None or (isinstance(value, float) and value >= 0))
+
+    def test_failures_become_none(self):
+        from unittest import mock
+        with mock.patch.object(osenv, '_mac_idle_seconds', side_effect=OSError), \
+                mock.patch.object(osenv, '_windows_idle_seconds', side_effect=OSError), \
+                mock.patch.object(osenv, '_x11_idle_seconds', side_effect=OSError):
+            self.assertIsNone(osenv.system_idle_seconds())
+
+    def test_dispatch_by_os(self):
+        from unittest import mock
+        for platform, fn in (('darwin', '_mac_idle_seconds'), ('win32', '_windows_idle_seconds'),
+                             ('linux', '_x11_idle_seconds')):
+            with mock.patch.object(osenv.sys, 'platform', platform), \
+                    mock.patch.object(osenv, fn, return_value=12.5):
+                self.assertEqual(osenv.system_idle_seconds(), 12.5)
 
 
 if __name__ == '__main__':

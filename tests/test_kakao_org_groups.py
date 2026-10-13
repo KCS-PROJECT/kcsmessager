@@ -11,7 +11,7 @@ from PyQt5.QtGui import QMouseEvent, QColor
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtTest import QTest
 
-from tests.kakao_fakes import app, make_demo_state
+from tests.kakao_fakes import app, make_demo_state, expand_org
 from tests.test_kakao_server import ServerTestBase, Client, uname
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'scripts'))
@@ -38,6 +38,7 @@ class OrgLayoutTests(unittest.TestCase):
                                              'online': True, 'presence': 'online', 'status_message': ''})
         self.state.my_friends = list(self.state.users)
         self.tab = OrgTab(self.state, self.state.settings)
+        expand_org(self.tab)
 
     def header(self, key):
         return self.tab.list.itemWidget(self.tab.list.find_data(key))
@@ -79,7 +80,7 @@ class OrgLayoutTests(unittest.TestCase):
         self.state.org['groups'] = [{'group_id': 1, 'name': '한국자산관리공사(감사시스템 개발 구축)',
                                      'description': '', 'members': []},
                                     {'group_id': 2, 'name': '경영위원회', 'description': '', 'members': ['김철수']}]
-        self.tab.refresh()
+        expand_org(self.tab)
         data = rows(self.tab.list)
         self.assertEqual(data[:2], [('company', 'KCS AI'), ('member', 'AI 비서')])   # 지식봇 단계 없이 바로 아래
         self.assertNotIn(('unit', 'KCS AI', ('지식봇',)), data)
@@ -123,6 +124,7 @@ class OrgGroupClientTests(unittest.TestCase):
 
     def test_groups_render_after_companies(self):
         self.conn.push('org_groups', groups=self.GROUPS)
+        expand_org(self.tab)
         data = rows(self.tab.list)
         self.assertNotIn(('section', '그룹'), data)                              # '그룹' 문구 없음
         self.assertGreater(data.index(('org_group', 1)), data.index(('company', '케이씨에스')))
@@ -186,6 +188,7 @@ class OrgGroupReorderClientTests(unittest.TestCase):
         self.tab.resize(400, 1400)
         self.tab.show()
         self.conn.push('org_groups', groups=[dict(g) for g in self.GROUPS])
+        expand_org(self.tab)
 
     def make_admin(self):
         self.conn.push('user_updated', user=dict(self.state.user('홍길동'), is_admin=True, admin_company=''))

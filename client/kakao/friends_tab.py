@@ -6,7 +6,7 @@
 
 import base64
 
-from PyQt5.QtCore import Qt, QBuffer, QByteArray, QIODevice, QRectF, pyqtSignal
+from PyQt5.QtCore import Qt, QBuffer, QByteArray, QIODevice, QRectF
 from PyQt5.QtGui import QImage, QPainter, QColor, QPen, QFontMetrics
 from PyQt5.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QLabel, QMenu, QDialog,
                              QLineEdit, QPushButton, QFileDialog, QFormLayout, QSizePolicy,
@@ -31,6 +31,31 @@ SECTION_TITLES = {
     'offline': '오프라인',
 }
 BOT_HINT = '문서를 보내면 학습하고, 질문에 답해요'
+
+
+def parse_birthday(text):
+    """'YYYY-MM-DD'(생년월일) · 'MM-DD'(생일만) → date (연도 없으면 2000년), 틀리면 None"""
+    from datetime import datetime, date
+    text = (text or '').strip()
+    if len(text) not in (5, 10):
+        return None
+    try:
+        day = datetime.strptime(text if len(text) == 10 else '2000-' + text, '%Y-%m-%d').date()
+    except ValueError:
+        return None
+    if len(text) == 10 and not (1900 <= day.year and day <= date.today()):
+        return None
+    return day
+
+
+def birthday_text(value):
+    """프로필 카드 문구 - '생년월일 1990년 3월 15일' / 연도가 없으면 '생일 3월 15일'"""
+    day = parse_birthday(value)
+    if day is None:
+        return value or ''
+    if len(value.strip()) == 10:
+        return f'생년월일 {day.year}년 {day.month}월 {day.day}일'
+    return f'생일 {day.month}월 {day.day}일'
 
 
 # ================================================================ 상태(presence) 메뉴
@@ -297,18 +322,43 @@ def avatar_png_from_path(path, size=256):
 
 # ================================================================ 프로필 편집
 class ProfileEditDialog(QDialog):
-    """내 프로필 편집 - 사진, 이름, 상태메시지, 생일(MM-DD)"""
+    """내 프로필 편집 - 맨 위 사번(보기만), 사진, 이름, 상태메시지, 생년월일(YYYY-MM-DD), 전화번호 · 이메일, 대직자(§8.13)"""
 
     def __init__(self, state, parent=None):
         super().__init__(parent)
         self.state = state
         me = state.user(state.me)
         self.setWindowTitle('프로필 편집')
-        self.setMinimumWidth(340)
+        self.setMinimumWidth(theme.px(400))
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 22, 24, 18)
         layout.setSpacing(12)
+
+        # 맨 위: 사번 (로그인 아이디 - 보기만, 바꾸려면 관리자)
+        number = (me.get('employee_no') or '').strip()
+        self.employee_card = QFrame()
+        self.employee_card.setObjectName('employeeCard')
+        self.employee_card.setStyleSheet(f"QFrame#employeeCard {{ background: {theme.c('bg_alt')}; border-radius: 10px; }}")
+        card_row = QHBoxLayout(self.employee_card)
+        card_row.setContentsMargins(14, 9, 14, 9)
+        card_row.setSpacing(10)
+        key = QLabel('사번')
+        key.setStyleSheet(f"color: {theme.c('text_sub')}; font-size: {theme.fs('meta')}px; font-weight: bold;"
+                          f" background: transparent;")
+        self.employee_no_label = QLabel(number or '등록된 사번 없음')
+        self.employee_no_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.employee_no_label.setAccessibleName('사번')
+        self.employee_no_label.setStyleSheet(
+            f"color: {theme.c('text') if number else theme.c('text_hint')}; font-size: {theme.fs('emphasis')}px;"
+            f" font-weight: bold; background: transparent;")
+        note = QLabel('로그인 아이디 · 변경은 관리자에게')
+        note.setStyleSheet(f"color: {theme.c('text_hint')}; font-size: {theme.fs('caption')}px; background: transparent;")
+        card_row.addWidget(key)
+        card_row.addWidget(self.employee_no_label)
+        card_row.addStretch(1)
+        card_row.addWidget(note)
+        layout.addWidget(self.employee_card)
 
         self.avatar = Avatar(size=96)
         layout.addWidget(self.avatar, 0, Qt.AlignHCenter)
@@ -324,6 +374,7 @@ class ProfileEditDialog(QDialog):
 
         form = QFormLayout()
         form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)   # macOS 기본(칸이 좁게 고정)이면 글자가 잘렸다
         form.setHorizontalSpacing(12)
         form.setVerticalSpacing(10)
         self.name_edit = QLineEdit(me.get('display_name') or state.me)
@@ -332,11 +383,12 @@ class ProfileEditDialog(QDialog):
         self.status_edit.setMaxLength(60)
         self.status_edit.setPlaceholderText('상태메시지를 입력해 주세요')
         self.birthday_edit = QLineEdit(me.get('birthday') or '')
-        self.birthday_edit.setPlaceholderText('MM-DD (예: 03-15)')
+        self.birthday_edit.setPlaceholderText('YYYY-MM-DD (예: 1990-03-15)')
+        self.birthday_edit.setMaxLength(10)
         self.birthday_edit.setInputMask('')
         form.addRow('이름', self.name_edit)
         form.addRow('상태메시지', self.status_edit)
-        form.addRow('생일', self.birthday_edit)
+        form.addRow('생년월일', self.birthday_edit)
         self.mobile_edit = QLineEdit(me.get('mobile') or '')
         self.mobile_edit.setPlaceholderText('010-1234-5678')
         self.mobile_edit.setMaxLength(20)
@@ -345,6 +397,9 @@ class ProfileEditDialog(QDialog):
         self.email_edit.setMaxLength(120)
         form.addRow('전화번호', self.mobile_edit)
         form.addRow('이메일', self.email_edit)
+        from client.kakao.deputies import DeputyEditor
+        self.deputy_editor = DeputyEditor(state, me.get('deputies') or [])
+        form.addRow('대직자', self.deputy_editor)
         layout.addLayout(form)
         hint = QLabel('다른 사람이 전화번호나 이메일로 나를 친구로 추가할 수 있어요.')
         hint.setWordWrap(True)
@@ -410,7 +465,13 @@ class ProfileEditDialog(QDialog):
         return {'display_name': self.name_edit.text().strip() or self.state.me,
                 'status_message': self.status_edit.text().strip(),
                 'birthday': self.birthday_edit.text().strip() or None,
-                **self._contact_changes()}
+                **self._contact_changes(), **self._deputy_changes()}
+
+    def _deputy_changes(self):
+        """대직자는 바뀌었을 때만 보낸다 (§8.13)"""
+        deputies = self.deputy_editor.deputies()
+        before = [d for d in self.state.user(self.state.me).get('deputies') or []]
+        return {'deputies': deputies} if deputies != before else {}
 
     def _contact_changes(self):
         """전화번호·이메일은 바뀐 것만 보낸다"""
@@ -425,14 +486,9 @@ class ProfileEditDialog(QDialog):
     def accept(self):
         values = self.values()
         birthday = values['birthday']
-        if birthday:
-            ok = len(birthday) == 5 and birthday[2] == '-' and birthday.replace('-', '').isdigit()
-            if ok:
-                month, day = int(birthday[:2]), int(birthday[3:])
-                ok = 1 <= month <= 12 and 1 <= day <= 31
-            if not ok:
-                self._show_error('생일은 MM-DD 형식으로 입력해 주세요. (예: 03-15)', self.birthday_edit)
-                return
+        if birthday and parse_birthday(birthday) is None:
+            self._show_error('생년월일은 YYYY-MM-DD 형식으로 입력해 주세요. (예: 1990-03-15)', self.birthday_edit)
+            return
         if values.get('mobile') and self.state.contact_kind(values['mobile']) != 'phone':
             self._show_error('전화번호 형식이 올바르지 않습니다. (예: 010-1234-5678)', self.mobile_edit)
             return
@@ -611,7 +667,7 @@ class AddFriendDialog(QDialog):
 
 # ================================================================ 프로필 보기
 class ProfileDialog(QDialog):
-    """친구 프로필 카드 - 큰 사진, 이름, 소속, 상태메시지, 생일, 1:1 채팅"""
+    """친구 프로필 카드 - 큰 사진, 이름, 소속, 상태메시지, 생년월일, 1:1 채팅"""
 
     def __init__(self, state, username, parent=None):
         super().__init__(parent)
@@ -654,10 +710,9 @@ class ProfileDialog(QDialog):
                              f" font-size: {theme.fs('body')}px; padding: 6px 0;")
         layout.addWidget(status)
 
+        self.birthday_label = None
         if user.get('birthday'):
-            month, _, day = user['birthday'].partition('-')
-            bday = QLabel(f"🎂 생일 {int(month)}월 {int(day)}일" if month.isdigit() and day.isdigit()
-                          else f"🎂 {user['birthday']}")
+            bday = self.birthday_label = QLabel(f"🎂 {birthday_text(user['birthday'])}")
             bday.setAlignment(Qt.AlignCenter)
             bday.setStyleSheet(f"color: {theme.c('text_sub')}; font-size: {theme.fs('meta')}px;")
             layout.addWidget(bday)
@@ -666,7 +721,10 @@ class ProfileDialog(QDialog):
         contacts = [('내선', user.get('extension')), ('휴대폰', user.get('mobile')), ('계정', user.get('account'))]
         concurrent = [' › '.join(c.get('org_path') or []) + (f" ({c['title']})" if c.get('title') else '')
                       for c in (user.get('concurrent') or []) if c.get('org_path')]
-        rows = [(k, v) for k, v in contacts if v] + [('겸직', v) for v in concurrent]
+        from client.kakao.deputies import deputy_summary
+        deputies = deputy_summary(state, user.get('deputies'))
+        rows = [(k, v) for k, v in contacts if v] + [('겸직', v) for v in concurrent] + \
+            ([('대직자', deputies)] if deputies else [])
         if rows:
             card = QFrame()
             card.setObjectName('contactCard')
@@ -721,6 +779,34 @@ class ProfileDialog(QDialog):
             self.hide_button.clicked.connect(self.toggle_hidden)
             self.block_button.clicked.connect(self.toggle_blocked)
 
+        # 관리자: 프로필 아무 곳이나 우클릭 → 정보 수정(편집 모드)
+        self.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._show_context_menu)
+
+    def context_menu(self):
+        """관리 범위 안의 사람이면 '정보 수정 (편집 모드)…' 메뉴, 아니면 None"""
+        from client.kakao.admin import can_edit_member, EDIT_ACTION_TEXT
+        if not can_edit_member(self.state, self.username):
+            return None
+        menu = QMenu(self)
+        menu.addAction(EDIT_ACTION_TEXT, self.start_edit)
+        return menu
+
+    def _show_context_menu(self, pos):
+        menu = self.context_menu()
+        if menu is not None:
+            menu.exec_(self.mapToGlobal(pos))
+
+    def start_edit(self, exec_=True):
+        """편집 모드: 구성원 창을 열고, 저장하면 (바뀐 정보로 다시 보도록) 프로필을 닫는다"""
+        from client.kakao.admin import edit_member_info, submit_member_edit
+        dlg = edit_member_info(self.state, self.username, self, exec_=False)
+        if dlg is None or not exec_:
+            return dlg
+        if dlg.exec_() == QDialog.Accepted and submit_member_edit(self.state, self.username, dlg, self.parent()):
+            self.accept()
+        return dlg
+
     def _chat(self):
         self.state.open_direct(self.username)
         self.accept()
@@ -734,10 +820,7 @@ class ProfileDialog(QDialog):
         if self.state.is_registered_friend(self.username):
             self.state.remove_friend(self.username)
         else:
-            user = self.state.user(self.username)
-            contact = user.get('mobile') or user.get('email')
-            if contact:
-                self.state.add_friend(contact)
+            self.state.add_friend_user(self.username)
         self.accept()
 
     def toggle_blocked(self):
@@ -799,6 +882,12 @@ class FriendRow(QWidget):
         self.name = ElidedLabel(state.display_name(username), 'emphasis', 'text', bold=True)
         self.name.setMinimumWidth(min(self.name.sizeHint().width(), theme.px(70)))
         name_row.addWidget(self.name)
+        # 내 부서: '강태영 책임' 처럼 이름 옆에 직함 (둘째 줄은 팀)
+        self.title_label = None
+        if kind == 'team' and user.get('title'):
+            self.title_label = ElidedLabel(user['title'], 'emphasis', 'text_sub')
+            self.title_label.setMinimumWidth(min(self.title_label.sizeHint().width(), theme.px(36)))
+            name_row.addWidget(self.title_label)
         self.company = foreign_company(state, username)
         if self.company:
             name_row.addWidget(CompanyChip(self.company))
@@ -817,9 +906,9 @@ class FriendRow(QWidget):
         if kind == 'bot':
             self.sub = ElidedLabel(BOT_HINT, 'meta', 'text_sub')
         elif kind == 'team':
-            # 업무 정보: 직함 · 팀 · 지금 진행 중인 일정
+            # 업무 정보: 팀(없으면 부서) · 지금 진행 중인 일정. 직함은 이름 옆
             path = user.get('org_path') or []
-            parts = [user.get('title') or '', path[1] if len(path) > 1 else '']
+            parts = [path[-1] if path else (user.get('department') or '')]
             ev = state.current_event_of(username) if hasattr(state, 'current_event_of') else None
             if ev:
                 end = (ev.get('end') or '')[11:16]
@@ -918,11 +1007,7 @@ class FriendsTab(QWidget):
         self.group_button = self.header.add_button('add_chat', '그룹채팅 만들기')
         layout.addWidget(self.header)
 
-        self.search_edit = make_search_edit('이름, 상태메시지 검색')
-        wrap = QHBoxLayout()
-        wrap.setContentsMargins(16, 0, 16, 8)
-        wrap.addWidget(self.search_edit)
-        layout.addLayout(wrap)
+        self.search_edit = self.header.add_search(make_search_edit('이름, 상태메시지 검색'))
 
         self.story_bar = StoryBar(state)
         layout.addWidget(self.story_bar)
@@ -1077,6 +1162,7 @@ class FriendsTab(QWidget):
         if data[0] == 'me':
             menu.addAction('프로필 편집', self.edit_profile)
             menu.addAction('나와의 채팅', lambda: self.state.open_direct(self.state.me))
+            self._add_admin_edit(menu, self.state.me)
             return menu
         if data[0] != 'friend':
             return None
@@ -1101,7 +1187,15 @@ class FriendsTab(QWidget):
                 menu.addAction('친구 삭제', lambda: self.state.remove_friend(name))
             menu.addAction('숨기기', lambda: hide_friend(self.state, name, True))
             menu.addAction('차단', lambda: confirm_block(self.state, name, self.window()))
+        self._add_admin_edit(menu, name)
         return menu
+
+    def _add_admin_edit(self, menu, name):
+        """관리자: 우클릭 → 정보 수정(편집 모드) (명세 §4.3)"""
+        from client.kakao.admin import can_edit_member, edit_member_info, EDIT_ACTION_TEXT
+        if can_edit_member(self.state, name):
+            menu.addSeparator()
+            menu.addAction(EDIT_ACTION_TEXT, lambda: edit_member_info(self.state, name, self.window()))
 
     def _show_context_menu(self, pos):
         item = self.list.itemAt(pos)

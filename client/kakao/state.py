@@ -52,6 +52,18 @@ def fmt_day(d):
     return f'{d.year}년 {d.month}월 {d.day}일 {WEEKDAYS[d.weekday()]}요일'
 
 
+def read_upload(path, too_big='10MB 이하의 파일만 보낼 수 있습니다.'):
+    """보낼 파일 읽기 → (bytes, None) 또는 (None, 오류 문구). 권한 없음 · 지워짐 · 잠김도 오류 문구로
+    (예전에는 open 이 슬롯 밖으로 예외를 던져 끌어다 놓은 나머지 파일도 못 보냈다)"""
+    try:
+        if os.path.getsize(path) > MAX_ATTACHMENT:
+            return None, too_big
+        with open(path, 'rb') as f:
+            return f.read(), None
+    except OSError as e:
+        return None, f'파일을 열 수 없습니다: {e}'
+
+
 def attachment_payload(name, mime, data):
     """send 요청의 첨부 형식 {name, mime, data_b64}"""
     return {'name': name, 'mime': mime, 'data_b64': base64.b64encode(data).decode('ascii')}
@@ -76,6 +88,11 @@ def _csv_safe(text):
     """엑셀이 수식으로 실행하지 않도록 = + - @ 로 시작하는 칸 앞에 ' 를 붙인다 (CSV 수식 주입 방지)"""
     text = text or ''
     return "'" + text if text[:1] in ('=', '+', '-', '@', '\t', '\r') else text
+
+
+def birthday_md(value):
+    """생년월일 'YYYY-MM-DD' 또는 생일 'MM-DD' → 'MM-DD' (생일 비교용, 없으면 None)"""
+    return value[-5:] if isinstance(value, str) and len(value) in (5, 10) else None
 
 
 class AppState(QObject):
@@ -129,6 +146,14 @@ class AppState(QObject):
     room_export_ready = pyqtSignal(str, list, bool)  # room_id, messages, truncated
     send_failed = pyqtSignal(str, dict)          # room_id, 보내지 못한 메시지
     message_removed = pyqtSignal(str, object)    # room_id, msg_id (로컬 id 는 10^12 대라 int(32비트) 시그널로는 깨진다)
+    # 파일 전송 보안 (명세 §10.10)
+    file_policy_changed = pyqtSignal()
+    file_blocked = pyqtSignal(dict)              # 막힌 파일 {room_id, name, detail, client_tmp_id, ...} → 승인 요청 창
+    file_request_changed = pyqtSignal(dict)      # 내 승인 요청이 접수 · 승인 · 반려됨
+    file_requests_loaded = pyqtSignal(list)      # 내 승인 요청 목록
+    admin_file_requests_changed = pyqtSignal(list)
+    admin_file_exceptions_changed = pyqtSignal(list)
+    admin_file_request_new = pyqtSignal(dict)    # 그룹 관리자: 새 승인 요청 / 다른 관리자가 처리함
 
     def __init__(self, conn, settings=None, parent=None):
         super().__init__(parent)
@@ -143,6 +168,7 @@ class AppState(QObject):
         self.has_more = {}    # room_id -> bool
         self.history_requested = set()
         self._gap_fill = {}   # room_id → (재연결 전 마지막 msg_id, 그때 has_more)
+        self._history_oldest = {}   # room_id → history 로 받은 가장 오래된 msg_id (이전 대화 더 보기 기준)
         self.events = {}      # event_id -> Event
         self.todos = {}       # todo_id -> Todo
         self.attachments = {}  # attachment_id -> (bytes, name, mime)
@@ -164,6 +190,8 @@ class AppState(QObject):
         self._export_parts = {}  # room_id → 받는 중인 내보내기 조각
         self.quiet_attachment_errors = False
         self.admin_users = []
+        self.file_policy = {}       # 파일 전송 보안 정책 (§10.10, welcome · file_policy)
+        self._outgoing_files = {}   # client_tmp_id → (room_id, kind, name, mime, data): 막히면 승인 요청에 다시 쓴다
         self.admin_scope = ''   # 대화 저장(zip)이 첨부를 모으는 동안: 만료 첨부마다 오류 알림을 띄우지 않는다
         self._failed_saved_at = -1e9
         self._failed_save_timer = None
@@ -194,6 +222,9 @@ class AppState(QObject):
         self.calls = {c['call_id']: c for c in p.get('calls', [])}
         self.blocked = set(p.get('blocked', []))
         self.my_friends = list(p.get('friends', []))
+        self.file_policy = dict(p.get('file_policy') or {})
+        self._pending_direct.clear()           # 끊기기 전에 기다리던 방 열기는 다시 붙은 뒤에 오지 않는다
+        self._pending_groups.clear()
         self._init_keyring()
         self.users_changed.emit()
         self.rooms_changed.emit()
@@ -273,6 +304,9 @@ class AppState(QObject):
             self._decrypt(m)
         for m in batch:
             store[m['msg_id']] = m
+        if batch:   # 이전 대화 더 보기는 history 로 받은 가장 오래된 메시지부터 (스레드 창이 넣은 원글은 빼고)
+            self._history_oldest[rid] = min([m['msg_id'] for m in batch]
+                                            + ([self._history_oldest[rid]] if rid in self._history_oldest else []))
         gap = self._gap_fill.get(rid)
         if gap is not None:
             known_max, had_more = gap
@@ -471,6 +505,10 @@ class AppState(QObject):
     def admin_reset_password(self, username, new_password):
         self._send('admin_reset_password', username=username, new_password=new_password)
 
+    def admin_reset_code(self, username):
+        """비밀번호 재설정 코드 발급 → admin_done {action:'reset_code', code, expires_at} (명세 §4.1)"""
+        self._send('admin_reset_code', username=username)
+
     def admin_clear_password(self, username):
         self._send('admin_clear_password', username=username)
 
@@ -541,7 +579,13 @@ class AppState(QObject):
         if token and self.conn is not None:
             self.conn.send('login_token_revoke', token=token)
 
+    ROOM_OPEN_REQUESTS = ('room_open_direct', 'room_create', 'room_open_secret', 'open_room_join', 'open_room_create')
+
     def _on_error(self, p):
+        if p.get('req_type') in self.ROOM_OPEN_REQUESTS:
+            # 방 열기가 거절되면 기다리던 표시를 지운다 - 남아 있으면 나중에 관계없는 room_updated 가 창을 띄웠다
+            self._pending_direct.clear()
+            self._pending_groups.clear()
         if p.get('req_type') in ('join', 'register'):
             self.login_failed.emit(p.get('message', '로그인할 수 없습니다.'))
             return
@@ -599,7 +643,7 @@ class AppState(QObject):
     def birthday_friends(self, on=None):
         on = on or date.today()
         key = on.strftime('%m-%d')
-        return [u for u in self.friends() if u.get('birthday') == key]
+        return [u for u in self.friends() if birthday_md(u.get('birthday')) == key]
 
     def room(self, room_id):
         return self.rooms.get(room_id)
@@ -1016,7 +1060,8 @@ class AppState(QObject):
             loaded = self._messages.get(room_id) or {}
             if not loaded or not self.has_more.get(room_id, True):
                 return False
-            return self._send('history', room_id=room_id, before_msg_id=min(loaded), limit=limit) is not None
+            before = self._history_oldest.get(room_id) or min(loaded)
+            return self._send('history', room_id=room_id, before_msg_id=before, limit=limit) is not None
         if room_id in self.history_requested:
             self.history_loaded.emit(room_id, [], self.has_more.get(room_id, False))
             return True
@@ -1049,31 +1094,126 @@ class AppState(QObject):
             payload['send_at'] = send_at.isoformat(timespec='seconds')
         if silent:
             payload['silent'] = True
-        if self._send('send', **payload) is None:
-            self._record_failed(room_id, 'text', text)
+        if self._send('send', **payload) is None:   # 답장 · 예약 · 조용히 보내기는 다시 보낼 때도 그대로
+            options = {k: payload[k] for k in ('reply_to_id', 'send_at', 'silent') if k in payload}
+            self._record_failed(room_id, 'text', text, options)
 
     def send_emoticon(self, room_id, emoticon):
         if self._send('send', room_id=room_id, kind='emoticon', content=emoticon) is None:
             self._record_failed(room_id, 'emoticon', emoticon)
 
     def send_file(self, room_id, path):
-        """파일/사진 전송. 오류 메시지를 돌려주거나 성공 시 None"""
-        try:
-            size = os.path.getsize(path)
-        except OSError as e:
-            return f"파일을 열 수 없습니다: {e}"
-        if size > MAX_ATTACHMENT:
-            return "10MB 이하의 파일만 보낼 수 있습니다."
-        with open(path, 'rb') as f:
-            data = f.read()
+        """파일/사진 전송. 오류 메시지를 돌려주거나 성공 시 None.
+        보안 정책(§10.10)에 막히면 FILE_BLOCKED 를 돌려주고 file_blocked 로 승인 요청 창을 띄운다"""
+        data, err = read_upload(path)
+        if err:
+            return err
         name = os.path.basename(path)
         mime = mimetypes.guess_type(name)[0] or 'application/octet-stream'
         kind = 'image' if mime.startswith('image/') else 'file'
-        sent = self._send('send', room_id=room_id, kind=kind, content=name,
+        return self._send_attachment(room_id, kind, name, mime, data)
+
+    def _send_attachment(self, room_id, kind, name, mime, data):
+        from client.kakao.file_guard import FILE_BLOCKED, precheck
+        self._file_seq = getattr(self, '_file_seq', 0) + 1
+        tmp = f'file-{self._file_seq}'
+        self._outgoing_files[tmp] = (room_id, kind, name, mime, data)
+        while len(self._outgoing_files) > 8:             # 승인 요청에 쓸 최근 파일만 기억한다
+            self._outgoing_files.pop(next(iter(self._outgoing_files)))
+        violation = precheck(self.file_policy, name)
+        if violation is not None:                         # 이름 · 확장자로 막히면 올리지도 않는다
+            self.file_blocked.emit({'room_id': room_id, 'kind': kind, 'name': name, 'size': len(data),
+                                    'client_tmp_id': tmp, **violation})
+            return FILE_BLOCKED
+        sent = self._send('send', room_id=room_id, kind=kind, content=name, client_tmp_id=tmp,
                           attachment=attachment_payload(name, mime, data))
         if sent is None:
             return '서버 연결이 끊겨 파일을 보내지 못했습니다. 연결된 뒤 다시 보내 주세요.'
         return None
+
+    # ---- 파일 전송 보안 (명세 §10.10) ----
+    def _on_file_policy(self, p):
+        self.file_policy = dict(p.get('policy') or {})
+        self.file_policy_changed.emit()
+
+    def _on_file_blocked(self, p):
+        self.file_blocked.emit(dict(p))
+
+    def can_request_file(self, client_tmp_id):
+        return client_tmp_id in self._outgoing_files
+
+    def request_file_send(self, client_tmp_id, reason):
+        """막힌 파일을 그룹 관리자에게 승인 요청 (승인되면 그때 그 방으로 전송된다). 오류 문구 또는 None"""
+        item = self._outgoing_files.get(client_tmp_id)
+        if item is None:
+            return '파일 정보가 없어요. 파일을 다시 골라 보내 주세요.'
+        room_id, kind, name, mime, data = item
+        sent = self._send('file_send_request', room_id=room_id, kind=kind, content=name, reason=reason,
+                          attachment=attachment_payload(name, mime, data))
+        if sent is None:
+            return '서버 연결이 끊겨 요청하지 못했습니다. 연결된 뒤 다시 요청해 주세요.'
+        self._outgoing_files.pop(client_tmp_id, None)
+        return None
+
+    def _on_scheduled_failed(self, p):
+        """예약 메시지를 서버가 보내지 못함 (방을 나감 · 서버 오류) → 알림 + 토스트"""
+        preview = (p.get('content') or '')[:30] if p.get('kind', 'text') == 'text' else '첨부'
+        self.notify.emit('예약 메시지를 보내지 못했습니다', f"{preview} · {p.get('reason', '')}", p.get('room_id', ''))
+        self.error.emit(p.get('reason') or '예약 메시지를 보내지 못했습니다.')
+
+    def _on_file_request_ok(self, p):
+        self.file_request_changed.emit(dict(p.get('request') or {}))
+
+    def _on_file_request_updated(self, p):
+        request = dict(p.get('request') or {})
+        if request.get('username') == self.me:
+            approved = request.get('status') == 'approved'
+            note = f" · {request['note']}" if request.get('note') else ''
+            self.notify.emit('파일 전송 승인' if approved else '파일 전송 반려',
+                             f"'{request.get('name', '')}' " + ('전송이 승인되어 보냈어요.' if approved
+                                                                 else f'요청이 반려됐어요{note}'),
+                             request.get('room_id', '') if approved else '')
+            self.file_request_changed.emit(request)
+        if self.is_admin() and not self.admin_company():
+            self.admin_file_request_new.emit(request)
+
+    def _on_file_request_new(self, p):
+        request = dict(p.get('request') or {})
+        self.notify.emit('파일 전송 승인 요청', f"{request.get('username', '')}: {request.get('name', '')}", '')
+        self.admin_file_request_new.emit(request)
+
+    def request_my_file_requests(self):
+        self._send('file_request_list')
+
+    def _on_file_requests(self, p):
+        self.file_requests_loaded.emit(list(p.get('requests') or []))
+
+    def admin_file_policy_set(self, policy):
+        self._send('admin_file_policy_set', policy=dict(policy))
+
+    def admin_request_file_requests(self, status=None):
+        payload = {'status': status} if status else {}
+        self._send('admin_file_requests', **payload)
+
+    def _on_admin_file_requests(self, p):
+        self.admin_file_requests_changed.emit(list(p.get('requests') or []))
+
+    def admin_decide_file_request(self, request_id, approve, note='', allow_days=0):
+        self._send('admin_file_request_decide', request_id=int(request_id), approve=bool(approve),
+                   note=note, allow_days=int(allow_days))
+
+    def admin_request_file_exceptions(self):
+        self._send('admin_file_exceptions')
+
+    def _on_admin_file_exceptions(self, p):
+        self.admin_file_exceptions_changed.emit(list(p.get('exceptions') or []))
+
+    def admin_add_file_exception(self, username, days, pattern='', sha256='', file_name='', note=''):
+        self._send('admin_file_exception_add', username=username, days=int(days), pattern=pattern,
+                   sha256=sha256, file_name=file_name, note=note)
+
+    def admin_delete_file_exception(self, exception_id):
+        self._send('admin_file_exception_delete', exception_id=int(exception_id))
 
     def forward(self, message, room_id):
         """메시지 전달: 텍스트/이모티콘은 그대로, 첨부는 데이터가 있으면 재전송"""
@@ -1085,9 +1225,7 @@ class AppState(QObject):
             cached = self.attachments.get(att.get('attachment_id'))
             if cached:
                 data, name, mime = cached
-                self._send('send', room_id=room_id, kind=kind, content=name,
-                           attachment={'name': name, 'mime': mime,
-                                       'data_b64': base64.b64encode(data).decode('ascii')})
+                self._send_attachment(room_id, kind, name, mime, data)
             else:
                 self.error.emit('첨부 파일을 먼저 열어본 뒤 전달해 주세요.')
 
@@ -1204,14 +1342,9 @@ class AppState(QObject):
 
     def add_rag_doc(self, path):
         """AI 지식베이스에 문서 추가. 오류 메시지 또는 None"""
-        try:
-            size = os.path.getsize(path)
-        except OSError as e:
-            return f"파일을 열 수 없습니다: {e}"
-        if size > MAX_ATTACHMENT:
-            return "10MB 이하의 문서만 추가할 수 있습니다."
-        with open(path, 'rb') as f:
-            data = f.read()
+        data, err = read_upload(path, '10MB 이하의 문서만 추가할 수 있습니다.')
+        if err:
+            return err
         self._send('rag_doc_add', name=os.path.basename(path),
                    data_b64=base64.b64encode(data).decode('ascii'))
         return None
@@ -1391,10 +1524,9 @@ class AppState(QObject):
     def post_story(self, kind='text', content='', path=None, bg_color='#2A386C'):
         payload = {'kind': kind, 'content': content, 'bg_color': bg_color}
         if path:
-            if os.path.getsize(path) > MAX_ATTACHMENT:
-                return '10MB 이하의 사진만 올릴 수 있습니다.'
-            with open(path, 'rb') as f:
-                data = f.read()
+            data, err = read_upload(path, '10MB 이하의 사진만 올릴 수 있습니다.')
+            if err:
+                return err
             name = os.path.basename(path)
             payload['attachment'] = {'name': name, 'mime': mimetypes.guess_type(name)[0] or 'image/png',
                                      'data_b64': base64.b64encode(data).decode('ascii')}
@@ -1520,6 +1652,10 @@ class AppState(QObject):
             return 'email' if AppState.EMAIL_RE.fullmatch(text) else ''
         digits = ''.join(ch for ch in text if ch.isdigit())
         return 'phone' if 9 <= len(digits) <= 13 and not re.search(r'[^\d\s+\-()]', text) else ''
+
+    def add_friend_user(self, username):
+        """보고 있는 동료를 바로 친구로 (연락처를 몰라도 - 다른 사람의 이메일은 서버가 보내지 않는다)"""
+        self._send('friend_add', username=username)
 
     def add_friend(self, query):
         """전화번호 또는 이메일로 친구 추가 요청. 형식 오류 메시지 또는 None"""
@@ -1743,13 +1879,15 @@ class AppState(QObject):
         if self.settings is not None and self._failed is not None:
             self.settings.set('failed_messages', [dict(m) for m in self._failed])
 
-    def _record_failed(self, room_id, kind, content):
-        """서버로 나가지 못한 메시지를 로컬 말풍선으로 남기고 저장"""
+    def _record_failed(self, room_id, kind, content, options=None):
+        """서버로 나가지 못한 메시지를 로컬 말풍선으로 남기고 저장. options: 다시 보낼 때 함께 보낼 send 필드"""
         failed = self._failed_list()
         m = {'msg_id': max([x['msg_id'] for x in failed] + [FAILED_ID_BASE]) + 1, 'room_id': room_id,
              'sender': self.me, 'kind': kind, 'content': content,
              'timestamp': datetime.now().isoformat(timespec='seconds'), 'failed': True,
              'reactions': {}, 'mentions': [], 'deleted': False}
+        if options:
+            m['send_options'] = dict(options)
         failed.append(dict(m))
         self._recount_failed()
         self._save_failed()
@@ -1788,7 +1926,7 @@ class AppState(QObject):
             return '메시지를 찾을 수 없습니다.'
         if not self.is_connected():
             return '아직 서버에 연결되지 않았습니다. 연결이 돌아오면 다시 눌러 주세요.'
-        payload = {'room_id': room_id, 'kind': m['kind'], 'content': m['content']}
+        payload = {'room_id': room_id, 'kind': m['kind'], 'content': m['content'], **(m.get('send_options') or {})}
         if m['kind'] == 'text':
             payload['mentions'] = self.parse_mentions(room_id, m['content'])
         if self._send('send', **payload) is None:

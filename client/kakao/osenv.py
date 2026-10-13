@@ -256,6 +256,87 @@ def configure_app(app):
         app.setDesktopFileName(DESKTOP_FILE)   # Wayland/GNOME 이 작업 표시줄 아이콘을 .desktop 과 잇는다
 
 
+# ---------------------------------------------------------------- 컴퓨터 전체 무입력 시간 (자동 자리비움)
+_IDLE_CACHE = {}
+# CGEventType: 왼 · 오른 버튼 누름(1, 3) · 이동(5) · 끌기(6, 7) · 휠(22) · 다른 버튼 누름 · 끌기(25, 27)
+MAC_MOUSE_EVENT_TYPES = (1, 3, 5, 6, 7, 22, 25, 27)
+
+
+def system_idle_seconds():
+    """컴퓨터 전체에서 마지막 입력 뒤 지난 초 (다른 앱에서 움직여도 센다). macOS 는 마우스 입력만,
+    Windows · Linux(X11) 는 OS 가 마우스 · 키보드를 나눠 주지 않아 둘 다.
+    알 수 없으면 None (Wayland 등) - 그때는 부르는 쪽이 마우스 포인터 위치 변화로 대신 본다"""
+    try:
+        if is_mac():
+            return _mac_idle_seconds()
+        if is_windows():
+            return _windows_idle_seconds()
+        return _x11_idle_seconds()
+    except (OSError, AttributeError, ValueError, TypeError):
+        return None
+
+
+def _mac_idle_seconds():
+    import ctypes
+    if 'cg' not in _IDLE_CACHE:
+        cg = ctypes.cdll.LoadLibrary('/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics')
+        cg.CGEventSourceSecondsSinceLastEventType.restype = ctypes.c_double
+        cg.CGEventSourceSecondsSinceLastEventType.argtypes = [ctypes.c_int32, ctypes.c_uint32]
+        _IDLE_CACHE['cg'] = cg
+    # 마우스 입력만 센다 (요청: 마우스를 움직이면 온라인 · 10분 안 움직이면 자리비움). 키보드는 원격 제어 ·
+    # 입력 보조 프로그램이 쉬지 않고 키 이벤트를 만들어 자리비움이 영영 안 되는 일이 있었다 (2026-10-11 실측).
+    # 상태 0 = kCGEventSourceStateCombinedSessionState
+    get = _IDLE_CACHE['cg'].CGEventSourceSecondsSinceLastEventType
+    return max(0.0, min(float(get(0, kind)) for kind in MAC_MOUSE_EVENT_TYPES))
+
+
+def _windows_idle_seconds():
+    import ctypes
+
+    class LastInputInfo(ctypes.Structure):
+        _fields_ = [('cbSize', ctypes.c_uint), ('dwTime', ctypes.c_uint32)]
+
+    info = LastInputInfo()
+    info.cbSize = ctypes.sizeof(info)
+    if not ctypes.windll.user32.GetLastInputInfo(ctypes.byref(info)):
+        return None
+    now = ctypes.windll.kernel32.GetTickCount() & 0xFFFFFFFF
+    return ((now - info.dwTime) & 0xFFFFFFFF) / 1000.0     # 49일마다 0 으로 돌아가는 틱 보정
+
+
+def _x11_idle_seconds():
+    import ctypes
+    import ctypes.util
+    if not os.environ.get('DISPLAY') or os.environ.get('QT_QPA_PLATFORM') == 'offscreen':
+        return None
+    if 'xss' not in _IDLE_CACHE:
+        x11_path, xss_path = ctypes.util.find_library('X11'), ctypes.util.find_library('Xss')
+        if not x11_path or not xss_path:
+            _IDLE_CACHE['xss'] = None
+        else:
+            x11, xss = ctypes.cdll.LoadLibrary(x11_path), ctypes.cdll.LoadLibrary(xss_path)
+            x11.XOpenDisplay.restype = ctypes.c_void_p
+            x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+            x11.XDefaultRootWindow.restype = ctypes.c_ulong
+            x11.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
+            xss.XScreenSaverAllocInfo.restype = ctypes.c_void_p
+            xss.XScreenSaverQueryInfo.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p]
+            display = x11.XOpenDisplay(None)
+            _IDLE_CACHE['xss'] = (x11, xss, display, xss.XScreenSaverAllocInfo()) if display else None
+    cached = _IDLE_CACHE['xss']
+    if not cached:
+        return None
+    x11, xss, display, info = cached
+
+    class ScreenSaverInfo(ctypes.Structure):
+        _fields_ = [('window', ctypes.c_ulong), ('state', ctypes.c_int), ('kind', ctypes.c_int),
+                    ('til_or_since', ctypes.c_ulong), ('idle', ctypes.c_ulong), ('eventMask', ctypes.c_ulong)]
+
+    if not xss.XScreenSaverQueryInfo(display, x11.XDefaultRootWindow(display), info):
+        return None
+    return ScreenSaverInfo.from_address(info).idle / 1000.0
+
+
 # ---------------------------------------------------------------- 다시 실행
 def relaunch_command(argv=None):
     """(프로그램, 인자) - 지금 앱을 같은 방식으로 다시 띄우는 명령. 빌드한 앱이면 실행 파일 그대로"""

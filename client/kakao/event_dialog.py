@@ -9,7 +9,7 @@ exec_() 없이도 테스트할 수 있도록 build_payload()/changed_fields()/ac
 
 from datetime import datetime, date, time, timedelta
 
-from PyQt5.QtCore import Qt, QDate, QDateTime, QTime, QLocale, QSize, QRectF, pyqtSignal
+from PyQt5.QtCore import Qt, QDate, QDateTime, QTime, QLocale, QSize, QRectF
 from PyQt5.QtGui import QPainter, QColor, QPen
 from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QLineEdit,
                              QCheckBox, QDateTimeEdit, QPlainTextEdit, QComboBox, QPushButton,
@@ -43,6 +43,7 @@ def _dialog_qss():
             border-radius: 6px; padding: 5px 8px; selection-background-color: {c('yellow')}; selection-color: {theme.c('on_accent')}; }}
         QLineEdit:focus, QPlainTextEdit:focus, QDateTimeEdit:focus, QComboBox:focus {{ border: 1px solid {c('yellow_dark')}; }}
         QLineEdit#titleEdit {{ font-size: {theme.fs('title')}px; padding: 8px 10px; }}
+        QLineEdit#titleEdit[invalid="true"] {{ border: 1px solid {c('danger_text')}; }}
         QComboBox QAbstractItemView {{ background: {c('bg')}; color: {c('text')}; selection-background-color: {c('bg_selected')}; }}
         QCheckBox {{ color: {c('text')}; spacing: 6px; }}
         QPushButton {{ background: {c('bg_alt')}; color: {c('text')}; border: 1px solid {c('border')};
@@ -158,10 +159,17 @@ class EventDialog(QDialog):
         # 제목
         self.title_edit = QLineEdit()
         self.title_edit.setObjectName('titleEdit')
-        self.title_edit.setPlaceholderText('일정 제목을 입력하세요')
+        self.title_edit.setPlaceholderText('일정 제목을 입력하세요 (필수)')
+        self.title_edit.setAccessibleName('일정 제목 (필수)')
         self.title_edit.setMaxLength(100)
         self.title_edit.textChanged.connect(self._validate)
         form.addWidget(self.title_edit)
+        # 제목 없이 [저장]을 누르면 왜 저장되지 않는지 바로 아래에 알려 준다
+        # (예전에는 저장 버튼만 말없이 꺼져 있어 장소 · 메모까지 쓰고도 '등록이 안 된다'고 느꼈다)
+        self.title_error = QLabel('일정 제목을 입력해 주세요.')
+        self.title_error.setProperty('role', 'error')
+        self.title_error.hide()
+        form.addWidget(self.title_error)
 
         # 색상
         color_row = QHBoxLayout()
@@ -369,19 +377,26 @@ class EventDialog(QDialog):
         return s, e
 
     def validation_error(self):
-        if not self.title_edit.text().strip():
-            return ''  # 제목 없음 → 저장 버튼만 비활성
         s, e = self.start_end()
         if e < s:
             return '종료 시간이 시작 시간보다 빠릅니다.'
+        if not self.title_edit.text().strip():
+            return '일정 제목을 입력해 주세요.'
         return None
+
+    def _show_title_error(self, show):
+        self.title_error.setVisible(show)
+        self.title_edit.setProperty('invalid', show)
+        self.title_edit.style().unpolish(self.title_edit)
+        self.title_edit.style().polish(self.title_edit)
 
     def _validate(self, *args):
         if not hasattr(self, 'save_btn'):
             return
-        err = self.validation_error()
-        self.save_btn.setEnabled(err is None)
+        if self.title_edit.text().strip() and self.title_error.isVisibleTo(self):
+            self._show_title_error(False)
         s, e = self.start_end()
+        self.save_btn.setEnabled(e >= s)   # 제목이 비어도 누를 수 있다 - 누르면 무엇이 빠졌는지 알려 준다
         msg = '종료 시간이 시작 시간보다 빠릅니다.' if e < s else ''
         self.error_label.setText(msg)
         self.error_label.setVisible(bool(msg))
@@ -456,6 +471,10 @@ class EventDialog(QDialog):
 
     def accept(self):
         """저장 - 생성 또는 변경 필드만 수정 요청"""
+        if not self.title_edit.text().strip():
+            self._show_title_error(True)
+            self.title_edit.setFocus()
+            return False
         if not self.is_valid():
             return False
         if self.edit_mode:

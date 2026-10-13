@@ -9,3 +9,6 @@ server_data/
 web/node_modules/
 web/dist/
 .playwright-mcp/
+
+# Claude Code 개인 설정 (토큰 등 포함 가능)
+.claude/settings.local.json

@@ -41,21 +41,21 @@ PRESENCES = ('online', 'away', 'busy', 'meeting', 'vacation')
 # 기본 시드 사용자 (명세 §7.3). org.json 이 있으면 같은 username 의 값을 덮어쓰고 새 사용자를 추가한다.
 DEFAULT_USERS = (
     {'username': '홍길동', 'company': 'KCS 홀딩스', 'department': '경영지원팀', 'title': '팀장',
-     'birthday': '01-15', 'status_message': '오늘도 화이팅!'},
+     'birthday': '1982-01-15', 'status_message': '오늘도 화이팅!'},
     {'username': '김철수', 'company': 'KCS 홀딩스', 'department': '경영지원팀', 'title': '대리',
-     'birthday': '05-05', 'status_message': '회의 중'},
+     'birthday': '1993-05-05', 'status_message': '회의 중'},
     {'username': '윤서준', 'company': 'KCS 홀딩스', 'department': '재무팀', 'title': '차장',
-     'birthday': '04-02', 'status_message': ''},
+     'birthday': '1985-04-02', 'status_message': ''},
     {'username': '이영희', 'company': 'KCS 물류', 'department': '운영팀', 'title': '과장',
-     'birthday': '08-20', 'status_message': '여행 가고 싶다'},
+     'birthday': '1988-08-20', 'status_message': '여행 가고 싶다'},
     {'username': '박민수', 'company': 'KCS 물류', 'department': '운영팀', 'title': '사원',
-     'birthday': '11-11', 'status_message': ''},
+     'birthday': '1997-11-11', 'status_message': ''},
     {'username': '강민지', 'company': 'KCS 물류', 'department': '고객지원팀', 'title': '대리',
-     'birthday': '06-30', 'status_message': ''},
+     'birthday': '1994-06-30', 'status_message': ''},
     {'username': '최지우', 'company': 'KCS 커머스', 'department': '마케팅팀', 'title': '팀장',
-     'birthday': '12-25', 'status_message': '커피 한 잔의 여유'},
+     'birthday': '1983-12-25', 'status_message': '커피 한 잔의 여유'},
     {'username': '정하늘', 'company': 'KCS 커머스', 'department': '개발팀', 'title': '선임',
-     'birthday': '09-09', 'status_message': ''},
+     'birthday': '1991-09-09', 'status_message': ''},
     {'username': BOT_USERNAME, 'company': 'KCS AI', 'department': '지식봇', 'title': '봇',
      'birthday': None, 'status_message': '무엇이든 물어보세요', 'is_bot': True},
 )
@@ -282,6 +282,45 @@ CREATE TABLE IF NOT EXISTS org_settings (
     key             TEXT PRIMARY KEY,
     value           TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS reset_codes (
+    username        TEXT PRIMARY KEY,
+    code_hash       TEXT NOT NULL,
+    expires_at      TEXT NOT NULL,
+    issued_by       TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS file_requests (
+    request_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    username        TEXT NOT NULL,
+    room_id         TEXT NOT NULL,
+    kind            TEXT NOT NULL,
+    content         TEXT NOT NULL DEFAULT '',
+    attachment_id   INTEGER NOT NULL,
+    name            TEXT NOT NULL,
+    size            INTEGER NOT NULL,
+    sha256          TEXT NOT NULL,
+    rule            TEXT NOT NULL,
+    detail          TEXT NOT NULL,
+    reason          TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'pending',
+    decided_by      TEXT,
+    decided_at      TEXT,
+    note            TEXT NOT NULL DEFAULT '',
+    msg_id          INTEGER,
+    created_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_file_requests_status ON file_requests(status, request_id);
+CREATE TABLE IF NOT EXISTS file_exceptions (
+    exception_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    username        TEXT NOT NULL,
+    sha256          TEXT NOT NULL DEFAULT '',
+    file_name       TEXT NOT NULL DEFAULT '',
+    pattern         TEXT NOT NULL DEFAULT '',
+    expires_at      TEXT NOT NULL,
+    note            TEXT NOT NULL DEFAULT '',
+    request_id      INTEGER,
+    created_by      TEXT NOT NULL,
+    created_at      TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS org_groups (
     group_id        INTEGER PRIMARY KEY AUTOINCREMENT,
     name            TEXT NOT NULL UNIQUE,
@@ -303,7 +342,14 @@ def _locked(func: Callable) -> Callable:
     @functools.wraps(func)
     def wrapper(self: 'Store', *args: Any, **kwargs: Any) -> Any:
         with self._lock:
-            return func(self, *args, **kwargs)
+            try:
+                return func(self, *args, **kwargs)
+            except BaseException:
+                # 여러 문장을 쓰다 중간에 실패하면 반쯤 쓴 내용을 되돌린다. 연결을 함께 쓰므로 그대로 두면
+                # 다음 요청의 commit 이 엉뚱하게 저장해 버린다
+                if self._db.in_transaction:
+                    self._db.rollback()
+                raise
     return wrapper
 
 
@@ -380,6 +426,7 @@ class Store:
                                     ('org_locked', 'INTEGER NOT NULL DEFAULT 0'),     # 관리자가 고친 조직 정보 (시드가 덮지 않음)
                                     ('removed', 'INTEGER NOT NULL DEFAULT 0')))       # 삭제된 구성원 (대화 기록은 남김)
         self._add_columns('users', (('org_avatar_id', 'INTEGER'),))   # 조직도 엑셀 사진 = '기본 이미지' (§7.2)
+        self._add_columns('users', (('deputies', "TEXT NOT NULL DEFAULT '[]'"),))   # 대직자 username 목록 (§8.13)
         self._add_columns('messages', (('call_id', 'INTEGER'), ('ladder', 'TEXT'), ('post_id', 'INTEGER')))
         self._add_columns('room_members', (('nickname', 'TEXT'),))
         self._add_columns('attachments', (('expired', 'INTEGER NOT NULL DEFAULT 0'),))
@@ -500,8 +547,10 @@ class Store:
                  u.get('mobile') or '', json.dumps(u.get('concurrent') or [], ensure_ascii=False), u['username']),
             )
             if 'birthday' in u and u['birthday'] is not None:
-                self._db.execute('UPDATE users SET birthday=COALESCE(birthday, ?) WHERE username=?',
-                                 (u['birthday'], u['username']))
+                # 비어 있거나, 같은 월·일인데 연도만 없는 예전 값(MM-DD)이면 채운다 - 사용자가 고친 날짜는 그대로
+                self._db.execute('UPDATE users SET birthday=? WHERE username=? '
+                                 'AND (birthday IS NULL OR birthday=substr(?, -5))',
+                                 (u['birthday'], u['username'], u['birthday']))
         # 실제 조직도로 바뀌면 예전 데모 사용자는 '게스트'로 내린다(대화 기록 보존)
         for name in getattr(self, '_demo_hidden', ()):
             self._db.execute("UPDATE users SET company='게스트', department='', title='', org_path='[]' "
@@ -545,6 +594,7 @@ class Store:
             'mobile': row['mobile'],
             'email': row['email'] if 'email' in row.keys() else '',
             'concurrent': Store._json_list(row['concurrent']),
+            'deputies': Store._json_list(row['deputies']) if 'deputies' in row.keys() else [],
             'public_key': row['public_key'],
             'is_admin': bool(row['is_admin']) if 'is_admin' in row.keys() else False,
             'admin_company': (row['admin_company'] if 'admin_company' in row.keys() else '') if row['is_admin'] else '',
@@ -627,6 +677,9 @@ class Store:
     REGISTER_TAKEN_EMAIL = '이미 가입된 이메일입니다.'
     REGISTER_TAKEN_EMPLOYEE_NO = '이미 등록된 사번입니다. 사번과 비밀번호로 로그인해 주세요.'
     REGISTER_OTHER_COMPANY = '선택한 소속에 같은 이름의 구성원이 없습니다. 소속을 다시 확인해 주세요.'
+    RESET_ADMIN_BY_TOOL = '관리자 계정은 직접 재설정할 수 없습니다. 다른 그룹 관리자나 서버 PC 의 scripts/set_password.py 로 바꿔 주세요.'
+    REGISTER_WRONG_EMPLOYEE_NO = '조직도에 등록된 사번과 다릅니다. 사번을 확인하거나 관리자에게 문의해 주세요.'
+    REGISTER_ADMIN_BY_TOOL = '관리자 계정은 직접 등록할 수 없습니다. 서버 PC 에서 scripts/set_password.py 로 비밀번호를 정해 주세요.'
 
     def register_user(self, username: str, company: str, email: str, password: str, employee_no: str = '') -> bool:
         """처음 사용 등록 (명세 §4.1). 새로 만들었으면 True. 안 되면 ValueError(사용자에게 보일 사유)"""
@@ -648,7 +701,8 @@ class Store:
                           (email, username))
         if taken is not None:
             raise ValueError(self.REGISTER_TAKEN_EMAIL)
-        row = self._one('SELECT company, is_bot, password_hash FROM users WHERE username=?', (username,))
+        row = self._one('SELECT company, is_bot, password_hash, employee_no, is_admin FROM users WHERE username=?',
+                        (username,))
         if row is None:
             self._db.execute(
                 'INSERT INTO users(username, display_name, status_message, birthday, created_at, company, email, '
@@ -662,6 +716,11 @@ class Store:
             raise ValueError(self.REGISTER_TAKEN_NAME)
         if row['company'] not in ('', GUEST_COMPANY) and row['company'] != company:
             raise ValueError(self.REGISTER_OTHER_COMPANY)
+        # 아직 등록하지 않은 조직도 계정은 이름 · 회사만 알면 누구나 가져갈 수 있었다 → 조직도의 사번이 맞아야 한다
+        if row['employee_no'] and row['employee_no'].lower() != employee_no.lower():
+            raise ValueError(self.REGISTER_WRONG_EMPLOYEE_NO)
+        if row['is_admin'] and not row['employee_no']:      # 확인할 사번이 없는 관리자 계정은 서버 도구로만
+            raise ValueError(self.REGISTER_ADMIN_BY_TOOL)
         cur = self._db.execute(
             "UPDATE users SET password_hash=?, email=?, employee_no=CASE WHEN ?<>'' THEN ? ELSE employee_no END, "
             "company=CASE WHEN company IN ('', ?) THEN ? ELSE company END "
@@ -727,22 +786,53 @@ class Store:
             return False
         return True
 
-    def reset_password(self, username: str, email: str, password: str) -> Optional[bool]:
-        """비밀번호 재설정 (명세 §4.1): 등록된 계정이고 가입 이메일이 같으면 새 비밀번호 + 토큰 모두 폐기.
-        → True 바꿈 / False 이메일 불일치·없는 계정 / None 비밀번호를 등록한 적 없는 계정"""
-        return self._reset_password(username, email, self.hash_password(password))   # 해싱은 잠금 밖
+    RESET_CODE_MINUTES = 30
+    _RESET_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'   # 헷갈리는 0/O · 1/I 없음
 
     @_locked
-    def _reset_password(self, username: str, email: str, password_hash: str) -> Optional[bool]:
-        row = self._one('SELECT email, password_hash FROM users WHERE username=? AND is_bot=0', (username,))
+    def issue_reset_code(self, username: str, issued_by: str) -> tuple[str, str]:
+        """관리자가 발급하는 일회용 재설정 코드 (명세 §4.1) → (코드 'ABCD-EFGH', 만료 시각). 새로 발급하면 예전 코드는 무효.
+        메일 서버 없이 쓰는 본인 확인: 관리자가 전화 · 대면으로 본인에게만 알려 준다. 서버에는 해시만 둔다"""
+        import secrets
+        raw = ''.join(secrets.choice(self._RESET_CODE_ALPHABET) for _ in range(8))
+        expires = (datetime.now() + timedelta(minutes=self.RESET_CODE_MINUTES)).strftime(ISO_FMT)
+        self._db.execute('INSERT INTO reset_codes(username, code_hash, expires_at, issued_by) VALUES (?, ?, ?, ?) '
+                         'ON CONFLICT(username) DO UPDATE SET code_hash=excluded.code_hash, '
+                         'expires_at=excluded.expires_at, issued_by=excluded.issued_by',
+                         (username, self._token_hash(raw), expires, issued_by))
+        self._db.commit()
+        return f'{raw[:4]}-{raw[4:]}', expires
+
+    def _reset_code_ok(self, username: str, code: str) -> bool:
+        normalized = ''.join(ch for ch in (code or '').upper() if ch.isalnum())
+        row = self._one('SELECT code_hash, expires_at FROM reset_codes WHERE username=?', (username,))
+        if row is None or row['expires_at'] <= now_iso():
+            return False
+        import hmac
+        return hmac.compare_digest(row['code_hash'], self._token_hash(normalized))
+
+    def reset_password(self, username: str, email: str, password: str, code: str = '') -> Optional[bool]:
+        """비밀번호 재설정 (명세 §4.1): 등록된 계정이고 가입 이메일과 관리자가 발급한 재설정 코드가 맞으면
+        새 비밀번호 + 토큰 모두 폐기 + 코드 사용 처리.
+        → True 바꿈 / False 이메일 · 코드 불일치 · 없는 계정 / None 비밀번호를 등록한 적 없는 계정"""
+        return self._reset_password(username, email, self.hash_password(password), code)   # 해싱은 잠금 밖
+
+    @_locked
+    def _reset_password(self, username: str, email: str, password_hash: str, code: str = '') -> Optional[bool]:
+        row = self._one('SELECT email, password_hash, is_admin FROM users WHERE username=? AND is_bot=0', (username,))
         if row is None:
             return False
         if not row['password_hash']:
             return None
+        if row['is_admin']:
+            raise ValueError(self.RESET_ADMIN_BY_TOOL)
         if not row['email'] or row['email'].lower() != email.strip().lower():
+            return False
+        if not self._reset_code_ok(username, code):
             return False
         self._db.execute('UPDATE users SET password_hash=? WHERE username=?', (password_hash, username))
         self._db.execute('DELETE FROM login_tokens WHERE username=?', (username,))
+        self._db.execute('DELETE FROM reset_codes WHERE username=?', (username,))   # 한 번만 쓴다
         self._db.commit()
         return True
 
@@ -759,8 +849,18 @@ class Store:
 
     @_locked
     def is_disabled(self, username: str) -> bool:
-        row = self._one('SELECT disabled FROM users WHERE username=?', (username,))
-        return bool(row and row['disabled'])
+        """로그인 막힘: 사용 중지 또는 삭제된 구성원 (삭제는 사용 중지를 함께 켜지만, 하나만 풀려도 막히게)"""
+        row = self._one('SELECT disabled, removed FROM users WHERE username=?', (username,))
+        return bool(row and (row['disabled'] or row['removed']))
+
+    @_locked
+    def admin_usernames(self) -> list[str]:
+        return [r['username'] for r in self._all('SELECT username FROM users WHERE is_admin=1 AND removed=0')]
+
+    @_locked
+    def is_removed(self, username: str) -> bool:
+        row = self._one('SELECT removed FROM users WHERE username=?', (username,))
+        return bool(row and row['removed'])
 
     @_locked
     def set_admin(self, username: str, is_admin: bool, company: str = '') -> None:
@@ -868,6 +968,131 @@ class Store:
                          'ON CONFLICT(key) DO UPDATE SET value=excluded.value', (json.dumps(order, ensure_ascii=False),))
         self._db.commit()
 
+    # ---- 파일 전송 보안 (명세 §10.10) ----
+    @_locked
+    def file_policy(self) -> Optional[dict]:
+        """그룹 관리자가 저장한 정책. 한 번도 저장하지 않았으면 None (= 기본 정책)"""
+        row = self._one("SELECT value FROM org_settings WHERE key='file_policy'")
+        try:
+            value = json.loads(row['value']) if row else None
+        except ValueError:
+            value = None
+        return value if isinstance(value, dict) else None
+
+    @_locked
+    def set_file_policy(self, policy: dict) -> None:
+        self._db.execute("INSERT INTO org_settings(key, value) VALUES ('file_policy', ?) "
+                         'ON CONFLICT(key) DO UPDATE SET value=excluded.value', (json.dumps(policy, ensure_ascii=False),))
+        self._db.commit()
+
+    @_locked
+    def group_admins(self) -> list[str]:
+        """그룹 관리자 (승인 요청 알림을 받을 사람)"""
+        return [r['username'] for r in self._all(
+            "SELECT username FROM users WHERE is_admin=1 AND admin_company='' AND removed=0 AND is_bot=0")]
+
+    @staticmethod
+    def _file_request_dict(row: sqlite3.Row) -> dict:
+        return {k: row[k] for k in ('request_id', 'username', 'room_id', 'kind', 'content', 'attachment_id', 'name',
+                                    'size', 'sha256', 'rule', 'detail', 'reason', 'status', 'decided_by',
+                                    'decided_at', 'note', 'msg_id', 'created_at')}
+
+    @_locked
+    def add_file_request(self, username: str, room_id: str, kind: str, content: str, attachment_id: int,
+                         name: str, size: int, sha256: str, rule: str, detail: str, reason: str) -> dict:
+        cur = self._db.execute(
+            'INSERT INTO file_requests(username, room_id, kind, content, attachment_id, name, size, sha256, rule, '
+            'detail, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            (username, room_id, kind, content, attachment_id, name, size, sha256, rule, detail, reason, now_iso()))
+        self._db.commit()
+        return self._file_request_dict(self._one('SELECT * FROM file_requests WHERE request_id=?', (cur.lastrowid,)))
+
+    @_locked
+    def file_request(self, request_id: int) -> Optional[dict]:
+        row = self._one('SELECT * FROM file_requests WHERE request_id=?', (request_id,))
+        return self._file_request_dict(row) if row else None
+
+    @_locked
+    def file_requests(self, username: Optional[str] = None, status: Optional[str] = None,
+                      limit: int = 200) -> list[dict]:
+        """최근 것부터. username 이 있으면 그 사람이 낸 요청만"""
+        sql, params = 'SELECT * FROM file_requests WHERE 1=1', []
+        if username is not None:
+            sql += ' AND username=?'
+            params.append(username)
+        if status is not None:
+            sql += ' AND status=?'
+            params.append(status)
+        sql += ' ORDER BY request_id DESC LIMIT ?'
+        params.append(limit)
+        return [self._file_request_dict(r) for r in self._all(sql, params)]
+
+    @_locked
+    def pending_file_request_count(self, username: str) -> int:
+        row = self._one("SELECT COUNT(*) AS n FROM file_requests WHERE username=? AND status='pending'", (username,))
+        return int(row['n'])
+
+    @_locked
+    def decide_file_request(self, request_id: int, status: str, decided_by: str, note: str,
+                            msg_id: Optional[int] = None) -> dict:
+        """대기 중인 요청만 결정한다 (두 관리자가 동시에 눌러도 한 번만). 반려 · 취소면 보관하던 파일을 지운다"""
+        cur = self._db.execute(
+            "UPDATE file_requests SET status=?, decided_by=?, decided_at=?, note=?, msg_id=? "
+            "WHERE request_id=? AND status='pending'", (status, decided_by, now_iso(), note, msg_id, request_id))
+        if cur.rowcount != 1:
+            self._db.rollback()
+            raise ValueError('이미 처리된 요청입니다.')
+        row = self._one('SELECT * FROM file_requests WHERE request_id=?', (request_id,))
+        if status != 'approved':
+            self._db.execute("UPDATE attachments SET data=X'', expired=1 WHERE attachment_id=?", (row['attachment_id'],))
+        self._db.commit()
+        return self._file_request_dict(row)
+
+    @_locked
+    def set_file_request_msg(self, request_id: int, msg_id: int) -> dict:
+        self._db.execute('UPDATE file_requests SET msg_id=? WHERE request_id=?', (msg_id, request_id))
+        self._db.commit()
+        return self._file_request_dict(self._one('SELECT * FROM file_requests WHERE request_id=?', (request_id,)))
+
+    @_locked
+    def file_request_for_attachment(self, attachment_id: int) -> Optional[dict]:
+        row = self._one('SELECT * FROM file_requests WHERE attachment_id=? ORDER BY request_id DESC LIMIT 1',
+                        (attachment_id,))
+        return self._file_request_dict(row) if row else None
+
+    @staticmethod
+    def _file_exception_dict(row: sqlite3.Row) -> dict:
+        return {k: row[k] for k in ('exception_id', 'username', 'sha256', 'file_name', 'pattern', 'expires_at',
+                                    'note', 'request_id', 'created_by', 'created_at')}
+
+    @_locked
+    def add_file_exception(self, username: str, sha256: str, file_name: str, pattern: str, expires_at: str,
+                           note: str, created_by: str, request_id: Optional[int] = None) -> dict:
+        cur = self._db.execute(
+            'INSERT INTO file_exceptions(username, sha256, file_name, pattern, expires_at, note, request_id, '
+            'created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            (username, sha256, file_name, pattern, expires_at, note, request_id, created_by, now_iso()))
+        self._db.commit()
+        return self._file_exception_dict(
+            self._one('SELECT * FROM file_exceptions WHERE exception_id=?', (cur.lastrowid,)))
+
+    @_locked
+    def file_exceptions(self, username: Optional[str] = None, include_expired: bool = False) -> list[dict]:
+        sql, params = 'SELECT * FROM file_exceptions WHERE 1=1', []
+        if username is not None:
+            sql += ' AND username=?'
+            params.append(username)
+        if not include_expired:
+            sql += ' AND expires_at > ?'
+            params.append(now_iso())
+        return [self._file_exception_dict(r) for r in self._all(sql + ' ORDER BY exception_id DESC', params)]
+
+    @_locked
+    def delete_file_exception(self, exception_id: int) -> bool:
+        cur = self._db.execute('DELETE FROM file_exceptions WHERE exception_id=?', (exception_id,))
+        self._db.commit()
+        return cur.rowcount == 1
+
     def org_payload(self) -> dict:
         """welcome 의 org: {holding, companies, groups, order}"""
         return {**(self.org_meta or {}), 'groups': self.org_groups(), 'order': self.org_order()}
@@ -895,22 +1120,30 @@ class Store:
         if self._one('SELECT 1 FROM users WHERE username=?', (username,)):
             raise ValueError('이미 있는 이름입니다.')
         self._member_conflict(username, fields)
-        department = fields.get('department') or ''
         self._db.execute(
             'INSERT INTO users(username, display_name, status_message, birthday, created_at, company, department, '
             'title, account, employee_no, extension, mobile, email, org_path, org_locked) '
             "VALUES (?, ?, '', NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)",
             (username, username, now_iso(), *(fields.get(k) or '' for k in self.MEMBER_FIELDS),
-             json.dumps([department] if department else [], ensure_ascii=False)))
+             self._member_org_path(fields.get('department') or '', fields.get('team') or '')))
         self._db.commit()
+
+    @staticmethod
+    def _member_org_path(department: str, team: str) -> str:
+        """관리자가 정한 부서 · 팀 → org_path JSON ([부서, 팀] / [부서] / [])"""
+        path = [department] + ([team] if team else []) if department else []
+        return json.dumps(path, ensure_ascii=False)
 
     @_locked
     def member_update(self, username: str, fields: dict) -> None:
         self._member_conflict(username, fields)
         changes = {k: (fields[k] or '') for k in self.MEMBER_FIELDS if k in fields}
-        if 'department' in changes:
-            department = changes['department']
-            changes['org_path'] = json.dumps([department] if department else [], ensure_ascii=False)
+        if 'department' in changes or 'team' in fields:
+            department = changes.get('department')
+            if department is None:
+                row = self._one('SELECT department FROM users WHERE username=?', (username,))
+                department = (row['department'] if row else '') or ''
+            changes['org_path'] = self._member_org_path(department, fields.get('team') or '')
         sets = ', '.join(f'{k}=?' for k in changes)
         self._db.execute(f'UPDATE users SET {sets + ", " if sets else ""}org_locked=1 WHERE username=?',
                          (*changes.values(), username))
@@ -933,12 +1166,21 @@ class Store:
             self._db.execute('DELETE FROM login_tokens WHERE username=?', (username,))
         self._db.commit()
 
+    @staticmethod
+    def _team_of(org_path_json) -> str:
+        try:
+            path = json.loads(org_path_json or '[]')
+        except (TypeError, ValueError):
+            return ''
+        return path[1] if isinstance(path, list) and len(path) > 1 and isinstance(path[1], str) else ''
+
     @_locked
     def admin_user_list(self, online: Iterable[str] = ()) -> list[dict]:
         """관리자 계정 관리 화면용 (봇 제외, 이름순)"""
         online = set(online)
         return [{'username': r['username'], 'display_name': r['display_name'], 'company': r['company'],
-                 'department': r['department'], 'title': r['title'], 'account': r['account'],
+                 'department': r['department'], 'team': self._team_of(r['org_path']),
+                 'title': r['title'], 'account': r['account'],
                  'employee_no': r['employee_no'], 'email': r['email'], 'extension': r['extension'],
                  'mobile': r['mobile'], 'registered': r['password_hash'] is not None,
                  'disabled': bool(r['disabled']), 'is_admin': bool(r['is_admin']),
@@ -975,6 +1217,12 @@ class Store:
         return [self._user_dict(r, online_set) for r in rows]
 
     @_locked
+    def can_be_deputy(self, username: str) -> bool:
+        """대직자로 지정할 수 있는 사용자: 있는 사람 · 봇 아님 · 삭제 안 됨 (§8.13)"""
+        row = self._one('SELECT is_bot, removed FROM users WHERE username=?', (username,))
+        return bool(row) and not row['is_bot'] and not row['removed']
+
+    @_locked
     def is_bot(self, username: str) -> bool:
         row = self._one('SELECT is_bot FROM users WHERE username=?', (username,))
         return bool(row and row['is_bot'])
@@ -1001,8 +1249,9 @@ class Store:
 
     @_locked
     def update_profile(self, username: str, fields: dict) -> None:
-        allowed = {'display_name', 'status_message', 'birthday', 'avatar_id', 'presence', 'mobile', 'email'}
-        sets = [(k, v) for k, v in fields.items() if k in allowed]
+        allowed = {'display_name', 'status_message', 'birthday', 'avatar_id', 'presence', 'mobile', 'email', 'deputies'}
+        sets = [(k, json.dumps(v, ensure_ascii=False) if k == 'deputies' else v)
+                for k, v in fields.items() if k in allowed]
         if not sets:
             return
         sql = 'UPDATE users SET ' + ', '.join(f'{k}=?' for k, _ in sets) + ' WHERE username=?'
@@ -1816,6 +2065,13 @@ class Store:
             self._db.commit()
         return [{'scheduled_id': int(r['scheduled_id']), 'room_id': r['room_id'], 'sender': r['sender'],
                  'send_at': r['send_at'], 'payload': json.loads(r['payload'])} for r in rows]
+
+    @_locked
+    def discard_attachment(self, attachment_id: int) -> None:
+        """보내지 못한 첨부(취소 · 실패한 예약 메시지)의 데이터를 지운다 - 참조하는 메시지가 없어 보관 기간 정리에도 안 걸린다"""
+        self._db.execute("UPDATE attachments SET data=X'', expired=1 WHERE attachment_id=? AND attachment_id NOT IN "
+                         '(SELECT attachment_id FROM messages WHERE attachment_id IS NOT NULL)', (attachment_id,))
+        self._db.commit()
 
     # ------------------------------------------------------------------ v3: 비밀채팅 키
     @_locked

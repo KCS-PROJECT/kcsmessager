@@ -15,7 +15,9 @@ from PyQt5.QtGui import QFont, QColor
 from client.kakao import osenv
 
 FONT_DIR = osenv.resource_path('assets', 'fonts')
-BUNDLED_FONTS = ('Pretendard-Regular.otf', 'Pretendard-SemiBold.otf', 'Pretendard-Bold.otf')
+# Pretendard v1.3.9 정적 글꼴 300~900 (github.com/orioncactus/pretendard, SIL OFL 1.1 - Pretendard-OFL.txt)
+BUNDLED_FONTS = ('Pretendard-Light.otf', 'Pretendard-Regular.otf', 'Pretendard-Medium.otf', 'Pretendard-SemiBold.otf',
+                 'Pretendard-Bold.otf', 'Pretendard-ExtraBold.otf', 'Pretendard-Black.otf')
 FONT_FAMILIES = osenv.ui_font_families()   # Pretendard → 이 OS 기본 한글 글꼴 → 다른 OS 글꼴
 
 LIGHT = {
@@ -42,6 +44,9 @@ LIGHT = {
     'badge': '#D93025',            # 안 읽은 메시지 배지 (흰 글자 4.6:1)
     'on_badge': '#FFFFFF',         # 배지(빨강) 위 글자·아이콘
     'danger_text': '#B3261E',      # 경고 글자(부재중·전송 실패) - 흰 배경·채팅 배경 모두 4.5:1 이상
+    'success_text': '#1D6B37',     # 통과·완료 글자 (success_bg 위 4.5:1 이상)
+    'success_bg': '#E3F3E8',
+    'danger_bg': '#FBE7E5',
     'link': '#2E6FD8',
     'notice_bg': '#FFFFFF',
     'system_bg': 'rgba(42,56,108,0.08)',      # 시스템 안내 · 날짜 칩: 종이 위에 옅은 잉크
@@ -79,6 +84,9 @@ DARK = {
     'badge': '#D93025',
     'on_badge': '#FFFFFF',
     'danger_text': '#FF8A80',      # 다크 배경 위 경고 글자 4.5:1 이상
+    'success_text': '#86D9A1',
+    'success_bg': '#1E3328',
+    'danger_bg': '#3A2226',
     'link': '#7AA7F0',
     'notice_bg': '#20263A',
     'system_bg': 'rgba(255,255,255,0.08)',
@@ -151,7 +159,7 @@ def button_qss(selector, variant='primary', size='meta', bold=None, pad='6px 8px
             f" border-radius: {r}px; padding: {pad}; font-size: {fs(size)}px; font-weight: {weight}; }}"
             f" QPushButton#{selector}:hover {{ background: {hover}; }}"
             f" QPushButton#{selector}:pressed {{ background: {pressed}; }}"
-            f" QPushButton#{selector}:focus {{ border: 2px solid {c('yellow_dark') if variant != 'primary' else c('text')}; }}"
+            f" QPushButton#{selector}[focusVisible=\"true\"]:focus {{ border: 2px solid {c('yellow_dark') if variant != 'primary' else c('text')}; }}"
             f" QPushButton#{selector}:disabled {{ background: {c('bg_alt')}; color: {c('text_hint')};"
             f" border: 1px solid {c('border')}; }}")
 
@@ -323,15 +331,31 @@ def size_of(size):
     return TYPE_SCALE[size] if isinstance(size, str) else size
 
 
-def font(size='body', bold=False, scaled=True):
+# CSS 굵기(300~900) → Qt5 QFont 굵기. 앱에 든 Pretendard 정적 글꼴 7종과 1:1 (Light ~ Black)
+FONT_WEIGHTS = {300: QFont.Light, 400: QFont.Normal, 500: QFont.Medium, 600: QFont.DemiBold,
+                700: QFont.Bold, 800: QFont.ExtraBold, 900: QFont.Black}
+# Qt5 는 Pretendard ExtraBold 파일을 Black 과 같은 굵기(87)로 읽어 숫자만으로는 800/900 이 갈리지 않는다 → 스타일 이름으로 고른다
+PRETENDARD_STYLES = {300: 'Light', 400: 'Regular', 500: 'Medium', 600: 'SemiBold', 700: 'Bold',
+                     800: 'ExtraBold', 900: 'Black'}
+
+
+def font(size='body', bold=False, scaled=True, weight=None):
     """size: 단계 이름(권장, 예 'meta') 또는 단계에 없는 특수 크기 숫자.
+    weight: CSS 굵기 300~900 (주면 bold 대신). QSS 에서는 font-weight: 300~900 을 그대로 쓴다.
     scaled=False: 크기가 고정된 직접 그린 부품(사이드바 버튼·잠금 숫자판·말풍선 미리보기)용 — 단계 크기 그대로,
     글자 크기 설정(최대 200%)을 적용하지 않아 고정된 틀 밖으로 넘치지 않는다"""
     f = QFont()
     f.setFamilies(font_families())
     n = size_of(size)
     f.setPixelSize(px(n) if scaled else n)
-    f.setBold(bold)
+    if weight is not None:
+        if weight not in FONT_WEIGHTS:
+            raise ValueError(f'font weight must be one of {sorted(FONT_WEIGHTS)}: {weight}')
+        f.setWeight(FONT_WEIGHTS[weight])
+        if font_families()[0] == 'Pretendard':
+            f.setStyleName(PRETENDARD_STYLES[weight])
+    else:
+        f.setBold(bold)
     f.setStyleHint(QFont.SansSerif)
     return f
 
@@ -341,15 +365,15 @@ def font_css():
 
 
 def scrollbar_qss():
-    return f"""
-        QScrollBar:vertical {{ background: transparent; width: 8px; margin: 0; }}
-        QScrollBar::handle:vertical {{ background: rgba(88,96,121,0.38); border-radius: 4px; min-height: 30px; }}
-        QScrollBar::handle:vertical:hover {{ background: rgba(88,96,121,0.60); }}
-        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
-        QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
-        QScrollBar:horizontal {{ background: transparent; height: 8px; margin: 0; }}
-        QScrollBar::handle:horizontal {{ background: rgba(88,96,121,0.38); border-radius: 4px; min-width: 30px; }}
-        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
+    return """
+        QScrollBar:vertical { background: transparent; width: 8px; margin: 0; }
+        QScrollBar::handle:vertical { background: rgba(88,96,121,0.38); border-radius: 4px; min-height: 30px; }
+        QScrollBar::handle:vertical:hover { background: rgba(88,96,121,0.60); }
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+        QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
+        QScrollBar:horizontal { background: transparent; height: 8px; margin: 0; }
+        QScrollBar::handle:horizontal { background: rgba(88,96,121,0.38); border-radius: 4px; min-width: 30px; }
+        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
     """
 
 
@@ -368,14 +392,14 @@ def base_qss():
             padding: 7px 14px;
         }}
         QPushButton:hover {{ background: {c('bg_hover')}; }}
-        QPushButton:focus {{ border: 2px solid {c('yellow_dark')}; }}
+        QPushButton[focusVisible="true"]:focus {{ border: 2px solid {c('yellow_dark')}; }}
         QPushButton:disabled {{ color: {c('text_hint')}; }}
         QPushButton[primary="true"] {{ background: {c('yellow')}; border: none; color: {c('on_accent')}; font-weight: bold; }}
         QPushButton[primary="true"]:hover {{ background: {c('yellow_dark')}; }}
         QPushButton[flat="true"] {{ background: transparent; border: none; padding: 4px; border-radius: 8px; }}
         QPushButton[flat="true"]:hover {{ background: {c('bg_hover')}; }}
         QPushButton[flat="true"]:pressed {{ background: {c('bg_selected')}; }}
-        QPushButton[flat="true"]:focus {{ border: 2px solid {c('yellow_dark')}; }}
+        QPushButton[flat="true"][focusVisible="true"]:focus {{ border: 2px solid {c('yellow_dark')}; }}
         QMenu {{ background: {c('bg')}; border: 1px solid {c('border')}; border-radius: 10px; padding: 6px; }}
         QMenu::item {{ padding: 7px 22px; border-radius: 6px; }}
         QMenu::separator {{ height: 1px; background: {c('border')}; margin: 5px 8px; }}

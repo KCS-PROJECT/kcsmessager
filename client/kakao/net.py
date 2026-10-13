@@ -45,10 +45,11 @@ class ResetRejected(Exception):
     """서버가 비밀번호 재설정을 거절함 (아이디·이메일 불일치, 횟수 제한 등) - 사용자에게 보일 문구"""
 
 
-def reset_password(host, port, login_id, email, new_password, timeout=5.0):
-    """비밀번호 재설정 (password_reset, 명세 §4.1) → 바뀐 계정 username.
+def reset_password(host, port, login_id, email, new_password, code='', timeout=5.0):
+    """비밀번호 재설정 (password_reset, 명세 §4.1) → 바뀐 계정 username. code: 관리자가 발급한 일회용 재설정 코드.
     서버가 거절하면 ResetRejected(문구), 연결이 안 되면 OSError"""
-    payload = {'type': 'password_reset', 'username': login_id, 'email': email, 'new_password': new_password}
+    payload = {'type': 'password_reset', 'username': login_id, 'email': email, 'new_password': new_password,
+               'code': code}
     msg = _request_before_login(host, port, payload, 'password_reset_ok', timeout, rejected=ResetRejected)
     return msg.get('username') or login_id
 
@@ -159,7 +160,15 @@ class ChatConnection(QObject):
             self._handle_disconnect(reason)
 
     def _handle_disconnect(self, reason):
-        if self._sock is None and self._closing:
+        """끊김 처리는 한 번만: 소켓을 닫아 읽기 스레드도 끝낸다 (전송 실패로 끊겼을 때 예전에는 소켓 · 스레드가
+        남아 서버가 그 연결을 접속 중으로 보고 있었다)"""
+        sock, self._sock = self._sock, None
+        if sock is None:
             return
-        self._sock = None
-        self.disconnected.emit(reason)
+        for close in (lambda: sock.shutdown(socket.SHUT_RDWR), sock.close):
+            try:
+                close()
+            except OSError:
+                pass
+        if not self._closing:
+            self.disconnected.emit(reason)

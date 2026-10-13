@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-로그인 다이얼로그 - 회사 CI 네이비 배경 + ㈜케이씨에스 로고, 아이디/비밀번호 카드, 서버 설정(접기)
+로그인 다이얼로그 - 회사 CI 네이비 배경 + ㈜케이씨에스 로고, 아이디/비밀번호 카드
+(서버 주소는 로그인 창에서 바꾸지 않는다 - 그룹 관리자가 더보기 → 정보에서 정한다, 명세 §4.3)
 처음 한 번은 [처음 사용 등록]: 소속 회사 선택(필수) + 이름 + 사번 + 이메일 + 비밀번호 (명세 §4.1)
 그다음부터는 사번 + 비밀번호로 로그인한다. 마지막으로 로그인한 사번만 미리 채운다
 비밀번호는 저장하지 않는다
@@ -12,7 +13,7 @@ import os
 import re
 
 from PyQt5.QtCore import Qt, QRectF, QPointF, QPoint, QSize
-from PyQt5.QtGui import QPainter, QPainterPath, QColor, QPixmap, QIcon, QIntValidator, QPen
+from PyQt5.QtGui import QPainter, QPainterPath, QColor, QPixmap, QIcon, QPen
 from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
                              QPushButton, QWidget, QLayout, QSizePolicy, QCheckBox, QComboBox,
                              QApplication)
@@ -258,7 +259,7 @@ class LoginDialog(QDialog):
         self.setObjectName('loginDialog')
 
         root = QVBoxLayout(self)
-        root.setSizeConstraint(QLayout.SetFixedSize)  # 내용에 맞춰 자동 크기(서버 설정 펼침 포함)
+        root.setSizeConstraint(QLayout.SetFixedSize)  # 내용에 맞춰 자동 크기(등록 화면 전환 포함)
         root.setContentsMargins(40, 48, 40, 24)
         root.setSpacing(0)
 
@@ -364,10 +365,18 @@ class LoginDialog(QDialog):
         self.reset_email_edit.setMaxLength(EMAIL_MAX)
         reset_layout.addWidget(self.reset_email_edit)
         reset_layout.addWidget(_divider())
+        self.reset_code_edit = QLineEdit()
+        self.reset_code_edit.setObjectName('idEdit')
+        self.reset_code_edit.setPlaceholderText('관리자에게 받은 재설정 코드 (예: ABCD-EF23)')
+        self.reset_code_edit.setAccessibleName('재설정 코드')
+        self.reset_code_edit.setMaxLength(20)
+        reset_layout.addWidget(self.reset_code_edit)
+        reset_layout.addWidget(_divider())
         self.reset_password_edit = self._password_field(f'새 비밀번호 ({PASSWORD_MIN}~{PASSWORD_MAX}자)')
         reset_layout.addWidget(self.reset_password_edit)
         root.addWidget(self.reset_form)
-        self.reset_hint = QLabel('가입할 때 등록한 이메일로 본인을 확인합니다. 바꾸면 이 계정의 저장된 자동 로그인은 모두 해제됩니다.')
+        self.reset_hint = QLabel('관리자에게 본인 확인을 받고 재설정 코드(30분 동안 한 번)를 받아 가입 이메일과 함께 넣습니다. '
+                                 '바꾸면 이 계정의 저장된 자동 로그인은 모두 해제됩니다.')
         self.reset_hint.setObjectName('loginHint')
         self.reset_hint.setWordWrap(True)
         root.addWidget(self.reset_hint)
@@ -419,36 +428,18 @@ class LoginDialog(QDialog):
         root.addWidget(self.reset_link, 0, Qt.AlignHCenter)
         root.addSpacing(4)
 
-        self.server_toggle = QPushButton('서버 설정  ▸')
-        self.server_toggle.setObjectName('serverToggle')
-        self.server_toggle.setCursor(Qt.PointingHandCursor)
-        self.server_toggle.setAutoDefault(False)
-        self.server_toggle.setCheckable(True)
-        root.addWidget(self.server_toggle, 0, Qt.AlignHCenter)
-
-        self.server_box = QWidget()
-        box = QHBoxLayout(self.server_box)
-        box.setContentsMargins(0, 8, 0, 0)
-        box.setSpacing(6)
-        self.host_edit = QLineEdit(str(host))
-        self.host_edit.setObjectName('serverEdit')
-        self.host_edit.setPlaceholderText('서버 주소')
-        self.port_edit = QLineEdit(str(port))
-        self.port_edit.setObjectName('serverEdit')
-        self.port_edit.setPlaceholderText('포트')
-        self.port_edit.setValidator(QIntValidator(1, 65535, self))
-        self.port_edit.setFixedWidth(82)
-        box.addWidget(self.host_edit, 1)
-        box.addWidget(self.port_edit)
-        self.server_box.hide()
-        root.addWidget(self.server_box)
+        # 접속할 서버: 화면에 칸을 두지 않는다 (명령줄 · 이 PC 의 server.json · 저장된 로그인에서 정해 온다)
+        self.host = str(host or '').strip() or '127.0.0.1'
+        try:
+            self.port = int(port)
+        except (TypeError, ValueError):
+            self.port = 5555
         root.addSpacing(36)
         footer = QLabel(f'KCS Talk v2.0 · {brand.COMPANY_NAME}')
         footer.setObjectName('loginFooter')
         footer.setAlignment(Qt.AlignCenter)
         root.addWidget(footer)
 
-        self.server_toggle.toggled.connect(self._toggle_server)
         self.login_button.clicked.connect(self.accept)
         for edit in (self.name_edit, self.password_edit, self.reg_name_edit, self.reg_employee_edit,
                      self.reg_email_edit, self.reg_password_edit):
@@ -456,10 +447,11 @@ class LoginDialog(QDialog):
         self.company_combo.currentIndexChanged.connect(self._update_state)
         self.mode_toggle.clicked.connect(lambda: self.set_mode('register' if self._mode == 'login' else 'login'))
         self.reset_link.clicked.connect(lambda: self.set_mode('reset'))
-        for edit in (self.reset_id_edit, self.reset_email_edit, self.reset_password_edit):
+        for edit in (self.reset_id_edit, self.reset_email_edit, self.reset_code_edit, self.reset_password_edit):
             edit.textChanged.connect(self._update_state)
         self.reset_id_edit.returnPressed.connect(self.reset_email_edit.setFocus)
-        self.reset_email_edit.returnPressed.connect(self.reset_password_edit.setFocus)
+        self.reset_email_edit.returnPressed.connect(self.reset_code_edit.setFocus)
+        self.reset_code_edit.returnPressed.connect(self.reset_password_edit.setFocus)
         self.reset_password_edit.returnPressed.connect(self.accept)
         self.reg_name_edit.returnPressed.connect(self.reg_employee_edit.setFocus)
         self.reg_employee_edit.returnPressed.connect(self.reg_email_edit.setFocus)
@@ -561,7 +553,7 @@ class LoginDialog(QDialog):
         try:
             names = fetch_companies(host, port)
         except OSError:
-            self.show_error('서버에 연결할 수 없어 소속 회사 목록을 불러오지 못했습니다. 서버 설정을 확인해 주세요.')
+            self.show_error('서버에 연결할 수 없어 소속 회사 목록을 불러오지 못했습니다. 잠시 후 다시 시도하거나 관리자에게 문의해 주세요.')
             return False
         self._companies_loaded = bool(names)
         self._set_companies(names)
@@ -617,18 +609,12 @@ class LoginDialog(QDialog):
             QPushButton#modeToggle {{ background: transparent; color: #FFFFFF; border: none; padding: 4px 8px;
                          font-size: 13px; text-decoration: underline; }}
             QPushButton#modeToggle:hover {{ color: #E6EBFA; }}
-            QLineEdit#serverEdit {{ background: rgba(255,255,255,0.12); color: #FFFFFF;
-                         border: 1px solid rgba(255,255,255,0.28); border-radius: 6px; padding: 8px 10px; font-size: 13px; }}
-            QLineEdit#serverEdit:focus {{ border: 1px solid #FFFFFF; }}
             QCheckBox#loginOption {{ color: rgba(255,255,255,0.85); font-size: 12px; spacing: 6px; }}
             QCheckBox#loginOption::indicator {{ width: 14px; height: 14px; border-radius: 3px;
                          border: 1px solid rgba(255,255,255,0.6); background: transparent; }}
             QCheckBox#loginOption::indicator:checked {{ background: #FFFFFF; border: 1px solid #FFFFFF;
                          image: url({check}); }}
             QCheckBox#loginOption:hover {{ color: #FFFFFF; }}
-            QPushButton#serverToggle {{ background: transparent; color: rgba(255,255,255,0.7); border: none;
-                         padding: 4px 8px; font-size: 12px; }}
-            QPushButton#serverToggle:hover {{ color: #FFFFFF; }}
             QPushButton#loginButton {{ background: #FFFFFF; color: {theme.BRAND_NAVY}; border: none; border-radius: 8px;
                          padding: 13px; font-size: 15px; font-weight: bold; }}
             QPushButton#loginButton:hover {{ background: #E6EBFA; }}
@@ -643,15 +629,12 @@ class LoginDialog(QDialog):
         edit.reveal_action.setToolTip(tip)
         edit.reveal_action.setText(tip)
 
-    def _toggle_server(self, on):
-        self.server_box.setVisible(on)
-        self.server_toggle.setText('서버 설정  ▾' if on else '서버 설정  ▸')
-
     def _update_state(self):
         if not hasattr(self, '_mode'):
             return
         if self.is_reset():
-            self.login_button.setEnabled(all(e.text().strip() for e in (self.reset_id_edit, self.reset_email_edit))
+            self.login_button.setEnabled(all(e.text().strip() for e in (self.reset_id_edit, self.reset_email_edit,
+                                                                         self.reset_code_edit))
                                          and bool(self.reset_password_edit.text()))
             return
         if self.is_register():
@@ -705,13 +688,9 @@ class LoginDialog(QDialog):
 
     def values(self):
         """(로그인 아이디, host, port) - 로그인 아이디는 사번 (등록 화면이면 등록할 사번)"""
-        try:
-            port = int(self.port_edit.text())
-        except ValueError:
-            port = 5555
         name = self.reg_employee_edit.text().strip() if getattr(self, '_mode', '') == 'register' \
             else self.name_edit.text().strip()
-        return name, self.host_edit.text().strip() or '127.0.0.1', port
+        return name, self.host, self.port
 
     def _check_registration(self):
         """등록 화면 입력 확인 → 오류 문구 (없으면 '')"""
@@ -750,18 +729,19 @@ class LoginDialog(QDialog):
             self.show_error(f'비밀번호는 {PASSWORD_MIN}~{PASSWORD_MAX}자로 입력해 주세요.')
             return
         try:
-            reset_password(host, port, login_id, email, new_password)
+            reset_password(host, port, login_id, email, new_password, code=self.reset_code_edit.text().strip())
         except ResetRejected as exc:
             self.show_error(str(exc))
             return
         except OSError:
-            self.show_error('서버에 연결할 수 없습니다. 서버 설정을 확인해 주세요.')
+            self.show_error('서버에 연결할 수 없습니다. 잠시 후 다시 시도하거나 관리자에게 문의해 주세요.')
             return
         if self.saved and self.saved['login_id'] == login_id:   # 서버가 토큰을 폐기했다 → 저장된 로그인도 지운다
             clear_saved_login(getattr(self, 'saved_path', None))
             self.saved = None
             self.remember_check.setChecked(False)
         self.reset_password_edit.clear()
+        self.reset_code_edit.clear()
         self.set_mode('login')
         self.name_edit.setText(login_id)
         self.password_edit.clear()

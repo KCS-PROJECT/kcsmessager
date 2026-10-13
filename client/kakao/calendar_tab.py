@@ -16,11 +16,11 @@ from PyQt5.QtCore import Qt, QRectF, QPointF, QDate, QSize, pyqtSignal
 from PyQt5.QtGui import QPainter, QColor, QPen, QFontMetrics, QPainterPath
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
                              QScrollArea, QFrame, QLineEdit, QDateEdit, QMenu,
-                             QStackedWidget, QButtonGroup, QSizePolicy, QToolButton)
+                             QStackedWidget, QButtonGroup, QSizePolicy, QToolButton, QDialog)
 
 from client.kakao import theme
 from client.kakao.state import parse_dt
-from client.kakao.widgets import paint_icon, make_icon, IconButton
+from client.kakao.widgets import paint_icon, make_icon, IconButton, qss_icon_path
 
 WEEKDAYS_SUN_FIRST = ['일', '월', '화', '수', '목', '금', '토']
 WEEKDAYS_MON_FIRST = ['월', '화', '수', '목', '금', '토', '일']
@@ -125,33 +125,6 @@ def icon_pixmap(name, color, size=16):
     return pm
 
 
-_QSS_ICON_CACHE = {}
-
-
-def qss_icon_path(name, color, rotate=0, stroke=2.2):
-    """QSS image: url(...) 용 아이콘 PNG 경로 (임시 폴더에 캐시, 경로 구분자는 '/')"""
-    import os
-    import tempfile
-    from PyQt5.QtGui import QPixmap, QTransform
-    key = (name, color, rotate, stroke)
-    cached = _QSS_ICON_CACHE.get(key)
-    if cached and os.path.exists(cached):
-        return cached
-    folder = os.path.join(tempfile.gettempdir(), 'kcs_calendar_icons')
-    os.makedirs(folder, exist_ok=True)
-    path = os.path.join(folder, f"{name}_{color.strip('#')}_{rotate}.png")
-    pm = QPixmap(48, 48)
-    pm.fill(Qt.transparent)
-    p = QPainter(pm)
-    paint_icon(p, name, QRectF(0, 0, 48, 48), color, stroke=stroke)
-    p.end()
-    if rotate:
-        pm = pm.transformed(QTransform().rotate(rotate))
-    pm.save(path, 'PNG')
-    _QSS_ICON_CACHE[key] = path.replace('\\', '/')
-    return _QSS_ICON_CACHE[key]
-
-
 def arrow_image_path(color):
     return qss_icon_path('back', color, rotate=-90)
 
@@ -177,11 +150,6 @@ def dropdown_qss():
             subcontrol-origin: padding; subcontrol-position: center right; width: 22px; border: none; }}
         QComboBox::down-arrow, QDateEdit::down-arrow, QDateTimeEdit::down-arrow {{
             image: url("{arrow}"); width: 12px; height: 12px; }}
-        QCalendarWidget QWidget {{ alternate-background-color: {theme.c('bg_alt')}; }}
-        QCalendarWidget QAbstractItemView {{ background: {theme.c('bg')}; color: {theme.c('text')};
-            selection-background-color: {theme.c('yellow')}; selection-color: {theme.c('on_accent')}; }}
-        QCalendarWidget QToolButton {{ color: {theme.c('text')}; background: transparent; }}
-        QCalendarWidget #qt_calendar_navigationbar {{ background: {theme.c('bg_alt')}; }}
     """
 
 
@@ -308,7 +276,8 @@ class MonthGrid(QWidget):
         return placed, hidden
 
     def _birthday_keys(self):
-        return {u.get('birthday') for u in self.state.friends() if u.get('birthday')}
+        from client.kakao.state import birthday_md
+        return {birthday_md(u.get('birthday')) for u in self.state.friends() if birthday_md(u.get('birthday'))}
 
     # ---- 그리기
     def paintEvent(self, event):
@@ -894,7 +863,7 @@ class CalendarTab(QWidget):
 
     def _mirror_next_icon(self):
         """'back' 아이콘을 좌우로 뒤집어 다음 달 버튼에 사용"""
-        from PyQt5.QtGui import QPixmap, QIcon, QTransform
+        from PyQt5.QtGui import QIcon, QTransform
         pm = make_icon('back', theme.c('text'), 16).pixmap(QSize(16, 16))
         self.next_btn.setIcon(QIcon(pm.transformed(QTransform().scale(-1, 1))))
 
@@ -1058,7 +1027,16 @@ class CalendarTab(QWidget):
     def open_new_event(self, d=None):
         from client.kakao.event_dialog import EventDialog
         dlg = EventDialog(self.state, default_date=d or self.selected, parent=self)
-        dlg.exec_()
+        if dlg.exec_() == QDialog.Accepted:
+            self.show_created(dlg.start_end()[0])
+        return dlg
+
+    def show_created(self, start):
+        """방금 등록한 일정의 날짜로 달력을 옮기고 알린다 - 다른 달 · 다른 해에 넣어도 바로 보이게"""
+        self.go_to_date(start.date())
+        win = self.window()
+        if hasattr(win, 'show_toast'):
+            win.show_toast(f'일정을 등록했습니다 · {start:%Y. %m. %d.} ({WEEKDAYS_MON_FIRST[start.weekday()]})')
 
     def open_event_detail(self, ev):
         from client.kakao.event_dialog import EventDetailDialog

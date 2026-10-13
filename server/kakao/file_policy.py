@@ -1,0 +1,242 @@
+# -*- coding: utf-8 -*-
+"""
+파일 전송 보안 (명세 §10.10) - 외부 유출 · 악성 파일을 막는 첨부 검사
+
+- 형태(종류): 확장자뿐 아니라 **파일 내용의 첫 바이트(매직 넘버)** 로도 판별한다.
+  `보고서.txt` 로 이름만 바꾼 실행 파일도 '실행 파일' 로 잡힌다.
+- 확장자: 관리자가 적은 확장자 목록 (`hwp`, `.zip` 처럼 점은 있어도 없어도 된다)
+- 파일 이름: `*대외비*` 같은 와일드카드, 와일드카드가 없으면 '이름에 들어 있으면' 으로 본다 (대소문자 무시)
+- 압축 파일(zip)은 안에 든 파일 이름까지 같은 규칙으로 본다 (암호가 걸려 있어도 이름은 보인다)
+
+이 모듈은 저장소 · 네트워크를 모른다. 정책 dict 와 파일(이름 · 바이트)만 받아 위반 내용을 돌려준다.
+"""
+
+from __future__ import annotations
+
+import fnmatch
+import hashlib
+import io
+import os
+import zipfile
+from typing import Any, Optional
+
+# (키, 이름, 대표 확장자) - 관리자 화면에 이 순서로 나온다
+CATEGORIES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ('executable', '실행 파일 · 스크립트',
+     ('exe', 'msi', 'com', 'scr', 'bat', 'cmd', 'ps1', 'psm1', 'vbs', 'vbe', 'js', 'jse', 'wsf', 'wsh', 'hta',
+      'cpl', 'dll', 'sys', 'jar', 'app', 'pkg', 'dmg', 'deb', 'rpm', 'apk', 'sh', 'run', 'lnk', 'reg',
+      'command', 'msix', 'appx')),
+    ('archive', '압축 파일',
+     ('zip', '7z', 'rar', 'alz', 'egg', 'tar', 'gz', 'tgz', 'bz2', 'xz', 'iso', 'cab', 'lzh', 'z')),
+    ('database', '데이터베이스 · 백업 · 메일함',
+     ('sql', 'db', 'sqlite', 'sqlite3', 'mdb', 'accdb', 'dbf', 'bak', 'dump', 'dmp', 'pst', 'ost', 'mdf', 'ldf',
+      'frm', 'ibd')),
+    ('credential', '인증서 · 암호 키',
+     ('pem', 'key', 'pfx', 'p12', 'cer', 'crt', 'der', 'jks', 'keystore', 'kdbx', 'ppk', 'ovpn', 'gpg', 'asc',
+      'p7b', 'csr')),
+    ('source', '소스 코드',
+     ('py', 'java', 'c', 'cc', 'cpp', 'h', 'hpp', 'cs', 'go', 'rs', 'kt', 'swift', 'ts', 'tsx', 'jsx', 'php',
+      'rb', 'scala', 'vue', 'ipynb', 'm', 'pl', 'lua', 'dart')),
+    ('document', '문서',
+     ('hwp', 'hwpx', 'doc', 'docx', 'xls', 'xlsx', 'xlsm', 'ppt', 'pptx', 'pdf', 'txt', 'csv', 'rtf', 'odt',
+      'ods', 'odp', 'md', 'pages', 'numbers')),
+    ('image', '이미지', ('png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'heic', 'svg', 'tif', 'tiff', 'ico')),
+    ('video', '동영상', ('mp4', 'mov', 'avi', 'mkv', 'wmv', 'webm', 'm4v', 'flv')),
+    ('audio', '음성 · 음악', ('mp3', 'wav', 'm4a', 'aac', 'ogg', 'flac', 'wma', 'opus')),
+)
+CATEGORY_LABELS = {key: label for key, label, _exts in CATEGORIES}
+# 확장자 → 종류
+_EXT_CATEGORY: dict[str, str] = {}
+for _key, _label, _exts in CATEGORIES:
+    for _ext in _exts:
+        _EXT_CATEGORY.setdefault(_ext, _key)
+
+# zip 컨테이너지만 문서/앱인 확장자 (내용이 PK.. 여도 압축 파일로 보지 않는다)
+_ZIP_DOCUMENTS = {'docx', 'xlsx', 'xlsm', 'pptx', 'hwpx', 'odt', 'ods', 'odp', 'pages', 'numbers'}
+_ZIP_EXECUTABLES = {'jar', 'apk', 'appx', 'msix', 'ipa'}
+# OLE 복합 문서(D0 CF 11 E0): 옛 오피스 · 한글 문서. msi 도 같은 틀이라 확장자로 가른다
+_OLE_EXECUTABLES = {'msi', 'msp'}
+
+DEFAULT_POLICY: dict[str, Any] = {
+    'enabled': True,
+    'blocked_types': ['executable', 'database', 'credential'],
+    'blocked_extensions': [],
+    'blocked_names': ['*대외비*', '*기밀*', '*confidential*'],
+}
+MAX_EXTENSIONS = 100
+MAX_NAMES = 100
+MAX_RULE_LEN = 60
+MAX_ZIP_ENTRIES = 2000          # 이보다 많으면 앞쪽만 본다 (압축 폭탄으로 서버를 붙잡지 않게)
+
+RULE_TEXT = {'type': '막힌 파일 형태', 'extension': '막힌 확장자', 'name': '막힌 파일 이름'}
+
+
+class PolicyError(ValueError):
+    """관리자가 보낸 정책 값이 올바르지 않음"""
+
+
+def extension_of(name: str) -> str:
+    """'보고서.Tar.GZ' → 'gz' (점 없이 소문자). 확장자가 없으면 ''"""
+    base = os.path.basename((name or '').replace('\\', '/')).strip().rstrip('.')
+    _stem, ext = os.path.splitext(base)
+    return ext[1:].lower()
+
+
+def sha256_of(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def sniff_category(data: bytes, ext: str = '') -> Optional[str]:
+    """파일 내용의 첫 바이트로 본 실제 형태. 모르면 None (평범한 글자 파일 등)"""
+    head = data[:16]
+    if head.startswith(b'MZ') or head.startswith(b'\x7fELF') or head[:4] in (
+            b'\xfe\xed\xfa\xce', b'\xfe\xed\xfa\xcf', b'\xce\xfa\xed\xfe', b'\xcf\xfa\xed\xfe', b'\xca\xfe\xba\xbe'):
+        return 'executable'                       # Windows PE · Linux ELF · macOS Mach-O(유니버설 포함)
+    if head.startswith(b'#!'):
+        return 'executable'                       # 셸 · 파이썬 등 실행 스크립트
+    if head.startswith(b'PK\x03\x04') or head.startswith(b'PK\x05\x06'):
+        if ext in _ZIP_DOCUMENTS and _is_zip_document(data):
+            return 'document'                     # 진짜 오피스 · 한글 · ODF 문서 (이름만 .docx 인 압축 파일은 아님)
+        if ext in _ZIP_EXECUTABLES:
+            return 'executable'
+        return 'archive'
+    if head.startswith((b'7z\xbc\xaf\x27\x1c', b'Rar!\x1a\x07', b'\x1f\x8b', b'BZh', b'\xfd7zXZ\x00',
+                        b'ALZ\x01', b'EGGA', b'MSCF')):
+        return 'archive'
+    if head.startswith(b'SQLite format 3\x00') or head.startswith(b'!BDN'):
+        return 'database'                         # SQLite · Outlook 메일함(pst)
+    if head.startswith(b'-----BEGIN ') or head.startswith(b'PuTTY-User-Key-File'):
+        return 'credential'
+    if head.startswith(b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1'):
+        return 'executable' if ext in _OLE_EXECUTABLES else 'document'
+    if head.startswith(b'%PDF'):
+        return 'document'
+    if head.startswith((b'\x89PNG', b'\xff\xd8\xff', b'GIF8')) or (head[:2] == b'BM' and head[6:10] == b'\0' * 4) \
+            or (head[:4] == b'RIFF' and head[8:12] == b'WEBP'):
+        return 'image'
+    return None
+
+
+def category_of(name: str) -> Optional[str]:
+    return _EXT_CATEGORY.get(extension_of(name))
+
+
+def _clean_rules(values: Any, limit: int, what: str) -> list[str]:
+    if values is None:
+        return []
+    if not isinstance(values, list) or len(values) > limit:
+        raise PolicyError(f'{what}은(는) {limit}개까지 목록으로 보내 주세요.')
+    out: list[str] = []
+    for value in values:
+        if not isinstance(value, str):
+            raise PolicyError(f'{what} 값이 올바르지 않습니다.')
+        value = value.strip()
+        if not value:
+            continue
+        if len(value) > MAX_RULE_LEN or any(ord(ch) < 32 for ch in value):
+            raise PolicyError(f'{what} 값이 올바르지 않습니다: {value[:20]}')
+        if value.lower() not in (v.lower() for v in out):
+            out.append(value)
+    return out
+
+
+def normalize_policy(raw: Any) -> dict:
+    """관리자가 보낸 정책 → 저장할 정책. 잘못되면 PolicyError"""
+    if not isinstance(raw, dict):
+        raise PolicyError('정책 값이 올바르지 않습니다.')
+    enabled = raw.get('enabled', True)
+    if not isinstance(enabled, bool):
+        raise PolicyError('enabled 는 true/false 여야 합니다.')
+    types = _clean_rules(raw.get('blocked_types'), len(CATEGORIES), '막을 형태')
+    unknown = [t for t in types if t not in CATEGORY_LABELS]
+    if unknown:
+        raise PolicyError(f'알 수 없는 파일 형태입니다: {unknown[0]}')
+    extensions = [e.lstrip('.').lower() for e in _clean_rules(raw.get('blocked_extensions'), MAX_EXTENSIONS, '막을 확장자')]
+    for ext in extensions:
+        if not ext or any(ch in ext for ch in '/\\*?. '):
+            raise PolicyError(f'확장자는 hwp, zip 처럼 글자만 적어 주세요: {ext or "."}')
+    names = _clean_rules(raw.get('blocked_names'), MAX_NAMES, '막을 파일 이름')
+    return {'enabled': enabled, 'blocked_types': [k for k, _l, _e in CATEGORIES if k in types],
+            'blocked_extensions': list(dict.fromkeys(extensions)), 'blocked_names': names}
+
+
+def name_matches(name: str, pattern: str) -> bool:
+    """와일드카드(* ?)가 있으면 이름 전체와 비교, 없으면 이름에 들어 있는지 (대소문자 무시)"""
+    base = os.path.basename((name or '').replace('\\', '/')).lower()
+    pattern = (pattern or '').strip().lower()
+    if not pattern:
+        return False
+    if any(ch in pattern for ch in '*?['):
+        return fnmatch.fnmatchcase(base, pattern)
+    return pattern in base
+
+
+def _check_name(policy: dict, name: str, inner: bool) -> Optional[dict]:
+    """이름 · 확장자 · 확장자로 본 형태만 (압축 안 파일에도 쓴다)"""
+    where = f'압축 파일 안 \'{os.path.basename(name)}\'' if inner else ''
+    ext = extension_of(name)
+    for pattern in policy.get('blocked_names') or []:
+        if name_matches(name, pattern):
+            return {'rule': 'name', 'value': pattern,
+                    'detail': f"{where + ': ' if where else ''}이름에 '{pattern.strip('*')}' 이(가) 들어 있어요"}
+    if ext and ext in (policy.get('blocked_extensions') or []):
+        return {'rule': 'extension', 'value': ext, 'detail': f"{where + ': ' if where else ''}.{ext} 파일은 보낼 수 없어요"}
+    category = _EXT_CATEGORY.get(ext)
+    if category and category in (policy.get('blocked_types') or []):
+        return {'rule': 'type', 'value': category,
+                'detail': f"{where + ': ' if where else ''}{CATEGORY_LABELS[category]} 형태는 보낼 수 없어요"}
+    return None
+
+
+# 오피스(OOXML) · ODF · 한글(hwpx) 문서 zip 안에 반드시 있는 항목
+_ZIP_DOCUMENT_MARKERS = ('[Content_Types].xml', 'mimetype', 'META-INF/manifest.xml')
+
+
+def _is_zip_document(data: bytes) -> bool:
+    names = set(_zip_names(data))
+    return any(marker in names for marker in _ZIP_DOCUMENT_MARKERS)
+
+
+def _zip_names(data: bytes) -> list[str]:
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            return [info.filename for info in zf.infolist()[:MAX_ZIP_ENTRIES] if not info.is_dir()]
+    except (zipfile.BadZipFile, ValueError, OSError, RuntimeError, NotImplementedError, EOFError):
+        return []
+
+
+def check(policy: Optional[dict], name: str, data: bytes) -> Optional[dict]:
+    """정책 위반이면 {rule, value, detail, category}, 괜찮으면 None.
+
+    rule: 'name'(파일 이름) · 'extension'(확장자) · 'type'(형태 - 확장자 또는 실제 내용)
+    """
+    policy = policy or DEFAULT_POLICY
+    if not policy.get('enabled'):
+        return None
+    ext = extension_of(name)
+    sniffed = sniff_category(data, ext)
+    found = _check_name(policy, name, inner=False)
+    if found is None and sniffed and sniffed in (policy.get('blocked_types') or []):
+        claimed = _EXT_CATEGORY.get(ext)
+        disguised = claimed != sniffed
+        found = {'rule': 'type', 'value': sniffed,
+                 'detail': (f"확장자는 .{ext or '(없음)'} 이지만 실제 내용은 {CATEGORY_LABELS[sniffed]} 형태예요"
+                            if disguised else f"{CATEGORY_LABELS[sniffed]} 형태는 보낼 수 없어요")}
+    if found is None and (sniffed == 'archive' or ext == 'zip') and data[:2] == b'PK':
+        for inner in _zip_names(data):
+            found = _check_name(policy, inner, inner=True)
+            if found:
+                break
+    if found is not None:
+        found['category'] = sniffed or _EXT_CATEGORY.get(ext) or ''
+        # 이름이 말하는 형태와 실제 내용이 다르고, 그 내용이 막힌 형태인가 (이름 예외로 풀어 주면 안 되는 파일)
+        found['disguised'] = bool(sniffed and sniffed != _EXT_CATEGORY.get(ext)
+                                  and sniffed in (policy.get('blocked_types') or []))
+    return found
+
+
+def public_policy(policy: Optional[dict]) -> dict:
+    """클라이언트에 보낼 정책 + 형태 목록 (관리자 화면 · 보내기 전 안내용)"""
+    policy = policy or DEFAULT_POLICY
+    return {**{k: policy.get(k, DEFAULT_POLICY[k]) for k in DEFAULT_POLICY},
+            'categories': [{'key': k, 'label': label, 'extensions': list(exts)} for k, label, exts in CATEGORIES]}

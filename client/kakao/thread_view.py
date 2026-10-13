@@ -9,6 +9,7 @@ from PyQt5.QtWidgets import (QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QScr
                              QLineEdit)
 
 from client.kakao import theme
+from client.kakao.widgets import disconnect_signals
 from client.kakao.chat_room import _Dialog, fmt_time
 
 THREAD_MAX_LEN = 4000
@@ -176,11 +177,7 @@ class ThreadDialog(_Dialog):
         return True
 
     def done(self, result):
-        for signal, slot in ((self.state.message_added, self._on_message),
-                             (self.state.message_updated, self._on_message),
-                             (self.state.thread_loaded, self._on_loaded)):
-            try:
-                signal.disconnect(slot)
-            except (TypeError, RuntimeError):
-                pass
+        disconnect_signals((self.state.message_added, self._on_message),
+                           (self.state.message_updated, self._on_message),
+                           (self.state.thread_loaded, self._on_loaded))
         super().done(result)

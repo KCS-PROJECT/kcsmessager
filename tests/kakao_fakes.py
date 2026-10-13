@@ -37,6 +37,16 @@ def app():
     return _APP[0]
 
 
+def expand_org(tab):
+    """조직도 탭의 회사 · 조직 · 그룹을 모두 펼친다 (기본은 내 소속만 펼침) - 배치를 보는 테스트용"""
+    tab.refresh()
+    tab.collapsed.clear()
+    tab.collapsed_nodes.clear()
+    tab.collapsed_groups.clear()
+    tab.collapsed_teams.clear()
+    tab.refresh()
+
+
 class FakeConnection(QObject):
     connected = pyqtSignal()
     disconnected = pyqtSignal(str)

@@ -7,12 +7,13 @@
 
 import html
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QObject, QTimer
 from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QTableWidget,
                              QTableWidgetItem, QHeaderView, QAbstractItemView, QMessageBox, QPlainTextEdit,
                              QInputDialog, QCheckBox, QComboBox, QFormLayout)
 
 from client.kakao import theme
+from client.kakao.widgets import disconnect_signals
 
 NOTICE_MAX = 1000
 COLUMNS = ('이름', '소속 · 부서', '사번', '이메일', '상태')
@@ -20,7 +21,7 @@ COLUMNS = ('이름', '소속 · 부서', '사번', '이메일', '상태')
 
 GROUP_SCOPE = '그룹 전체'
 MEMBER_FIELDS = (   # (키, 라벨, 최대 길이)
-    ('department', '부서', 60), ('title', '직급 · 직책', 60), ('employee_no', '사번', 20),
+    ('department', '부서', 60), ('team', '팀', 60), ('title', '직급 · 직책', 60), ('employee_no', '사번', 20),
     ('account', '사내 계정', 60), ('extension', '내선', 60), ('mobile', '휴대폰', 60), ('email', '이메일', 120))
 
 
@@ -116,18 +117,23 @@ class AdminDialog(QDialog):
 
         actions = QHBoxLayout()
         self.reset_button = QPushButton('비밀번호 재설정…')
+        self.code_button = QPushButton('재설정 코드 발급')
+        self.code_button.setToolTip('본인 확인 후 코드를 알려 주면, 본인이 로그인 창의 [비밀번호 재설정]에서 직접 새 비밀번호를 정합니다')
         self.clear_button = QPushButton('등록 초기화')
         self.disable_button = QPushButton('사용 중지')
         self.admin_button = QPushButton('관리자 지정')
-        for btn in (self.reset_button, self.clear_button, self.disable_button, self.admin_button):
+        for btn in (self.reset_button, self.code_button, self.clear_button, self.disable_button, self.admin_button):
             actions.addWidget(btn)
         actions.addStretch(1)
+        self.file_security_button = QPushButton('파일 전송 보안…')   # 그룹 관리자만 (§10.10)
+        actions.addWidget(self.file_security_button)
         self.notice_button = QPushButton('전체 공지…')
         actions.addWidget(self.notice_button)
         col.addLayout(actions)
 
         self.status = QLabel('')
         self.status.setWordWrap(True)
+        self.status.setTextInteractionFlags(Qt.TextSelectableByMouse)   # 재설정 코드를 복사할 수 있게
         col.addWidget(self.status)
 
         self.search.textChanged.connect(lambda _t: self._fill())
@@ -139,10 +145,12 @@ class AdminDialog(QDialog):
         self.refresh_button.clicked.connect(self.refresh)
         self.table.itemSelectionChanged.connect(self._update_buttons)
         self.reset_button.clicked.connect(lambda: self.reset_password())
+        self.code_button.clicked.connect(lambda: self.issue_reset_code())
         self.clear_button.clicked.connect(lambda: self.clear_registration())
         self.disable_button.clicked.connect(lambda: self.toggle_disabled())
         self.admin_button.clicked.connect(lambda: self.toggle_admin())
         self.notice_button.clicked.connect(lambda: self.send_notice() and None)
+        self.file_security_button.clicked.connect(lambda: self.open_file_security() and None)
         state.admin_users_changed.connect(self._on_users)
         state.admin_done.connect(self._on_done)
         state.error.connect(self._on_error)
@@ -151,12 +159,8 @@ class AdminDialog(QDialog):
         self.refresh()
 
     def done(self, result):
-        for signal, slot in ((self.state.admin_users_changed, self._on_users),
-                             (self.state.admin_done, self._on_done), (self.state.error, self._on_error)):
-            try:
-                signal.disconnect(slot)
-            except TypeError:
-                pass
+        disconnect_signals((self.state.admin_users_changed, self._on_users),
+                           (self.state.admin_done, self._on_done), (self.state.error, self._on_error))
         super().done(result)
 
     def title_text(self):
@@ -219,8 +223,9 @@ class AdminDialog(QDialog):
         u = self.selected_user()
         group = self.is_group_admin()
         self.notice_button.setVisible(group)                 # 전체 공지 · 관리자 지정은 그룹 관리자만 (§4.3)
+        self.file_security_button.setVisible(group)          # 파일 전송 보안도 그룹 관리자만 (§10.10)
         self.admin_button.setVisible(group)
-        for btn in (self.reset_button, self.clear_button, self.disable_button, self.admin_button,
+        for btn in (self.reset_button, self.code_button, self.clear_button, self.disable_button, self.admin_button,
                     self.edit_button, self.delete_button):
             btn.setEnabled(u is not None)
         if u is None:
@@ -229,9 +234,10 @@ class AdminDialog(QDialog):
         self.delete_button.setText('복원' if u.get('removed') else '삭제')
         self.delete_button.setEnabled(bool(u.get('removed')) or u['username'] != self.state.me)
         if u.get('removed'):          # 삭제된 사람은 복원 · 조회만
-            for btn in (self.reset_button, self.clear_button, self.disable_button, self.admin_button):
+            for btn in (self.reset_button, self.code_button, self.clear_button, self.disable_button, self.admin_button):
                 btn.setEnabled(False)
             return
+        self.code_button.setEnabled(bool(u.get('registered')) and not u.get('is_admin'))
         self.disable_button.setText('사용 중지 해제' if u.get('disabled') else '사용 중지')
         self.disable_button.setEnabled(bool(u.get('disabled')) or u['username'] != self.state.me)
         self.admin_button.setText('관리자 해제' if u.get('is_admin') else '관리자 지정')
@@ -266,6 +272,11 @@ class AdminDialog(QDialog):
         password = password if password is not None else self.ask_new_password(u['username'])
         if password:
             self.state.admin_reset_password(u['username'], password)
+
+    def issue_reset_code(self):
+        u = self.selected_user()
+        if u is not None:
+            self.state.admin_reset_code(u['username'])
 
     def clear_registration(self):
         u = self.selected_user()
@@ -338,6 +349,14 @@ class AdminDialog(QDialog):
                                      '주고받은 대화 기록은 남고, [삭제한 구성원 보기]에서 복원할 수 있습니다.'):
             self.state.admin_member_delete(u['username'])
 
+    def open_file_security(self, exec_=True):
+        from client.kakao.file_guard import FileSecurityDialog
+        dlg = FileSecurityDialog(self.state, self)
+        self.file_security_dialog = dlg
+        if exec_:
+            dlg.exec_()
+        return dlg
+
     def send_notice(self, exec_=True):
         dlg = NoticeDialog(self)
         self.notice_dialog = dlg
@@ -361,6 +380,10 @@ class AdminDialog(QDialog):
             text = self.MEMBER_DONE[action].format(username=p.get('username', ''))
         elif action == 'set_admin' and p.get('is_admin'):
             text = f"{p.get('username')} 님을 {'회사 관리자(' + p['company'] + ')' if p.get('company') else '그룹 관리자'}로 지정했습니다."
+        elif action == 'reset_code':
+            until = (p.get('expires_at') or '').replace('T', ' ')[11:16]
+            text = (f"{p.get('username')} 님의 재설정 코드: {p.get('code')} ({until}까지 · 한 번만). "
+                    '본인 확인 후 알려 주세요. 로그인 창의 [비밀번호 재설정]에서 이메일과 함께 넣으면 됩니다.')
         elif action == 'set_disabled':
             text = f"{p.get('username')} 님을 {'사용 중지했습니다' if p.get('disabled') else '다시 사용하게 했습니다'}."
         elif action == 'set_admin':
@@ -407,6 +430,8 @@ class MemberDialog(QDialog):
         self.company_combo.setEnabled(not scope)
         form.addRow('소속 회사', self.company_combo)
         self.edits = {}
+        if 'team' not in self.user and len(self.user.get('org_path') or []) > 1:
+            self.user = dict(self.user, team=self.user['org_path'][1])    # 조직도 사용자 정보에서 연 경우
         for key, label, limit in MEMBER_FIELDS:
             edit = QLineEdit(self.user.get(key) or '')
             edit.setMaxLength(limit)
@@ -442,8 +467,12 @@ class MemberDialog(QDialog):
         return out
 
     def changes(self):
-        """수정: 바뀐 필드만"""
-        return {k: v for k, v in self.fields().items() if v != (self.user.get(k) or '')}
+        """수정: 바뀐 필드만. 부서나 팀이 바뀌면 조직 경로를 [부서, 팀]으로 다시 정하도록 둘 다 보낸다"""
+        fields = self.fields()
+        out = {k: v for k, v in fields.items() if v != (self.user.get(k) or '')}
+        if 'department' in out or 'team' in out:
+            out.update(department=fields['department'], team=fields['team'])
+        return out
 
     def validate(self):
         import re
@@ -465,6 +494,108 @@ class MemberDialog(QDialog):
         self.error.setText(error)
         if not error:
             super().accept()
+
+
+    def fill_from(self, users):
+        """관리자 목록(admin_users)이 늦게 오면 사용자가 아직 손대지 않은 칸만 채운다 (사번 · 이메일 등)"""
+        record = next((u for u in users if u.get('username') == self.user.get('username')), None)
+        if not record:
+            return
+        for key, edit in self.edits.items():
+            old = self.user.get(key) or ''
+            if edit.text() == old and (record.get(key) or '') != old:
+                edit.setText(record.get(key) or '')
+        if self.company_combo.currentText() == (self.user.get('company') or '') and record.get('company'):
+            index = self.company_combo.findText(record['company'])
+            if index >= 0:
+                self.company_combo.setCurrentIndex(index)
+        self.user = dict(self.user, **{k: record.get(k) or '' for k in ('company', *self.edits)})
+
+
+# ---------------------------------------------------------------- 편집 모드 (조직도 · 친구 · 프로필에서 바로 수정)
+EDIT_ACTION_TEXT = '정보 수정 (편집 모드)…'
+
+
+def can_edit_member(state, username):
+    """관리자이고 대상이 관리 범위 안의 사람(봇 제외)이면 True. 서버도 다시 검사한다 (명세 §4.3)"""
+    if not state.is_admin() or not username:
+        return False
+    user = state.users.get(username) or (state.user(username) if username == state.me else None)
+    if not user or user.get('is_bot'):
+        return False
+    scope = state.admin_company()
+    return not scope or (user.get('company') or '') == scope
+
+
+def member_record(state, username):
+    """구성원 창에 채울 값: 사용자 정보 + (받아 둔) 관리자 목록의 사번 · 이메일 · 팀"""
+    record = dict(state.user(username))
+    record.setdefault('username', username)
+    for u in getattr(state, 'admin_users', None) or []:
+        if u.get('username') == username:
+            record.update(u)
+            break
+    return record
+
+
+class _EditResult(QObject):
+    """보낸 admin_member_update 의 결과를 한 번 기다린다: 오류면 알림 창, 성공하면 조용히 끝"""
+
+    def __init__(self, state, username, parent):
+        super().__init__(parent)
+        self.state, self.username, self.window = state, username, parent
+        self.error = ''
+        state.error.connect(self._on_error)
+        state.admin_done.connect(self._on_done)
+        # 답이 오지 않으면(연결 끊김) 기다리기를 그만둔다 - 남아 있으면 한참 뒤 관계없는 오류에 '정보 수정' 창이 떴다
+        self._timeout = QTimer(self)
+        self._timeout.setSingleShot(True)
+        self._timeout.timeout.connect(self._finish)
+        self._timeout.start(self.WAIT_MS)
+
+    WAIT_MS = 30000
+
+    def _finish(self):
+        disconnect_signals((self.state.error, self._on_error), (self.state.admin_done, self._on_done))
+        self.deleteLater()
+
+    def _on_done(self, p):
+        if p.get('action') == 'member_update' and p.get('username') == self.username:
+            self._finish()
+
+    def _on_error(self, message):
+        self.error = message
+        box = QMessageBox(QMessageBox.Warning, '정보 수정', message, QMessageBox.Ok, self.window)
+        box.setAttribute(Qt.WA_DeleteOnClose)
+        box.open()
+        self._finish()
+
+
+def submit_member_edit(state, username, dlg, parent=None):
+    """구성원 창에서 바뀐 필드만 보낸다. 바뀐 것이 없으면 False"""
+    changes = dlg.changes()
+    if not changes:
+        return False
+    _EditResult(state, username, parent)
+    state.admin_member_update(username, changes)
+    return True
+
+
+def edit_member_info(state, username, parent=None, exec_=True):
+    """편집 모드로 구성원 정보를 연다 (관리자 · 관리 범위 안). 권한이 없으면 None"""
+    if not can_edit_member(state, username):
+        return None
+    dlg = MemberDialog(state, member_record(state, username), parent)
+    dlg.setWindowTitle(f'편집 모드 · {username}')
+    state.admin_users_changed.connect(dlg.fill_from)
+    if not any(u.get('username') == username for u in getattr(state, 'admin_users', None) or []):
+        state.admin_request_users()            # 사번 · 이메일 · 팀은 관리자 목록에만 있다
+    if exec_:
+        accepted = dlg.exec_() == QDialog.Accepted
+        disconnect_signals((state.admin_users_changed, dlg.fill_from))
+        if accepted:
+            submit_member_edit(state, username, dlg, parent)
+    return dlg
 
 
 class NoticeDialog(QDialog):

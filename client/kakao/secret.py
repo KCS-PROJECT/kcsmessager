@@ -35,21 +35,34 @@ class SecretKeyring:
         self._room_keys = {}
 
     def _load_or_create(self):
+        """키가 없을 때만 새로 만든다. 읽지 못한 이유가 잠깐의 오류(권한 · 다른 프로그램이 잡고 있음)면 덮어쓰지 않고
+        예외를 그대로 올린다 - 새 키로 바꾸면 지난 비밀 메시지를 영영 읽을 수 없게 된다 (이번 실행만 비밀채팅 없음).
+        내용이 깨진 키 파일은 .bak 으로 남겨 두고 새로 만든다"""
         try:
             with open(self.path, 'rb') as f:
-                key = serialization.load_pem_private_key(f.read(), password=None)
+                data = f.read()
+        except FileNotFoundError:
+            return self._create()
+        try:
+            key = serialization.load_pem_private_key(data, password=None)
             if isinstance(key, X25519PrivateKey):
                 return key
-            raise ValueError('X25519 키가 아닙니다')
-        except (OSError, ValueError):
-            key = X25519PrivateKey.generate()
-            os.makedirs(os.path.dirname(self.path), exist_ok=True)
-            pem = key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
-                                    serialization.NoEncryption())
-            fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, 'wb') as f:
-                f.write(pem)
-            return key
+        except (ValueError, TypeError):
+            pass
+        os.replace(self.path, self.path + '.bak')
+        return self._create()
+
+    def _create(self):
+        key = X25519PrivateKey.generate()
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        pem = key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                                serialization.NoEncryption())
+        tmp = self.path + '.tmp'
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, 'wb') as f:
+            f.write(pem)
+        os.replace(tmp, self.path)       # 쓰다 만 파일이 키 파일 자리에 남지 않게
+        return key
 
     @property
     def public_key_b64(self):

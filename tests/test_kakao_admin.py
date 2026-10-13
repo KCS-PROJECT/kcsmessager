@@ -88,7 +88,7 @@ class AdminServerTests(ServerTestBase):
         # 틀린 비밀번호에는 중지 여부를 드러내지 않는다 (계정 유무 감추기)
         self.assertEqual(again.expect_error({'type': 'join', 'username': target, 'password': 'wrong-pw'})['message'],
                          '아이디 또는 비밀번호가 올바르지 않습니다.')
-        self.assertIn('중지', again.expect_error({'type': 'password_reset', 'username': target,
+        self.assertIn('중지', again.expect_error({'type': 'password_reset', 'username': target, 'code': 'ABCD-EFGH',
                                                   'email': f'{target}@kcs.test', 'new_password': 'x-pass'})['message'])
         self.assertIn('자기 계정', admin.expect_error({'type': 'admin_set_disabled', 'username': admin_name,
                                                        'disabled': True})['message'])

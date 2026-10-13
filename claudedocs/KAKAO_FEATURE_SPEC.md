@@ -51,7 +51,9 @@
 ## 3. 데이터 모델 (JSON)
 
 ```text
-User    {username, display_name, status_message, birthday:"MM-DD"|null, online:bool}
+User    {username, display_name, status_message, birthday:"YYYY-MM-DD"|"MM-DD"|null, online:bool}
+        # birthday: 생년월일(YYYY-MM-DD, 연도 1900~올해). 예전 값·연도 비공개는 MM-DD. 생일 비교는 끝 5자(MM-DD)로 한다.
+        # 프로필 카드는 "생년월일 1990년 3월 15일", 연도가 없으면 "생일 3월 15일"로 보여 준다.
 
 Room    {room_id:str, type:"direct"|"group"|"self", name:str,        # direct/self의 name은 ""(클라이언트가 표시명 계산)
          members:[username], created_at:ISO,
@@ -99,7 +101,7 @@ Todo    {todo_id:int, owner, title, due:"YYYY-MM-DD"|null, done:bool, created_at
 | `room_leave` | room_id | 멤버 제거 → 나간 사람에게 `room_removed {room_id}`, 남은 사람에게 `room_updated` + "A님이 나갔습니다." |
 | `room_rename` | room_id, name | → `room_updated` |
 | `history` | room_id, before_msg_id?:int, limit?:int=50 | `history {room_id, messages:[Message](오래된→최신), has_more}` |
-| `send` | room_id, kind("text"/"emoticon"/"image"/"file"), content, reply_to_id?, mentions?, attachment?{name,mime,data_b64}, send_at?:ISO, client_tmp_id? | 즉시 전송이면 멤버 모두에게 `msg_new {message, client_tmp_id}` + `read_update`(발신자). `send_at`이 미래면 저장 후 요청자에게 `scheduled_ok {scheduled_id, room_id, send_at, content}`; 시각이 되면 `msg_new` |
+| `send` | room_id, kind("text"/"emoticon"/"image"/"file"), content, reply_to_id?, mentions?, attachment?{name,mime,data_b64}, send_at?:ISO, client_tmp_id? | 즉시 전송이면 멤버 모두에게 `msg_new {message, client_tmp_id}` + `read_update`(발신자). `send_at`이 미래면 저장 후 요청자에게 `scheduled_ok {scheduled_id, room_id, send_at, content}`; 시각이 되면 `msg_new`. 그때 보낸 사람이 방을 나갔거나 서버 오류로 못 보내면 보낸 사람에게 `scheduled_failed {scheduled_id, room_id, kind, content, reason}`(첨부는 지움, 다시 보내지 않음) |
 | `read` | room_id, last_msg_id | read pointer 갱신(감소 불가) → 멤버에게 `read_update {room_id, username, last_read_msg_id}` |
 | `react` | msg_id, emoji | 토글 → 멤버에게 `msg_updated {message}` |
 | `delete` | msg_id | 발신자 본인 + 24시간 이내만. deleted=true, content="삭제된 메시지입니다.", attachment/poll 유지하지 않음 → `msg_updated` |
@@ -117,7 +119,7 @@ Todo    {todo_id:int, owner, title, due:"YYYY-MM-DD"|null, done:bool, created_at
 | `todo_update` | todo_id, title?, due?, done? | 소유자만 → `todo_updated` |
 | `todo_delete` | todo_id | → `todo_deleted {todo_id}` |
 | `todo_list` | – | → `todo_list {todos}` |
-| `profile_update` | display_name?, status_message?, birthday? | → 모두에게 `user_updated {user}` |
+| `profile_update` | display_name?, status_message?, birthday?, deputies? | → 모두에게 `user_updated {user}` (`deputies` §8.13) |
 | `attachment_get` | attachment_id | → `attachment_data {attachment_id, name, mime, data_b64}` |
 | `leave` | – | 연결 종료 처리 |
 
@@ -126,8 +128,9 @@ Todo    {todo_id:int, owner, title, due:"YYYY-MM-DD"|null, done:bool, created_at
   - 회사 목록: org.json v2 의 지주사 이름 + `companies[].name`, 그리고 사용자들의 company 값(빈 값·"게스트"·봇 제외) — 중복 없이 이 순서.
   - 검증(오류 `error {req_type:"register"}`): 목록에 없는 회사 "소속 회사를 선택해 주세요." / 이름 1~20자(제어 문자·`@` 불가) / 사번 없음 "사번을 입력해 주세요." · 영문·숫자로 시작하는 영문·숫자·`-`·`_` 1~20자가 아니면 "사번은 영문·숫자 20자 이내로 입력해 주세요." / 다른 사용자의 사번·사내 계정(account)·이름과 같은 사번(대소문자 무시) "이미 등록된 사번입니다. 사번과 비밀번호로 로그인해 주세요." / 이메일 형식 "이메일 주소 형식이 올바르지 않습니다." / 비밀번호 4~64자 / 다른 사용자가 쓰는 이메일(대소문자 무시) "이미 가입된 이메일입니다." / 이미 비밀번호가 있는 이름 "이미 등록된 이름입니다. 아이디와 비밀번호로 로그인해 주세요." / 봇 이름 불가.
   - 없는 이름이면 그 회사 소속으로 새로 만든다. 비밀번호가 없는 기존 계정(조직도 시드·예전 게스트)이면 그 계정에 사번·이메일·비밀번호를 등록한다. 이때 계정의 회사가 비어 있거나 "게스트"면 고른 회사로 바꾸고, 다른 회사면 "선택한 소속에 같은 이름의 구성원이 없습니다. 소속을 다시 확인해 주세요." 비밀번호 등록은 `password_hash IS NULL` 일 때만(동시 등록 중 한쪽만).
+  - **계정 가로채기 방지 (2026-10-11):** 비밀번호가 없는 기존 계정에 사번이 이미 적혀 있으면(조직도 · 관리자 등록) 입력한 사번이 같아야 한다(대소문자 무시) — "조직도에 등록된 사번과 다릅니다. 사번을 확인하거나 관리자에게 문의해 주세요." 사번이 없는 관리자 계정은 직접 등록할 수 없다 — "관리자 계정은 직접 등록할 수 없습니다. 서버 PC 에서 scripts/set_password.py 로 비밀번호를 정해 주세요." 등록 실패는 로그인 실패처럼 세어 5번이면 5분 잠근다.
   - 성공하면 `join` 과 같은 `welcome`(+ `remember:true` 면 `login_token`) 과 이후 알림.
-- **비밀번호 재설정**: `password_reset {username, email, new_password}` (로그인 전 연결). `username` 은 join 과 같은 로그인 아이디(이름·사내 계정·이메일). 그 계정에 비밀번호가 등록돼 있고 가입 이메일이 `email` 과 같으면(대소문자 무시) 새 비밀번호(4~64자)로 바꾸고 그 계정의 자동 로그인 토큰을 모두 폐기한 뒤 `password_reset_ok {username}` (연결은 로그인되지 않은 상태 그대로). 아이디가 없거나 이메일이 다르면 `error {req_type:"password_reset"}` "아이디 또는 가입한 이메일이 일치하지 않습니다." (계정이 있는지 드러내지 않는다) 이고 로그인 실패와 같은 횟수 제한(아이디 5번·IP 20번 → 5분)에 센다. 비밀번호를 등록한 적 없는 계정은 처음 사용 등록 안내 오류. 메일 발송 없이 가입 이메일로만 확인하므로, 메일 인증이 필요해지면 확인 코드 단계를 추가한다.
+- **비밀번호 재설정**: `password_reset {username, email, new_password}` (로그인 전 연결). 관리자 계정은 이메일만으로 바꿀 수 없다 — "관리자 계정은 직접 재설정할 수 없습니다. 다른 그룹 관리자나 서버 PC 의 scripts/set_password.py 로 바꿔 주세요." **이메일은 본인 · 관리자에게만 보낸다**: welcome `users` · `user_updated` · `friend_added` 의 다른 사람 User 는 `email:""` (재설정 확인 값이자 '정확히 아는 사람만' 찾는 친구 추가 값이라 모두에게 공개하지 않는다). `username` 은 join 과 같은 로그인 아이디(이름·사내 계정·이메일). 그 계정에 비밀번호가 등록돼 있고 가입 이메일이 `email` 과 같으면(대소문자 무시) 새 비밀번호(4~64자)로 바꾸고 그 계정의 자동 로그인 토큰을 모두 폐기한 뒤 `password_reset_ok {username}` (연결은 로그인되지 않은 상태 그대로). 아이디가 없거나 이메일이 다르면 `error {req_type:"password_reset"}` "아이디 또는 가입한 이메일이 일치하지 않습니다." (계정이 있는지 드러내지 않는다) 이고 로그인 실패와 같은 횟수 제한(아이디 5번·IP 20번 → 5분)에 센다. 비밀번호를 등록한 적 없는 계정은 처음 사용 등록 안내 오류. 메일 발송 없이 가입 이메일로만 확인하므로, 메일 인증이 필요해지면 확인 코드 단계를 추가한다.
 - **그다음부터는 `join {username, password}`**: `username` 은 로그인 아이디로, 클라이언트는 사번을 보낸다. 사번(`employee_no`, 대소문자 무시)이 같은 사용자가 먼저이고, 없으면 사용자 이름(username), 그다음 대소문자 무시로 조직 `account`, `email` 과 같은 사용자로 로그인한다(1~120자. 사번 없이 등록한 예전 계정 호환). User 에 `employee_no`(없으면 "") 포함.
 - `password` 가 있으면: 비밀번호가 등록된 계정은 PBKDF2-SHA256(솔트) 해시와 비교해 틀리면 오류 "아이디 또는 비밀번호가 올바르지 않습니다." 비밀번호가 아직 없는 계정이나 없는 아이디는 오류 "처음 사용하는 아이디입니다. [처음 사용 등록]에서 소속 회사·이름·사번·이메일·비밀번호를 등록해 주세요." (로그인 실패 횟수에는 세지 않는다). 비밀번호는 4~64자, 아니면 오류 "비밀번호는 4~64자로 입력해 주세요."
 - `password` 가 없으면(구버전·테스트 클라이언트): 비밀번호가 없는 계정만 로그인된다(없는 아이디는 20자 이내로 게스트 생성). 비밀번호가 등록된 계정은 오류 "비밀번호를 입력해 주세요."
@@ -135,6 +138,7 @@ Todo    {todo_id:int, owner, title, due:"YYYY-MM-DD"|null, done:bool, created_at
 - 로그인 정보 저장/자동 로그인: `join` 에 `remember:true` 를 주고 비밀번호로 성공하면 welcome 에 `login_token`(무작위 32바이트, urlsafe) 을 넣는다. 서버는 토큰의 SHA-256 만 `login_tokens(token_hash, username, created_at)` 에 저장하고 30일 뒤 만료. 사용자당 최근 5개만 유지. `join {username, token}` 은 비밀번호 대신 토큰으로 로그인(토큰 주인과 아이디가 같아야 함). 틀리거나 만료되면 오류 "저장된 로그인 정보가 만료되었습니다. 비밀번호를 입력해 주세요." `login_token_revoke {token}` → 그 토큰 삭제 후 `login_token_revoked {}` (로그아웃).
 - 보안: 같은 아이디로 5번(IP 기준 20번) 틀리면 5분간 그 아이디/IP 의 join 을 "로그인 실패가 너무 많습니다. N분 뒤에 다시 시도해 주세요." 로 거절. 서버 옵션 `require_password`(배포용 `chat_server.py` 기본 켬, `--allow-passwordless` 로 끔)면 비밀번호·토큰 없는 join 은 "비밀번호를 입력해 주세요." 관리자 도구 `scripts/set_password.py <아이디> [--password P | --clear]` (변경 시 토큰 모두 폐기. `--clear` 하면 그 사람은 다시 [처음 사용 등록]을 한다).
 - 설정 파일: 클라이언트 설정은 welcome 의 실제 username 기준 파일(계정 아이디로 로그인해도 같은 파일)이며 임시 파일 → 교체로 저장, 바뀐 키만 합쳐 쓴다.
+- **간편 로그아웃 (2026-10-10):** 메인 창 왼쪽 아래 내 사진(사이드바)을 우클릭하면 메뉴 [이름(표시만) · 로그아웃]. 로그아웃은 확인 창 없이 바로 더보기 → 로그아웃과 같은 처리(`login_token_revoke` 로 토큰 폐기 + 저장된 로그인 삭제 + 로그인 창부터 다시)를 한다(메뉴를 고른 것이 확인). 더보기 · 트레이의 로그아웃은 그대로 확인 창을 띄운다.
 - 클라이언트 저장: `~/.kcs_messenger/saved_login.json` (권한 0600) `{login_id, token, auto_login, host, port}`. 비밀번호 원문은 어디에도 저장하지 않는다. 로그인 창의 [사번·비밀번호 저장] 이 켜져 있으면 다음 실행 때 아이디가 채워지고 비밀번호 칸은 '저장됨' 표시 → 그대로 로그인하면 토큰을 쓴다. [자동 로그인] 이면 로그인 창 없이 바로 토큰으로 로그인(실패하면 로그인 창 + 사유). 단, `app.py --no-auto-login`(런처가 창을 열 때 사용)이면 자동 로그인을 건너뛰고 로그인 창을 띄운다(아이디만 미리 채움). 더보기 → 로그아웃: 토큰 폐기 + 저장 정보 삭제 후 로그인 창으로 다시 시작.
 - 로그인 창 모양(macOS): 카카오톡 로그인 창처럼 회색 제목 표시줄 없이 네이비 배경이 창 맨 위(신호등 버튼 뒤)까지 이어진다 — `macos.unify_title_bar` (투명 제목 표시줄 · 제목 글자 숨김 · 전체 크기 내용), 내용은 신호등 높이(28px)만큼 내린다. 메인 창도 같다: 사이드바 네이비가 맨 위까지, 사이드바 오른쪽 열(조직도 · 목록 · 분할 화면 대화창)은 위 28px 띠를 각 헤더 색(대화창은 대화 배경 위 반투명 헤더색)으로 칠한다(`TitleBand`). 채팅방 별도 창도 같다: 헤더(대화 배경 위 반투명 헤더)가 맨 위까지, 헤더 위 여백 10px + 28px. 분할 화면(메인 창 안)에 들어가면 10px 로 되돌리고, 다시 별도 창으로 꺼내면(새 네이티브 창) 다시 적용한다. 배경 끌기(`setMovableByWindowBackground`)는 켜지 않는다 — 누른 채로 있으면 창 끌기로 잡혀 콤보 목록 등 팝업이 바로 닫힌다. 다른 OS 는 기본 창 그대로.
 - 클라이언트: 로그인 창은 [로그인](사번·비밀번호, 둘 다 있어야 버튼 활성)과 [처음 사용 등록](소속 회사 선택 — 열 때 서버에서 `org_companies` 로 받아 옴, 이름, 사번, 이메일, 비밀번호) 두 화면을 아래 링크로 오간다. 비밀번호 칸에는 입력값 보기(눈) 아이콘. [로그인] 화면 아래 [비밀번호 재설정] 링크 → 아이디 · 가입한 이메일 · 새 비밀번호 화면 (`net.reset_password` 로 짧게 접속해 password_reset) → 성공하면 로그인 화면으로 돌아와 아이디를 채우고 안내. join 오류가 '처음 사용 등록' 안내면 등록 화면으로 바꿔 입력한 아이디를 사번(이메일 형식이면 이메일, 사번 형식이 아니면 이름) 칸에 옮겨 준다. 등록에 성공하면 최근·저장 로그인 아이디는 사번이고, 자동 재연결은 같은 비밀번호로 join 한다. 최근 로그인 칩은 아이디만 채우고 비밀번호로 포커스를 옮긴다(비밀번호는 저장하지 않음). join 오류면 로그인 창을 다시 띄워 오류를 보여 준다. 자동 재연결은 메모리에 둔 같은 비밀번호로 다시 join 한다.
@@ -160,7 +164,7 @@ Todo    {todo_id:int, owner, title, due:"YYYY-MM-DD"|null, done:bool, created_at
 
 ### 4.3 그룹사 관리자 · 구성원 관리 (등록 · 조회 · 수정 · 삭제)
 - **관리 범위**: `users.admin_company`. 관리자(`is_admin`)이면서 `admin_company=""` → **그룹 관리자**(모든 계열사), 회사 이름 → **회사 관리자**(그 회사 구성원만). User 객체에 `admin_company` 포함. 회사 관리자는 자기 회사 구성원만 목록에 보이고 관리할 수 있으며, 다른 회사 사람을 대상으로 하면 "관리 범위(<회사>) 밖의 구성원입니다.". 관리자 지정·해제(`admin_set_admin`)와 전체 공지(`admin_notice`)는 그룹 관리자만 ("그룹 관리자만 할 수 있습니다."). `admin_set_admin {username, is_admin, company?}` 의 `company` 가 있으면 그 회사의 회사 관리자로 지정(회사 목록에 있어야 함), 없거나 ""면 그룹 관리자. `scripts/set_admin.py <아이디> [--company 회사]`.
-- **구성원 필드**: `username`(이름, 1~20자, `@`·제어 문자 불가, 등록 후 바꿀 수 없음), `company`(회사 목록 중), `department`, `title`, `account`(사내 계정), `employee_no`(사번, §4.1 규칙), `extension`, `mobile`, `email`. 문자열 각 60자(이메일 120자) 이내. 사번·사내 계정·이메일은 다른 구성원과 겹치면 안 된다(대소문자 무시) — "이미 다른 구성원이 쓰는 사번입니다." / "… 사내 계정입니다." / "… 이메일입니다.". 조직 경로(`org_path`)는 `[department]`(부서가 없으면 []).
+- **구성원 필드**: `username`(이름, 1~20자, `@`·제어 문자 불가, 등록 후 바꿀 수 없음), `company`(회사 목록 중), `department`, `title`, `account`(사내 계정), `employee_no`(사번, §4.1 규칙), `extension`, `mobile`, `email`. 문자열 각 60자(이메일 120자) 이내. 사번·사내 계정·이메일은 다른 구성원과 겹치면 안 된다(대소문자 무시) — "이미 다른 구성원이 쓰는 사번입니다." / "… 사내 계정입니다." / "… 이메일입니다.". 조직 경로(`org_path`)는 `[department]`(부서가 없으면 []). 선택 필드 `team`(60자, 2026-10-10)을 함께 보내면 `[department, team]`(팀이 빈 문자열이면 `[department]`) — 수정에서 `team` 없이 `department` 만 바꾸면 예전처럼 `[department]`. `admin_users` 항목에는 `team`(`org_path` 두 번째 단계, 없으면 "")도 준다.
 - **요청** (관리자만, 대상은 관리 범위 안):
 
 | 요청 | 필드 | 응답 |
@@ -171,8 +175,12 @@ Todo    {todo_id:int, owner, title, due:"YYYY-MM-DD"|null, done:bool, created_at
 | `admin_member_delete` | username | 자기 자신 불가 "자기 계정은 삭제할 수 없습니다." 소프트 삭제(`removed=1`, `disabled=1`, 토큰 폐기, 접속 중이면 `account_disabled` 후 끊음). 대화 기록은 남는다. 모두에게 `user_removed {username}` + `admin_done {action:"member_delete", username}` |
 | `admin_member_restore` | username | `removed=0`, `disabled=0` → `user_updated` + `admin_done {action:"member_restore", username}` |
 
+- **관리자 계정은 그룹 관리자만 (2026-10-11):** 회사 관리자는 같은 회사 소속이라도 다른 관리자(그룹 · 회사 관리자)를 대상으로 한 비밀번호 재설정 · 등록 초기화 · 사용 중지 · 수정 · 삭제를 할 수 없다 — "관리자 계정은 그룹 관리자만 관리할 수 있습니다." (자기 자신은 예외). 삭제된 구성원에게 `admin_set_disabled {disabled:false}` 는 "삭제한 구성원입니다. [복원]으로 되살려 주세요." — 삭제된 구성원은 `disabled` 값과 상관없이 로그인할 수 없다.
+
 - 삭제된 구성원은 일반 사용자 목록(welcome `users`, `all_users_list`, 조직도, 친구 찾기)에 나오지 않고 로그인할 수 없다(사용 중지와 같은 오류). 클라이언트는 `user_removed` 를 받으면 그 사람을 사용자 목록·조직도·친구 목록에서 뺀다.
 - 관리자가 등록·수정한 구성원은 `users.org_locked=1` 이 되어, 서버를 다시 켤 때 `org.json` 시드가 그 사람의 조직 정보(회사·부서·직함·계정·내선·휴대폰·조직 경로)를 덮어쓰지 않는다. 삭제한 구성원은 시드가 되살리지 않는다.
+- **서버 주소는 그룹 관리자만 (2026-10-10):** 로그인 창에는 서버 설정(주소 · 포트)이 없다. 접속 주소는 ① 명령줄 `--host`/`--port`(관리자 비상용) → ② 이 PC 의 `server.json`(`app_home()` 아래, `{host, port}`) → ③ 저장된 로그인의 주소 → ④ 기본 127.0.0.1:5555 순서로 정한다. `server.json` 은 **그룹 관리자**(`is_admin` 이고 `admin_company=""`, 예: `KCS관리자` / `kcs_administrator`)만 더보기 → **정보** 에서 고친다(주소 · 포트 칸 + [저장], 다음 로그인부터 적용). 정보 구역(회사 로고 · 버전 · 서버 주소)은 그룹 관리자에게만 보이고, 회사 관리자 · 일반 사용자에게는 구역째 숨긴다. 연결 실패 창에는 [다시 시도] [종료]만 있고 '관리자에게 문의' 안내를 보인다. 서버 프로토콜 바뀜 없음(클라이언트 PC 설정).
+- **조직도 편집 모드 (2026-10-10):** 관리자(예: `KCS관리자` / 사내 계정 `kcs_administrator`)로 로그인하면 조직도 탭 헤더에 연필 [편집 모드] 버튼이 보인다(관리자가 아니면 없음). 켜면 헤더 아래 '편집 모드' 안내 줄([끝내기] 포함)이 나오고 `admin_users` 를 받아 사번 · 이메일까지 채운다. 편집 모드에서는 구성원 행을 누르거나 두 번 누르면 채팅 대신 구성원 창(MemberDialog, 부서 아래 '팀' 칸 포함)이 열리고, [저장]하면 바뀐 필드만 `admin_member_update` 로 보낸다(부서나 팀이 바뀌면 `department` · `team` 을 함께). 관리 범위 밖(회사 관리자의 다른 회사 사람) · 봇은 열지 않는다. 관리자는 편집 모드가 아니어도 구성원 우클릭 → '정보 수정…' 으로 같은 창을 연다. 서버 오류는 알림 창으로 보여 준다.
 - 클라이언트: 계정 관리 창에 [구성원 등록…] [조회 · 수정…](행 두 번 클릭도) [삭제] [복원] 버튼. 구성원 창(MemberDialog)은 회사 콤보(회사 관리자는 자기 회사로 고정) + 필드 입력. 창 제목에 범위 표시 '관리자 · 계정 관리 (그룹 전체)' / '(케이씨에스)'.
 ### 4.4 조직도 그룹 (그룹 관리자, 2026-10-10)
 - 그룹 관리자가 회사와 상관없이 사람을 묶어 조직도에 보이는 그룹(예: 경영위원회, TF). 서버 DB `org_groups(group_id, name UNIQUE, description, members JSON, sort_order, created_by, created_at)` — `org.json` 과 별개라 서버를 다시 켜도 남는다.
@@ -200,6 +208,9 @@ Todo    {todo_id:int, owner, title, due:"YYYY-MM-DD"|null, done:bool, created_at
 server/kakao/__init__.py
 server/kakao/store.py     # SQLite(sqlite3) 영속 계층. Store(db_path). 스레드 안전(Lock).
 server/kakao/server.py    # KakaoServer(host, port, db_path) – start()/serve_in_thread()/stop()
+server/kakao/protocol.py  # ProtocolError · 필드 검사(_req_str 등) · parse_iso · 이메일/사번 정규식 (server 에서도 import 가능)
+server/kakao/admin_handlers.py  # AdminHandlers 믹스인: 관리자 · 구성원 · 조직도 그룹 · 파일 전송 보안 요청 (§4.2~4.4, §10.10)
+server/kakao/file_policy.py     # 파일 전송 보안 검사 (형태 · 확장자 · 이름, 내용 판별) (§10.10)
 server/chat/chat_server.py  # 기존 진입점 → KakaoServer 실행 (CLI: --host --port --db)
 ```
 - 기본 DB 경로: `<프로젝트>/server_data/kakao.db`
@@ -220,8 +231,12 @@ client/kakao/main_window.py   # MainWindow: 사이드바 + 친구/채팅/캘린�
 client/kakao/friends_tab.py   # FriendsTab
 client/kakao/chats_tab.py     # ChatsTab (+ 그룹 채팅 만들기 다이얼로그)
 client/kakao/chat_room.py     # ChatRoomWindow: 말풍선, 읽음수, 답장, 공감, 삭제, 공지, 투표, 검색, 서랍, 이모티콘, 파일, 예약
+client/kakao/room_base.py     # 채팅방 공용 바탕: _Dialog · _label · dialog_qss · 시간 표기 · icon_pixmap
+client/kakao/room_dialogs.py  # 채팅방 대화상자: 초대 · 투표 만들기 · 사진 보기 · 서랍 · 사다리 · 톡게시판 · 연락처 · 요약 (chat_room 에서도 import 가능)
+client/kakao/date_picker.py   # DatePickerCalendar: 날짜 칸 달력 팝업 ('2026년 10월' 머리글 · 오늘 고리 · 선택 동그라미 · 주말 색 · 다른 달 흐리게)
+client/kakao/file_guard.py    # 파일 전송 보안: 막힌 파일 승인 요청 창 · 그룹 관리자 정책/승인/예외 창 (§10.10)
 client/kakao/calendar_tab.py  # CalendarTab: 월간 달력 + 일정 목록 + 할 일
-client/kakao/event_dialog.py  # EventDialog: 일정 생성/수정
+client/kakao/event_dialog.py  # EventDialog: 일정 생성/수정. 제목은 필수 - 비운 채 [저장]하면 제목 칸 아래 "일정 제목을 입력해 주세요." + 빨간 테두리 + 포커스 (저장 버튼은 종료가 시작보다 빠를 때만 꺼진다). 날짜 · 시간 칸은 마우스 휠로 값이 바뀌지 않고(창이 스크롤된다, 콤보 · 숫자 칸은 포커스가 있을 때만 - `widgets.blocks_wheel`), 등록하면 캘린더가 그 날짜로 옮겨 가고 '일정을 등록했습니다 · 2026. 10. 12. (월)' 토스트
 client/kakao/more_tab.py      # MoreTab: 프로필 편집, 다크모드, 글자 크기
 ```
 
@@ -231,6 +246,7 @@ client/kakao/more_tab.py      # MoreTab: 프로필 편집, 다크모드, 글자 
 
 ### 7.1 첨부 파일 송수신
 - 최대 크기 **10MB**(디코딩 기준)로 상향. 이미지/파일 모두 상대방이 `attachment_get`으로 받아 저장 가능.
+- 보내는 파일은 그룹 관리자의 파일 전송 보안 정책(§10.10)으로 검사한다.
 - 클라이언트: 드래그&드롭, 클립보드 이미지 붙여넣기, 여러 파일 동시 선택 지원.
 
 ### 7.2 User 필드 추가
@@ -269,7 +285,7 @@ User += {avatar_id:int|null,            # 프로필 사진(attachment_id), 없�
 
 ### 7.4 상태(Presence) 표시 색
 online `#3DD16B` · away `#F5B400`(자리비움) · busy `#FF4B3E`(다른 용무 중) · meeting `#8E6CEF`(회의 중) · vacation `#1FA2B8`(휴가 중) · offline `#BDBDBD`
-클라이언트는 10분간 입력이 없으면 자동으로 away, 입력이 생기면 원래 상태로 복원한다(사용자가 직접 설정한 away/busy/meeting은 건드리지 않음).
+클라이언트는 10분간 입력이 없으면 자동으로 away, 입력이 생기면 원래 상태로 복원한다(사용자가 직접 설정한 away/busy/meeting은 건드리지 않음). 입력은 컴퓨터 전체 기준이다: KCS Talk 창 밖(다른 앱)에서 마우스를 움직여도 입력으로 세고, 자동 away 중이면 3초 안에 online 으로 돌아온다(`osenv.system_idle_seconds()` - macOS 는 마우스 입력만, Windows · Linux X11 은 마우스 · 키보드, 알 수 없으면 마우스 포인터 위치 변화). 앱 안의 키 입력도 입력이다.
 
 ### 7.5 배경화면(클라이언트 로컬)
 - 설정 `chat_wallpaper`: `null`(테마 기본) | `{"type":"color","value":"#RRGGBB"}` | `{"type":"gradient","value":["#..","#.."]}` | `{"type":"image","value":"<절대경로>"}`
@@ -293,6 +309,7 @@ online `#3DD16B` · away `#F5B400`(자리비움) · busy `#FF4B3E`(다른 용무
 - **카드 디자인 (2026-10-10, `OrgList`):** 연회색(`bg_alt`) 바닥 위에 덩어리마다 흰(`bg`) 카드(좌우 10px 여백, 모서리 10, `border` 테두리), 카드 사이 10px 간격. 카드 · 마우스 올림(`bg_hover`) · 선택(`bg_selected`) 둥근 바탕과 그룹사 계층선(그룹사 아이콘 타일 가운데에서 각 계열사로 ├ · 마지막 └)은 목록이 행 뒤에 그리고 행 위젯은 배경을 칠하지 않는다. 머리글 아이콘은 28px 둥근 타일(그룹사 · 내 회사는 네이비 옅은 바탕 + 네이비 아이콘, 나머지는 `bg_alt` + `text_sub`), 인원 · 곳 수는 알약. 모든 덩어리의 아이콘 타일은 같은 세로선(`TILE_X`)이다(점 모양 끌기 손잡이는 두지 않는다). 그 아래 구성원 사진 · 안내 문구는 머리글 글자 시작(`TITLE_X`)에서 시작한다(게스트 · KCS AI · 그룹). 끄는 카드(`DragGhost`)는 머리글을 흰 카드 위에 직접 그린다(`render`, 배경 없음 - macOS `grab()` 은 칠하지 않은 부분을 검게 채운다), 그림자도 그림 안에 직접.
 - 조직도 탭 덩어리 사이에는 구분 간격(`DividerRow`, 키 `('divider', n)`, 높이 10)을 넣는다: 지식봇 | 그룹사 | 그룹 하나하나 | 게스트(맨 위 제외). 봇만 있는 회사는 부서 단계 없이 'KCS AI 1명' 바로 아래 봇을 보이고, 조직도 그룹 앞에는 '그룹' 같은 구역 문구를 두지 않는다.
 - 조직도 탭 순서 (2026-10-10): **봇만 있는 회사(KCS AI 지식봇) 맨 위** → 접을 수 있는 **'그룹사 N곳' 머리글** 아래 한 단계 들여쓰기로 **지주사(`holding`)와 `companies[]` 를 모두 같은 단계**로(한국지주 → 계열사 13곳 순서, 지주사 단계 따로 없음, 부제목 '그룹사 N곳 · 구성원 M명'. 지식봇 · 그룹 · 게스트는 그룹사 머리글과 같은 바깥 단계) → '그룹'(§4.4 조직도 그룹) → 그 밖의 회사 → 게스트(맨 아래, 그대로).
+- **처음 펼침 상태 (2026-10-10):** 조직도는 **내가 속한 곳만 펼친다** — 내 회사(주소속, 없으면 게스트) · 내 조직 경로(주소속 + 겸직의 `org_path`) · 내가 구성원인 조직도 그룹. 다른 회사 · KCS AI · 남의 그룹은 접혀 있고, 내 회사 안에서는 내 경로 옆 조직(같은 상위 아래 다른 부서 · 팀)만 접는다(접힌 곳 안쪽은 원래 기본대로라 열면 바로 보인다). 내 회사가 그룹사에 없으면 '그룹사' 머리글도 접는다. 항목마다 처음 볼 때 한 번만 정하고(`OrgTab._apply_default_collapse`), 그 뒤로는 사용자가 접고 편 상태를 유지한다. 검색 중에는 모두 펼친다.
 - `companies[]` 의 그룹웨어 체계 회사(`depth:1`, `group_name`, `root_members`, `count_excludes_root`)는 조직도 탭에서 그룹사 아래 자기 순서 자리에 `회사 [👤N] › 직속 구성원 + 부서(접힘)` 로 그린다(법인명 단계 없음). `hidden_members:[username]`(관리자 계정)은 조직도·조직도 검색에서 숨기되, 그 계정 본인으로 로그인하면 숨기지 않고 전체를 보여 준다(클라이언트 표시만, 서버 User 목록은 그대로).
 - `include_demo_users:false`면 기본 데모 사용자는 시드하지 않고 기존 DB의 데모 사용자는 company='게스트'로 내린다(AI 비서는 유지).
 
@@ -302,7 +319,7 @@ online `#3DD16B` · away `#F5B400`(자리비움) · busy `#FF4B3E`(다른 용무
 | 메시지 수정 | 요청 `edit {msg_id, content}` — 본인·kind=text·삭제 안 됨·**24시간 이내**만. Message에 `edited:bool`, `edited_at:ISO|null`. 성공 시 멤버에게 `msg_updated`. 수정된 내용으로 검색/RAG 색인 갱신 |
 | 삭제 문구 | 삭제된 메시지 content = **"메시지가 삭제되었습니다"** (누가 지웠는지 표시하지 않음) |
 | 조용히 보내기 | `send`에 `silent:true` → Message `silent:true`. 받는 클라이언트는 소리/트레이 알림을 띄우지 않지만 안 읽은 수에는 반영 |
-| URL 미리보기 | text 메시지에 http(s) URL이 있으면 서버가 비동기로 첫 URL의 og:title/og:description/og:site_name(없으면 <title>)을 가져와 Message `link_preview:{url,title,description,site}`를 채우고 `msg_updated`. 3초 타임아웃, 256KB까지만 읽음. 서버 옵션 `link_preview=True`(환경변수 `KCS_LINK_PREVIEW=off`로 끔) |
+| URL 미리보기 | text 메시지에 http(s) URL이 있으면 서버가 비동기로 첫 URL의 og:title/og:description/og:site_name(없으면 <title>)을 가져와 Message `link_preview:{url,title,description,site}`를 채우고 `msg_updated`. 3초 타임아웃, 256KB까지만 읽음. 서버 자신(127.x · ::1) · 링크 로컬(169.254.x) · 0.0.0.0 · 멀티캐스트 주소는 가져오지 않는다(리다이렉트 주소도 다시 검사, 사내망 10.x · 192.168.x 는 허용). 서버 옵션 `link_preview=True`(환경변수 `KCS_LINK_PREVIEW=off`로 끔) |
 | 오늘의 브리핑(선톡) | 서버 옵션 `daily_briefing`(기본 False, 실행 파일은 True). 사용자가 그날 처음 접속하면 AI 비서 1:1 방에 오늘 일정·응답 필요한 일정·마감 할 일·안 읽은 메시지 수 요약을 봇이 먼저 보냄(하루 1회, users.last_briefing) |
 | 채팅방 폴더 | 클라이언트 로컬 설정 `chat_folders:[{name, room_ids}]`. 기본 폴더: 전체 / 안읽음 / 즐겨찾기(고정된 방 + 즐겨찾기 친구와의 1:1). 안읽음 폴더에서 **읽지 않고 미리보기** |
 | 일정 변경 알림 | 클라이언트: 이미 알고 있는 일정이 다른 사람에 의해 바뀌면(제목/시간/장소) 트레이 알림 "일정이 변경되었습니다" |
@@ -371,7 +388,13 @@ online `#3DD16B` · away `#F5B400`(자리비움) · busy `#FF4B3E`(다른 용무
 ### 8.12 친구 등록 (전화번호 · 이메일)
 - User 에 `email` 추가. `profile_update` 에 `mobile`, `email` (형식 검증) 추가.
 - `friend_add {query}` → 전화번호(숫자만 비교, +82→0) 또는 이메일(대소문자 무시)이 **정확히** 일치하는 사용자를 내 친구로 등록 → `friend_added {user, already}` + `friend_list {friends}`. 없으면 오류 "해당 전화번호·이메일로 가입한 사용자가 없습니다." (부분 일치·목록 조회 없음)
+- `friend_add {username}` (2026-10-11): 프로필 창의 [친구 추가] — 보고 있는 사람을 연락처 없이 바로 등록(다른 사람의 이메일은 오지 않으므로). 없는 · 삭제된 사용자 · 봇이면 "사용자를 찾을 수 없습니다."
 - `friend_remove {username}` / `friend_list` → `friend_list {friends}`. welcome 에 `friends`.
+
+### 8.13 대직자 (2026-10-11)
+- User 에 `deputies`(대직자 username 목록, 순서 유지, 없으면 []) 추가. 내가 자리에 없을 때 대신 업무를 맡는 사람.
+- `profile_update` 에 `deputies:[username]` → 중복 제거 후 저장 → `user_updated`. 최대 10명. 나 자신 · 봇 · 없는(삭제된) 사용자는 오류 "대직자로 지정할 수 없는 사용자입니다: {이름}". 빈 목록이면 지정 해제.
+- 클라이언트: 프로필 편집 '대직자' 칸에서 이름 · 부서 · 팀 · 직함으로 검색 → 한 명이면 바로 추가, 여럿이면 체크 목록 팝업에서 골라 추가, 칩의 ✕ 로 빼기. 프로필 보기에 "대직자 김철수 책임 외 n명".
 
 ---
 
@@ -484,3 +507,30 @@ online `#3DD16B` · away `#F5B400`(자리비움) · busy `#FF4B3E`(다른 용무
 - 아이콘 버튼·체크박스 클릭 영역 24px 이상, 아이콘만 있는 버튼은 접근성 이름 또는 툴팁 필수.
 - 메인 탭 5개·채팅방·모든 대화상자에서 100%·200% 글자 크기 모두 잘린 글자 없음 — 줄바꿈이 필요한 안내·조직명·삭제 문구는 `wordWrap`, 공지 말줄임 폭은 실제 위젯 크기로 계산.
 - 메인 창 최소 크기는 레이아웃이 정한다(숫자 고정 금지) — 200%에서 창이 내용보다 좁아지지 않는다.
+
+### 10.10 파일 전송 보안 (외부 유출 방지, 2026-10-11)
+메시지 첨부(`send` 의 image · file · voice, 예약 · 전달 포함)를 서버가 **그룹 관리자 정책**으로 검사한다. 판단은 언제나 서버(`server/kakao/file_policy.py`)가 하고, 클라이언트는 이름 · 확장자만 미리 봐서 올리기 전에 알려 준다.
+
+- **정책** (`org_settings.file_policy`, 저장한 적 없으면 기본값): `{enabled, blocked_types:[형태], blocked_extensions:[확장자(점 없이 소문자, 100개)], blocked_names:[파일 이름 규칙(60자, 100개)]}`. 기본값은 켜짐 + 형태 `executable` · `database` · `credential` + 이름 `*대외비*` `*기밀*` `*confidential*`.
+- **형태** (`categories`): `executable` 실행 파일 · 스크립트 / `archive` 압축 / `database` 데이터베이스 · 백업 · 메일함 / `credential` 인증서 · 암호 키 / `source` 소스 코드 / `document` 문서 / `image` / `video` / `audio`. 확장자와 **파일 내용의 첫 바이트**(MZ · ELF · Mach-O · `#!` · PK · 7z · RAR · gzip · SQLite · `-----BEGIN` · OLE · PDF · 이미지) 둘 다로 판별한다 — `보고서.txt` 로 이름만 바꾼 실행 파일도 '실행 파일'(상세: "확장자는 .txt 이지만 실제 내용은 실행 파일 · 스크립트 형태예요"). docx · xlsx · pptx · hwpx 등은 zip 틀이어도 문서(안에 `[Content_Types].xml` · `mimetype` · `META-INF/manifest.xml` 이 있어야 문서, 없으면 이름만 바꾼 압축 파일), jar · apk 는 실행 파일. zip 은 안에 든 파일 이름(최대 2000개)도 같은 규칙으로 본다.
+- **파일 이름 규칙**: `*` `?` 가 있으면 이름 전체와 맞춰 보고(fnmatch), 없으면 이름에 들어 있으면 막는다. 대소문자 무시.
+- 검사 순서: 파일 이름 → 확장자 → 형태(확장자) → 형태(내용) → zip 안 파일. 위반 = `{rule:"name"|"extension"|"type", value, detail, category}`.
+- **막히면** `send` 는 오류 대신 요청자에게 `file_blocked {room_id, kind, name, size, client_tmp_id, rule, value, detail, category, sha256, message}` 를 보내고 저장 · 전달하지 않는다.
+- **예외** (`file_exceptions`): 그룹 관리자가 **특정인**에게 **특정 파일**(sha256 지문) 또는 **파일 이름 규칙**을 기간(1~365일) 동안 풀어 준다. 그 사람이 보내는 파일이 예외와 맞으면 정책 위반이어도 보낸다(서버 로그에 남김). 파일 이름 예외는 확장자와 실제 내용이 다른(막힌 형태를 숨긴) 파일에는 쓰지 않는다.
+- **승인 요청**: 막힌 사람은 사유를 적어 `file_send_request {room_id, kind(image|file), content?, attachment, reason(1~300자)}` → 파일은 서버에 보관(전송 안 됨) → 요청자 `file_request_ok {request}`, 접속 중인 그룹 관리자 모두 `file_request_new {request}`. 막히지 않는 파일이면 바로 전송. 한 사람의 대기 요청은 20건까지. 비밀채팅방 불가.
+  - Request: `{request_id, username, room_id, room_label, kind, content, attachment_id, name, size, sha256, rule, detail, reason, status:"pending"|"approved"|"rejected", decided_by, decided_at, note, msg_id, created_at}`
+  - `file_request_list` → `file_requests {requests}` (내 요청, 최신순 100건)
+- **그룹 관리자 요청** (회사 관리자 · 일반 사용자는 "그룹 관리자만 할 수 있습니다." / "관리자만 사용할 수 있습니다."):
+
+| 요청 | 필드 | 응답 |
+|---|---|---|
+| `admin_file_policy_set` | policy | 검사 후 저장 → 모두에게 `file_policy {policy}` + `admin_done {action:"file_policy"}` |
+| `admin_file_requests` | status? | `admin_file_requests {requests}` (최신순 200건) |
+| `admin_file_request_decide` | request_id, approve(bool), note?(300자), allow_days?(0~365) | 대기 중인 것만("이미 처리된 요청입니다."). **승인하면 그때 요청한 사람 이름으로 그 방에 전송**(요청자가 방을 나갔으면 오류), `allow_days>0` 이면 같은 파일(sha256)을 그 사람에게 그 기간 허용하는 예외도 만든다. 반려하면 보관 파일을 지운다. 요청자 + 그룹 관리자에게 `file_request_updated {request}` + `admin_done {action:"file_request_decide", username, request_id, approved}` |
+| `admin_file_exceptions` | – | `admin_file_exceptions {exceptions:[{exception_id, username, sha256, file_name, pattern, expires_at, note, request_id, created_by, created_at}]}` (만료 안 된 것) |
+| `admin_file_exception_add` | username, days(1~365), pattern? 또는 sha256?, file_name?, note? | `admin_done {action:"file_exception_add", username, exception}` |
+| `admin_file_exception_delete` | exception_id | `admin_done {action:"file_exception_delete", exception_id}` |
+
+- 그룹 관리자는 보관 중인 요청 파일을 `attachment_get` 으로 받아 내용을 확인할 수 있다.
+- welcome 에 `file_policy` (정책 + `categories:[{key, label, extensions}]`).
+- 클라이언트: 막히면 '보낼 수 없는 파일이에요' 창(파일 이름 · 막힌 이유 · 크기, 사유 입력 → [승인 요청]). 결과는 알림 · 토스트. 관리자 → 계정 관리 → [파일 전송 보안…](그룹 관리자만): [정책](켜기, 형태 체크, 확장자, 파일 이름) · [승인 요청](대기 중만 보기, 사유, 메모, '같은 파일 다시 허용' 일수, [파일 받아 확인…] [반려] [승인하고 보내기]) · [예외](사람 · 파일 이름 · 기간 추가, 삭제).

@@ -684,8 +684,8 @@ class DesignSystemTest(unittest.TestCase):
         from client.kakao import theme
         for variant in theme.BUTTON_VARIANTS:
             qss = theme.button_qss('x', variant)
-            for state in (':hover', ':pressed', ':focus', ':disabled'):
-                self.assertIn(f'QPushButton#x{state}', qss, (variant, state))
+            for state in (':hover', ':pressed', '[focusVisible="true"]:focus', ':disabled'):
+                self.assertIn(f'QPushButton#x{state}', qss, (variant, state))   # 포커스 테두리는 키보드로 옮겼을 때만
         with self.assertRaises(ValueError):
             theme.button_qss('x', 'fancy')
 

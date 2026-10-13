@@ -172,8 +172,14 @@ class EventDialogTest(unittest.TestCase):
     def test_create_personal_event(self):
         d = self.today + timedelta(days=10)
         dlg = EventDialog(self.state, default_date=d)
-        self.assertFalse(dlg.save_btn.isEnabled())   # 제목 없음
+        self.assertTrue(dlg.save_btn.isEnabled())    # 제목이 없어도 누를 수 있고, 누르면 이유를 알려 준다
+        dlg.location_edit.setText('부산 한국자산관리공사')
+        self.assertFalse(dlg.accept())
+        self.assertIsNone(self.conn.last('event_create'))
+        self.assertTrue(dlg.title_error.isVisibleTo(dlg))
+        self.assertTrue(dlg.title_edit.property('invalid'))
         dlg.title_edit.setText('  저녁 약속 ')
+        self.assertFalse(dlg.title_error.isVisibleTo(dlg))                     # 쓰면 바로 사라진다
         self.assertTrue(dlg.save_btn.isEnabled())
         start = datetime(d.year, d.month, d.day, 19, 0)
         dlg.start_edit.setDateTime(_qdt(start))
@@ -329,3 +335,50 @@ class EventDetailDialogTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class WheelAndCreatedEventTest(unittest.TestCase):
+    """휠로 날짜가 바뀌어 다른 해에 등록되고 달력에 안 보이던 문제 (2026-10-11)"""
+
+    def setUp(self):
+        app()
+        from client.kakao import main_window
+        self.state, self.conn = make_demo_state()
+        main_window.apply_app_theme(self.state.settings)
+
+    def wheel(self, widget):
+        from PyQt5.QtCore import QPoint, QPointF
+        from PyQt5.QtGui import QWheelEvent
+        from PyQt5.QtWidgets import QApplication
+        event = QWheelEvent(QPointF(5, 5), widget.mapToGlobal(QPoint(5, 5)), QPoint(0, 0), QPoint(0, 120),
+                            Qt.NoButton, Qt.NoModifier, Qt.ScrollUpdate, False)
+        QApplication.sendEvent(widget, event)
+
+    def test_wheel_over_date_does_not_change_year(self):
+        dlg = EventDialog(self.state)
+        self.addCleanup(dlg.close)
+        dlg.show()
+        before = dlg.start_edit.dateTime()
+        self.wheel(dlg.start_edit)
+        self.assertEqual(dlg.start_edit.dateTime(), before)                    # 2027년이 되지 않는다
+        before_index = dlg.remind_combo.currentIndex()
+        self.wheel(dlg.remind_combo)                                           # 포커스 없는 콤보도 그대로
+        self.assertEqual(dlg.remind_combo.currentIndex(), before_index)
+
+    def test_created_event_moves_calendar_to_its_date(self):
+        from unittest import mock
+        from client.kakao import event_dialog
+        tab = CalendarTab(self.state)
+        self.addCleanup(tab.close)
+        target = datetime(date.today().year + 1, 3, 5, 9, 0)
+
+        def fake_exec(dlg):
+            dlg.title_edit.setText('내년 일정')
+            dlg.start_edit.setDateTime(_qdt(target))
+            dlg.end_edit.setDateTime(_qdt(target + timedelta(hours=1)))
+            dlg.accept()
+            return event_dialog.QDialog.Accepted
+        with mock.patch.object(event_dialog.EventDialog, 'exec_', fake_exec):
+            tab.open_new_event()
+        self.assertEqual((tab.year, tab.month, tab.selected), (target.year, 3, target.date()))
+        self.assertEqual(self.conn.last('event_create')['start'], target.isoformat(timespec='seconds'))

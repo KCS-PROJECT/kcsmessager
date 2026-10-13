@@ -5,6 +5,7 @@ pyobjc 없이 ctypes 만 쓴다.
 - set_app_name: main bundle 의 CFBundleName 을 덮어쓴다 (메뉴 막대). QApplication 을 만들기 전에 부른다.
 - set_dock_name: LaunchServices 표시 이름을 바꾼다 (Dock 툴팁 · 앱 전환기). QApplication 을 만든 뒤에 부른다.
 - unify_title_bar: 창의 제목 표시줄을 투명하게 해 본문 배경이 창 맨 위(신호등 버튼 뒤)까지 이어지게 한다.
+- match_title_bar: 대화상자 제목 표시줄을 본문 색 · 앱 테마(밝게/어둡게)에 맞춘다.
   Dock 은 실행 파일 묶음(Python.app)의 이름을 LaunchServices 에서 읽으므로 CFBundleName 만으로는 'Python' 이 남는다.
 macOS 가 아니거나 실패하면 아무것도 하지 않는다.
 """
@@ -110,6 +111,47 @@ def unify_title_bar(widget):
         call(window, 'setTitleVisibility:', NS_TITLE_HIDDEN, argtypes=(ctypes.c_long,))
         # setMovableByWindowBackground 는 켜지 않는다: 누른 채로 있으면 창 끌기로 잡혀 콤보 목록 등 팝업이 바로 닫힌다.
         # 창은 투명해진 제목 표시줄 줄(위 28px)을 끌어 옮길 수 있다
+        return True
+    except (OSError, AttributeError, TypeError, ValueError):
+        return False
+
+
+def match_title_bar(widget, color, dark):
+    """macOS 대화상자: 제목 표시줄을 본문과 같은 색으로. 시스템이 다크 모드면 앱이 밝은 테마여도 제목 표시줄만
+    검게 그려지던 것을 막는다 - 창 모양(Aqua/DarkAqua)을 앱 테마에 맞추고, 투명 제목 표시줄 뒤 창 배경을 본문 색
+    color('#RRGGBB')로 칠한다. 내용은 제목 표시줄 아래 그대로(제목 글자 · 신호등 버튼 유지). 바꿨으면 True"""
+    if sys.platform != 'darwin' or _qt_platform() != 'cocoa':
+        return False
+    objc_path = ctypes.util.find_library('objc')
+    if not objc_path or not ctypes.util.find_library('AppKit'):
+        return False
+    try:
+        objc = ctypes.cdll.LoadLibrary(objc_path)
+        ctypes.cdll.LoadLibrary(ctypes.util.find_library('AppKit'))
+        objc.objc_getClass.restype = ctypes.c_void_p
+        objc.sel_registerName.restype = ctypes.c_void_p
+        send = objc.objc_msgSend
+
+        def call(obj, selector, *args, argtypes=(), restype=ctypes.c_void_p):
+            send.restype = restype
+            send.argtypes = [ctypes.c_void_p, ctypes.c_void_p, *argtypes]
+            return send(obj, objc.sel_registerName(selector.encode()), *args)
+
+        window = call(int(widget.winId()), 'window')
+        if not window:
+            return False
+        name = call(objc.objc_getClass(b'NSString'), 'stringWithUTF8String:',
+                    b'NSAppearanceNameDarkAqua' if dark else b'NSAppearanceNameAqua', argtypes=(ctypes.c_char_p,))
+        appearance = call(objc.objc_getClass(b'NSAppearance'), 'appearanceNamed:', name, argtypes=(ctypes.c_void_p,))
+        if appearance:
+            call(window, 'setAppearance:', appearance, argtypes=(ctypes.c_void_p,))
+        hexes = color.lstrip('#')
+        r, g, b = (int(hexes[i:i + 2], 16) / 255.0 for i in (0, 2, 4))
+        ns_color = call(objc.objc_getClass(b'NSColor'), 'colorWithSRGBRed:green:blue:alpha:', r, g, b, 1.0,
+                        argtypes=(ctypes.c_double,) * 4)
+        call(window, 'setTitlebarAppearsTransparent:', True, argtypes=(ctypes.c_bool,))
+        if ns_color:
+            call(window, 'setBackgroundColor:', ns_color, argtypes=(ctypes.c_void_p,))
         return True
     except (OSError, AttributeError, TypeError, ValueError):
         return False

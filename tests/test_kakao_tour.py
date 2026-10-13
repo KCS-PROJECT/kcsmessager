@@ -207,7 +207,7 @@ class TalkDrawerTests(TourTestBase):
         mw = FakeMainWindow()
         dlg = self.keep(TalkDrawerDialog(self.state, main_window=mw))
         self.push_results()
-        with mock.patch('client.kakao.drawer.QDesktopServices.openUrl') as open_url:
+        with mock.patch('PyQt5.QtGui.QDesktopServices.openUrl') as open_url:
             dlg.links.itemWidget(dlg.links.item(0)).open_button.click()
         self.assertEqual(open_url.call_args[0][0].toString(), 'https://example.com/docs')
         dlg.files.itemDoubleClicked.emit(dlg.files.item(0))
@@ -417,6 +417,133 @@ class DemoSeedTests(unittest.TestCase):
         # 모든 항목은 결과(ok/실패 사유)를 갖는다 - 예외로 중단되지 않음
         self.assertTrue(all(isinstance(c.detail, str) for c in checks))
         self.assertGreaterEqual(len(checks), 20)
+
+
+class FeatureTourDesignTests(TourTestBase):
+    """2026-10-10 디자인 다듬기: 체크 · 해보기 세로 가운데, 제목 뒤 딱지, 검증 결과 HTML, macOS 파란 번짐 없음"""
+    MD = ('# KCS Talk 기능 검증 결과\n\n- 일시: 2026-10-10 18:35:58\n- 명령: `python3 scripts/verify_features.py`\n\n'
+          '| 영역 | 기능 | 결과 | 테스트 |\n|---|---|---|---|\n'
+          '| 친구·프로필 | 친구 목록 · 검색 | ✅ PASS | 5/5 |\n| 친구·프로필 | 내 프로필 편집 | ❌ FAIL | 8/9 |\n'
+          '| 채팅방 | 1:1 채팅 | ✅ PASS | 2/2 |\n\n## 자동 테스트가 없는 기능\n\n채팅방 이름 변경 — `demo.py`\n')
+
+    def setUp(self):
+        super().setUp()
+        self._vpath = tempfile.mkdtemp()
+        patcher = mock.patch.object(feature_tour, 'VERIFICATION_PATH', os.path.join(self._vpath, 'none.md'))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(shutil.rmtree, self._vpath, True)
+        self.mw = FakeMainWindow()
+
+    def make(self):
+        return self.keep(FeatureTourDialog(self.state, self.state.settings, self.mw))
+
+    def shown(self):
+        dlg = self.make()
+        dlg.resize(620, 760)
+        dlg.show()
+        QApplication.processEvents()
+        return dlg
+
+    def test_check_and_try_button_centered_and_badges_after_title(self):
+        dlg = self.shown()
+        row = dlg.rows['friends']
+        mid = row.height() / 2
+        for widget in (row.check, row.try_button):
+            self.assertLessEqual(abs(widget.geometry().center().y() - mid), 2, widget)
+        self.assertTrue(row._title_fits)                                       # 짧은 제목: 딱지가 바로 뒤
+        self.assertLess(row.since_label.x() - row.name_label.geometry().right(), 16)
+        long_row = dlg.rows['presence']                                        # 제목이 긴 '상태 표시 (…)'
+        dlg.resize(440, 760)
+        QApplication.processEvents()
+        self.assertFalse(long_row._title_fits)                                 # 넘치면 제목 줄바꿈 + 딱지는 오른쪽 끝
+        self.assertTrue(long_row.name_label.wordWrap())
+        self.assertGreater(long_row.name_label.width(), long_row._top.geometry().width() // 2)
+        dlg.resize(900, 760)
+        QApplication.processEvents()
+        self.assertTrue(long_row._title_fits)                                  # 넓히면 다시 한 줄 + 바로 뒤 딱지
+
+    def test_description_line_height_is_fixed(self):
+        row = self.make().rows['friend_add']
+        self.assertIn('line-height:', row.desc_label.text())
+        self.assertIn('👤', row.desc_label.text())
+        row.set_desc('<b>태그</b> & 기호')
+        self.assertIn('&lt;b&gt;', row.desc_label.text())                     # 설명 글자는 이스케이프
+
+    def test_verification_html_is_styled_table(self):
+        html = feature_tour.verification_html(self.MD)
+        self.assertIn('2 / 3', html)                                           # 요약 숫자
+        self.assertIn('실패 1', html)
+        self.assertEqual(html.count('>친구·프로필<'), 1)                        # 영역은 묶음 머리 한 번만
+        self.assertIn('✓ 통과', html)
+        self.assertIn('✗ 실패', html)
+        self.assertNotIn('✅', html)
+        self.assertIn('<code>python3 scripts/verify_features.py</code>', html)
+        self.assertIn('자동 테스트가 없는 기능', html)
+        self.assertIn(theme.c('success_text'), html)
+        with open(os.path.join(self._vpath, 'v.md'), 'w', encoding='utf-8') as f:
+            f.write(self.MD)
+        with mock.patch.object(feature_tour, 'VERIFICATION_PATH', os.path.join(self._vpath, 'v.md')):
+            dlg = self.make()
+        self.assertIn('2 / 3', dlg.verify_view.toHtml())
+        self.assertEqual(dlg.rows['friends'].verdict_label.text(), '검증 ✓')
+
+    def test_one_bottom_bar_and_reload_only_on_verify_tab(self):
+        dlg = self.shown()
+        self.assertFalse(dlg.reload_button.isVisible())
+        self.assertLess(dlg.close_button.width(), dlg.width() // 3)            # [닫기]가 가로로 늘어나지 않는다
+        dlg.tabs.setCurrentIndex(1)
+        self.assertTrue(dlg.reload_button.isVisible())
+        self.assertEqual(dlg.reload_button.y(), dlg.close_button.y())          # 같은 줄
+
+    def test_no_mac_focus_halo_or_default_button(self):
+        dlg = self.make()
+        from PyQt5.QtWidgets import QPushButton
+        for button in dlg.findChildren(QPushButton):
+            self.assertFalse(button.autoDefault(), button.text())
+            self.assertFalse(button.isDefault())
+            self.assertFalse(button.testAttribute(Qt.WA_MacShowFocusRect))
+        row = dlg.rows['friends']
+        self.assertEqual(row.try_button.focusPolicy(), Qt.TabFocus)           # 클릭으로는 포커스를 가져가지 않음
+        self.assertEqual(row.check.focusPolicy(), Qt.TabFocus)
+        self.assertIn('QPushButton#tryButton[focusVisible="true"]:focus', dlg.styleSheet())   # 키보드 포커스만 테두리
+
+
+class FocusVisibleTests(unittest.TestCase):
+    """더보기 [보기 ›] 를 마우스로 누르거나 창을 닫고 돌아와도 포커스 테두리가 남지 않는다 (웹의 :focus-visible)"""
+
+    def setUp(self):
+        app()
+
+    def focus_in(self, button, reason):
+        from PyQt5.QtGui import QFocusEvent
+        from PyQt5.QtCore import QEvent
+        QApplication.sendEvent(button, QFocusEvent(QEvent.FocusIn, reason))
+
+    def test_only_keyboard_focus_is_visible(self):
+        from PyQt5.QtCore import QEvent
+        from PyQt5.QtGui import QFocusEvent
+        from PyQt5.QtWidgets import QPushButton
+        from client.kakao.widgets import install_focus_visible, FOCUS_VISIBLE
+        install_focus_visible(QApplication.instance())
+        install_focus_visible(QApplication.instance())                        # 두 번 불러도 하나만
+        button = QPushButton('보기  ›')
+        self.addCleanup(button.deleteLater)
+        for reason in (Qt.MouseFocusReason, Qt.ActiveWindowFocusReason, Qt.PopupFocusReason, Qt.OtherFocusReason):
+            self.focus_in(button, reason)
+            self.assertFalse(button.property(FOCUS_VISIBLE), reason)
+        for reason in (Qt.TabFocusReason, Qt.BacktabFocusReason, Qt.ShortcutFocusReason):
+            self.focus_in(button, reason)
+            self.assertTrue(button.property(FOCUS_VISIBLE), reason)
+            QApplication.sendEvent(button, QFocusEvent(QEvent.FocusOut, Qt.MouseFocusReason))
+            self.assertFalse(button.property(FOCUS_VISIBLE))
+
+    def test_focus_border_rules_need_keyboard_focus(self):
+        qss = theme.base_qss()
+        self.assertNotIn('QPushButton:focus', qss)
+        self.assertNotIn('QPushButton[flat="true"]:focus', qss)
+        self.assertIn('QPushButton[focusVisible="true"]:focus', qss)
+        self.assertIn('[focusVisible="true"]:focus', theme.button_qss('x', 'outline'))
 
 
 if __name__ == '__main__':

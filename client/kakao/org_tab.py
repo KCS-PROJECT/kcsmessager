@@ -12,7 +12,8 @@ import re
 from PyQt5.QtCore import Qt, QRectF, QPointF, QPoint, QEvent, QTimer, QSize, pyqtSignal
 from PyQt5.QtGui import QPainter, QPainterPath, QPen, QPixmap, QIcon, QColor, QFontMetrics, QRegion
 from PyQt5.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QLabel, QMenu, QSizePolicy, QDialog, QLineEdit,
-                             QListWidget, QListWidgetItem, QDialogButtonBox, QMessageBox, QApplication)
+                             QListWidget, QListWidgetItem, QDialogButtonBox, QMessageBox, QApplication, QFrame,
+                             QPushButton)
 
 from client.kakao import theme
 from client.kakao.widgets import Avatar
@@ -462,6 +463,22 @@ class TreeNodeRow(QWidget):
         row.addStretch(1)
 
 
+def concurrent_tag(user):
+    """겸직 표시: 이름 옆 작은 알약 (연한 네이비 바탕 + 네이비 글자). 마우스를 올리면 주소속"""
+    tag = QLabel('겸직')
+    tag.setObjectName('concurrentTag')
+    tag.setAlignment(Qt.AlignCenter)
+    tag.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+    ink = theme.c('link') if theme.is_dark() else theme.c('yellow')   # 대비 4.5:1 이상 (다크: 네이비 2.8:1 이라 밝은 파랑)
+    tag.setStyleSheet(f"QLabel#concurrentTag {{ color: {ink}; background: {theme.c('bg_selected')};"
+                      f" border: none; border-radius: {theme.px(9)}px; padding: 2px 8px;"
+                      f" font-size: {theme.fs('caption')}px; font-weight: bold; }}")
+    home = ' › '.join(user.get('org_path') or []) or user.get('department') or ''
+    tag.setToolTip(f"겸직 · 주소속: {home}" if home else '겸직')
+    tag.setAccessibleName('겸직')
+    return tag
+
+
 class CompactMemberRow(QWidget):
     """아바타 + '이름 직위' 한 줄 (그룹웨어 조직도 구성원 행)"""
 
@@ -480,12 +497,15 @@ class CompactMemberRow(QWidget):
         title = concurrent_title if concurrent_title is not None else (user.get('title') or '')
         name = state.display_name(username) + (' (나)' if username == state.me else '')
         self.name = ElidedLabel(f'{name} {title}'.strip(), 'emphasis', 'text')
-        row.addWidget(self.name, 1)
+        self.tag = None
         if concurrent_title is not None:
-            tag = QLabel('겸직')
-            tag.setStyleSheet(f"color: {theme.c('yellow')}; border: 1px solid {theme.c('yellow')};"
-                              f" border-radius: 4px; padding: 0px 4px; font-size: {theme.fs('micro')}px;")
-            row.addWidget(tag)
+            # '엄태식 실장 [겸직]' - 이름 바로 옆 작은 알약 (예전: 줄 끝에 줄 높이만큼 늘어난 테두리 상자)
+            row.addWidget(self.name, 0, Qt.AlignVCenter)
+            self.tag = concurrent_tag(user)
+            row.addWidget(self.tag, 0, Qt.AlignVCenter)
+            row.addStretch(1)
+        else:
+            row.addWidget(self.name, 1)
         tips = [x for x in (' › '.join(user.get('org_path') or []),
                             f"내선 {user['extension']}" if user.get('extension') else '',
                             user.get('mobile') or '', user.get('account') or '') if x]
@@ -584,11 +604,10 @@ class MemberRow(QWidget):
             self.title.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
             self.title.setFixedWidth(self.title.sizeHint().width())
             top.addWidget(self.title)
+        self.tag = None
         if concurrent_title is not None:
-            tag = QLabel('겸직')
-            tag.setStyleSheet(f"color: {theme.c('yellow')}; border: 1px solid {theme.c('yellow')};"
-                              f" border-radius: 4px; padding: 0px 4px; font-size: {theme.fs('micro')}px;")
-            top.addWidget(tag)
+            self.tag = concurrent_tag(user)
+            top.addWidget(self.tag, 0, Qt.AlignVCenter)
         presence = presence_of(state, username)
         if not user.get('is_bot') and presence in ('away', 'busy', 'meeting', 'vacation'):
             label = QLabel(PRESENCE_LABELS[presence])
@@ -702,7 +721,9 @@ class OrgTab(QWidget):
         self.expanded_depts = set()     # 그룹웨어 화면에서 펼친 부서 (기본: 모두 접힘)
         self.collapsed_teams = set()    # 그룹웨어 화면에서 접은 팀 (dept, team) (기본: 펼침)
         self.collapsed_groups = set()   # 접은 조직도 그룹 (group_id)
-        self._drag = None               # 그룹 끌기 {'gid', 'start', 'active', 'target'}
+        self._defaulted = set()         # 기본 접힘(내 소속만 펼침)을 이미 정한 항목 - 그 뒤로는 사용자가 접고 편다
+        self._defaulted_for = None
+        self._drag = None              # 그룹 끌기 {'gid', 'start', 'active', 'target'}
         self._skip_click = False        # 끌기를 마친 놓기는 접기/펼치기로 치지 않는다
         self.bot_companies = set()      # 봇만 있는 회사(KCS AI) - 맨 위에
         self.tree = {}
@@ -716,14 +737,29 @@ class OrgTab(QWidget):
         self.group_button = self.header.add_button('plus', '그룹 만들기')     # 그룹 관리자만 (명세 §4.4)
         self.group_button.setAccessibleName('그룹 만들기')
         self.group_button.setVisible(False)
+        self.edit_button = self.header.add_button('edit', '편집 모드 (구성원 정보 수정)')   # 관리자만
+        self.edit_button.setAccessibleName('편집 모드')
+        self.edit_button.setCheckable(True)
+        self.edit_button.setVisible(False)
+        self.edit_mode = False
         layout.addWidget(self.header)
-        self.search_edit = make_search_edit('이름, 직위, 직책, 직급, 부서, 전화, 아이디')
+        # 편집 모드 안내 줄: 켜져 있는 동안 헤더 아래에
+        self.edit_bar = QFrame()
+        self.edit_bar.setObjectName('orgEditBar')
+        bar = QHBoxLayout(self.edit_bar)
+        bar.setContentsMargins(16, 6, 10, 6)
+        self.edit_label = QLabel('편집 모드 · 구성원을 누르면 정보를 고칠 수 있습니다')
+        self.edit_label.setWordWrap(True)
+        bar.addWidget(self.edit_label, 1)
+        self.edit_done_button = QPushButton('끝내기')
+        self.edit_done_button.setProperty('flat', True)
+        self.edit_done_button.setCursor(Qt.PointingHandCursor)
+        bar.addWidget(self.edit_done_button, 0, Qt.AlignVCenter)
+        self.edit_bar.hide()
+        layout.addWidget(self.edit_bar)
+        self.search_edit = self.header.add_search(make_search_edit('이름, 직위, 직책, 직급, 부서, 전화, 아이디'))
         self.search_edit.setAccessibleName('조직도 검색')
         self.search_edit.show()
-        wrap = QHBoxLayout()
-        wrap.setContentsMargins(16, 0, 16, 8)
-        wrap.addWidget(self.search_edit)
-        layout.addLayout(wrap)
         self.list = OrgList()
         self.list.setViewportMargins(0, 8, 0, 8)
         layout.addWidget(self.list, 1)
@@ -741,6 +777,8 @@ class OrgTab(QWidget):
 
         self.search_button.clicked.connect(lambda: self.search_edit.setFocus())
         self.group_button.clicked.connect(lambda: self.create_group())
+        self.edit_button.clicked.connect(lambda: self.set_edit_mode(not self.edit_mode))
+        self.edit_done_button.clicked.connect(lambda: self.set_edit_mode(False))
         self.search_edit.textChanged.connect(lambda _t: self.refresh())
         self.list.row_activated.connect(self._activate)
         self.list.itemClicked.connect(self._clicked)
@@ -882,7 +920,12 @@ class OrgTab(QWidget):
         query = self.search_edit.text().strip()
         self.tree = self.build_tree(query)
         self.group_button.setVisible(self._can_manage_groups())
+        self.edit_button.setVisible(self.state.is_admin())
+        if self.edit_mode and not self.state.is_admin():   # 관리자 권한이 빠지면 편집 모드도 끝
+            self.set_edit_mode(False)
         meta = self.company_meta()
+        if not query:
+            self._apply_default_collapse(meta)
         people = {u for units in self.tree.values() for ms in units.values() for u, _ in ms}
         if meta:
             self.header.set_subtitle(f'그룹사 {len(meta)}곳 · 구성원 {len(people)}명')
@@ -928,6 +971,57 @@ class OrgTab(QWidget):
             else:
                 self._render_company(payload, self.tree[payload], {}, query, mine, grip=movable)
         self._finish(scroll)
+
+    def my_paths(self):
+        """내 소속 {회사: {조직 경로 튜플}} - 주소속 + 겸직"""
+        me = self.state.user(self.state.me)
+        company = (me.get('company') or GUEST_COMPANY).strip() or GUEST_COMPANY
+        paths = {tuple(me.get('org_path') or ([me['department']] if me.get('department') else []))}
+        paths |= {tuple(x.get('org_path') or []) for x in me.get('concurrent') or []}
+        return {company: {p for p in paths if p} | {()}}
+
+    def _apply_default_collapse(self, meta):
+        """처음 보는 회사 · 조직 · 그룹은 내가 속한 곳만 펼치고 나머지는 접는다.
+        한 번 정한 뒤로는 사용자가 접고 편 상태를 그대로 둔다"""
+        if self._defaulted_for != self.state.me:
+            self._defaulted_for = self.state.me
+            self._defaulted.clear()
+        mine = self.my_paths()
+
+        def first(key):
+            if key in self._defaulted:
+                return False
+            self._defaulted.add(key)
+            return True
+
+        if first(('section', '그룹사')) and not any(c in meta for c in mine):
+            self.collapsed_nodes.add(('section', '그룹사'))
+        for company, units in self.tree.items():
+            my_units = mine.get(company)
+            if first(('company', company)) and my_units is None:
+                self.collapsed.add(company)
+            if my_units is None:
+                continue                       # 다른 회사는 회사째 접혀 있다 - 펼치면 안은 그대로 보인다
+            # 내 경로 위의 조직은 펼치고, 그 옆 조직(같은 상위 아래 다른 조직)만 접는다
+            on_path = {p[:d] for p in my_units for d in range(0, len(p) + 1)}
+            groupware = meta.get(company, {}).get('depth') == 1
+            for path in units:
+                for d in range(1, len(path) + 1):
+                    node = path[:d]
+                    if not first(('unit', company, node)):
+                        continue
+                    if node in on_path:
+                        if groupware and d == 1:   # 그룹웨어 화면의 부서는 기본이 접힘이라 내 부서를 펼친다
+                            self.expanded_depts.add(node[0])
+                    elif node[:-1] in on_path:
+                        if not groupware:
+                            self.collapsed_nodes.add(('unit', company, node))
+                        elif d == 2:               # 내 부서의 다른 팀
+                            self.collapsed_teams.add(node)
+        for group in self.org_groups():
+            gid = group.get('group_id')
+            if first(('org_group', gid)) and self.state.me not in (group.get('members') or []):
+                self.collapsed_groups.add(gid)
 
     def lower_blocks(self, rest=None, query=''):
         """아래쪽 덩어리 [(token, 'group'|'company', 내용)] - 서버 order 순서, order 에 없는 것은 기본 순서로 뒤에"""
@@ -1407,7 +1501,9 @@ class OrgTab(QWidget):
         data = item.data(Qt.UserRole)
         if not data:
             return
-        if data[0] == 'company':
+        if data[0] == 'member' and self.edit_mode:
+            self.edit_member(data[1])
+        elif data[0] == 'company':
             self.toggle_company(data[1])
         elif data == ('section', '그룹사'):
             self.toggle_node(('section', '그룹사'))
@@ -1429,7 +1525,35 @@ class OrgTab(QWidget):
     def _activate(self, item):
         data = item.data(Qt.UserRole)
         if data and data[0] == 'member':
-            self.state.open_direct(data[1])
+            if self.edit_mode:
+                self.edit_member(data[1])
+            else:
+                self.state.open_direct(data[1])
+
+    # ---- 편집 모드 (관리자가 조직도에서 구성원 정보를 바로 고친다, 명세 §4.3) ----
+    def set_edit_mode(self, on):
+        on = bool(on) and self.state.is_admin()
+        self.edit_mode = on
+        self.edit_button.setChecked(on)
+        self.edit_button.refresh_icon(theme.c('yellow') if on else None)
+        self.edit_button.setToolTip('편집 모드 끝내기' if on else '편집 모드 (구성원 정보 수정)')
+        self.edit_bar.setVisible(on)
+        if on:
+            self.state.admin_request_users()           # 사번 · 이메일 · 팀까지 채우려고
+
+    def can_edit(self, username):
+        from client.kakao.admin import can_edit_member
+        return can_edit_member(self.state, username)
+
+    def edit_member(self, username, exec_=True):
+        """구성원 정보 창(편집 모드). 권한 · 범위 밖이면 None"""
+        from client.kakao.admin import edit_member_info
+        return edit_member_info(self.state, username, self.window(), exec_=exec_)
+
+    def start_edit(self, username, exec_=True):
+        """우클릭 → 정보 수정: 편집 모드를 켜고 그 사람 창을 연다"""
+        self.set_edit_mode(True)
+        return self.edit_member(username, exec_=exec_)
 
     def context_menu_for(self, data):
         token = self.token_of(data)
@@ -1456,6 +1580,12 @@ class OrgTab(QWidget):
             menu.addAction('채팅방에 초대…', lambda: InviteToRoomDialog(self.state, name, self.window()).exec_())
         menu.addAction('프로필 보기', lambda: self.show_profile(name))
         menu.addAction('연락처 보내기…', lambda: self.send_contact_to_room(name))
+        if self.can_edit(name):
+            from client.kakao.admin import EDIT_ACTION_TEXT
+            menu.addSeparator()
+            menu.addAction(EDIT_ACTION_TEXT, lambda: self.start_edit(name))
+        if self.edit_mode:
+            menu.addAction('편집 모드 끝내기', lambda: self.set_edit_mode(False))
         return menu
 
     def send_contact_to_room(self, username, room_id=None):
@@ -1486,6 +1616,12 @@ class OrgTab(QWidget):
         self.header.apply_theme()
         self.search_edit.setStyleSheet(search_box_qss())
         self.empty_label.setStyleSheet(f"color: {theme.c('text_hint')}; font-size: {theme.fs('body')}px;")
+        self.edit_bar.setStyleSheet(
+            f"QFrame#orgEditBar {{ background: {theme.c('bg_selected')}; border-top: 1px solid {theme.c('border')}; }}"
+            f" QLabel {{ color: {theme.c('text')}; font-size: {theme.fs('meta')}px; background: transparent; }}"
+            f" QPushButton {{ color: {theme.c('text')}; font-size: {theme.fs('meta')}px; font-weight: bold; }}")
+        if self.edit_mode:
+            self.edit_button.refresh_icon(theme.c('yellow'))
         self.setAttribute(Qt.WA_StyledBackground, True)
         self.setStyleSheet(f"OrgTab {{ background: {theme.c('bg')}; }}")
         # 카드 · 강조는 OrgList 가 그린다 - 기본 항목 바탕(행 전체 폭 회색)은 끈다

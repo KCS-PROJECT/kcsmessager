@@ -7,10 +7,9 @@
 """
 
 import copy
-import os
 from datetime import datetime, date, timedelta
 
-from PyQt5.QtCore import Qt, QObject, QSize, QRectF, QPoint, QPointF, pyqtSignal, pyqtSlot, QTimer
+from PyQt5.QtCore import Qt, QObject, QSize, QRectF, QPoint, pyqtSignal, pyqtSlot, QTimer
 from PyQt5.QtGui import QPainter, QFontMetrics, QColor, QPen, QPixmap, QIcon, QPainterPath
 from PyQt5.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QListWidget, QListWidgetItem,
                              QLineEdit, QLabel, QMenu, QMessageBox, QDialog, QPushButton,
@@ -19,7 +18,8 @@ from PyQt5.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QListWidget, QLi
 
 from client.kakao import theme
 from client.kakao.state import parse_dt, BOT_NAME
-from client.kakao.widgets import IconButton, Avatar, Badge, make_icon, avatar_pixmap
+from client.kakao.widgets import (IconButton, Avatar, Badge, make_icon, avatar_pixmap, underline_tabs_qss,
+                                  check_box_qss)
 
 
 # ================================================================ 공용 위젯
@@ -225,6 +225,15 @@ class TabHeader(QWidget):
         self._row.addWidget(btn, 0, Qt.AlignVCenter)
         return btn
 
+    def add_search(self, edit):
+        """검색 칸을 헤더 안(부제목 아래 · 구분선 위)에 둔다. 헤더 밖 바로 아래에 두면 칸 윗변이 구분선에
+        붙어 겹쳐 보였다 (2026-10-10). 칸을 숨기면 띄움까지 함께 사라진다"""
+        wrap = QHBoxLayout()
+        wrap.setContentsMargins(0, theme.sp('s') + 2, 0, 0)
+        wrap.addWidget(edit)
+        self.layout().addLayout(wrap)
+        return edit
+
     def set_subtitle(self, text):
         """제목 아래 요약 (예: '친구 8명 · 온라인 4명'). 빈 문자열이면 숨김"""
         self.subtitle.setText(text or '')
@@ -251,8 +260,10 @@ def make_search_edit(placeholder):
 
 
 def search_box_qss():
-    return (f"QLineEdit {{ background: {theme.c('bg_alt')}; border: none; border-radius: 16px;"
-            f" padding: 7px 14px; font-size: {theme.fs('body')}px; }}")
+    # 둥근 모서리(16)가 칸 높이의 절반을 넘으면 Qt 는 모서리를 아예 둥글게 그리지 않는다 → 높이를 34px 이상으로
+    return (f"QLineEdit {{ background: {theme.c('bg_alt')}; border: 1px solid transparent; border-radius: 16px;"
+            f" padding: 7px 14px; min-height: 18px; font-size: {theme.fs('body')}px; }}"
+            f" QLineEdit:focus {{ border: 1px solid {theme.c('yellow')}; background: {theme.c('input_bg')}; }}")
 
 
 def icon_label(name, color_key, size=14):
@@ -824,19 +835,6 @@ class OpenBadge(QWidget):
         p.drawText(r, Qt.AlignCenter, self.TEXT)
 
 
-_CHECK_IMAGES = {}
-
-
-def check_mark_image(color):
-    """체크박스 체크 표시 이미지 경로 (QSS image: url(...)용, 색상별로 한 번만 만든다)"""
-    if color not in _CHECK_IMAGES:
-        import tempfile
-        path = os.path.join(tempfile.gettempdir(), f"kcs_check_{color.strip('#')}.png")
-        make_icon('check', color, 14).pixmap(28, 28).save(path, 'PNG')
-        _CHECK_IMAGES[color] = path.replace(os.sep, '/')
-    return _CHECK_IMAGES[color]
-
-
 def panel_dialog_qss():
     """오픈채팅·톡서랍·기능 둘러보기 다이얼로그 공용 스타일 (라이트/다크 테마 반영)"""
     c = theme.c
@@ -863,20 +861,12 @@ def panel_dialog_qss():
         QPushButton#primary {{ background: {c('yellow')}; color: {c('on_accent')}; border: none; font-weight: bold; }}
         QPushButton#primary:hover {{ background: {c('yellow_dark')}; }}
         QPushButton#primary:disabled {{ background: {c('bg_selected')}; color: {c('text_hint')}; }}
-        QTabWidget::pane {{ border: none; border-top: 1px solid {c('border')}; }}
-        QTabBar::tab {{ background: transparent; color: {c('text_sub')}; padding: 8px 18px; border: none;
-            font-size: {theme.fs('body')}px; }}
-        QTabBar::tab:selected {{ color: {c('text')}; border-bottom: 2px solid {c('yellow')}; font-weight: bold; }}
+        {underline_tabs_qss()}
         QListWidget {{ background: {c('bg')}; color: {c('text')}; border: none; outline: 0; }}
         QListWidget::item {{ padding: 4px; border-radius: 6px; }}
         QListWidget::item:selected {{ background: {c('bg_selected')}; color: {c('text')}; }}
         QScrollArea {{ background: {c('bg')}; border: none; }}
-        QCheckBox {{ color: {c('text')}; }}
-        QCheckBox::indicator {{ width: 16px; height: 16px; border-radius: 4px; border: 1.5px solid {c('text_hint')};
-            background: {c('bg')}; }}
-        QCheckBox::indicator:hover {{ border-color: {c('yellow')}; }}
-        QCheckBox::indicator:checked {{ background: {c('yellow')}; border-color: {c('yellow')};
-            image: url({check_mark_image(c('on_accent'))}); }}
+        {check_box_qss()}
         QTextBrowser {{ background: {c('bg')}; color: {c('text')}; border: none; }}
         {theme.scrollbar_qss()}
     """
@@ -1154,7 +1144,7 @@ class ChatsTab(QWidget):
 
         self.search_edit = make_search_edit('채팅방 이름, 참여자 검색')
         search_wrap = QHBoxLayout()
-        search_wrap.setContentsMargins(16, 0, 16, 8)
+        search_wrap.setContentsMargins(16, theme.sp('s'), 16, theme.sp('s'))   # 폴더 줄과 붙지 않게
         search_wrap.addWidget(self.search_edit)
         layout.addLayout(search_wrap)
 

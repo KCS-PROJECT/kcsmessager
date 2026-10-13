@@ -11,6 +11,7 @@
 기능 목록(FEATURES)은 scripts/verify_features.py 의 기능 이름과 공유한다.
 """
 
+import html
 import importlib
 import os
 import re
@@ -35,8 +36,8 @@ _k = osenv.shortcut_text   # 단축키 표기: macOS ⌘⇧, 그 밖 Ctrl+Shift
 FEATURES = [
     # ---- 친구·프로필 (명세 §1, §7.2, §8.3, §8.5, §8.6)
     ('friends', '친구·프로필', '친구 목록 · 검색', '친구 탭에서 온라인 여부와 상태메시지를 보고, 🔍로 이름을 검색합니다.', 'v1', ('tab', 'friends')),
-    ('profile_edit', '친구·프로필', '내 프로필 편집', '프로필 사진·이름·상태메시지를 바꿉니다. 친구 탭 맨 위 내 프로필을 누르세요.', 'v2', ('profile_edit',)),
-    ('presence', '친구·프로필', '상태 표시 (온라인·자리비움·다른 용무 중·회의 중·휴가 중)', '내 상태를 직접 고르면 모두에게 색 점으로 보입니다. 10분간 입력이 없으면 자동으로 자리비움이 됩니다. 휴가 중은 접속하지 않아도 조직도·친구 목록에 보입니다.', 'v2', ('presence',)),
+    ('profile_edit', '친구·프로필', '내 프로필 편집', '프로필 사진·이름·상태메시지·대직자를 바꿉니다(맨 위에 내 사번). 대직자는 이름·부서·팀으로 검색해 여럿이면 체크해서 추가합니다. 친구 탭 맨 위 내 프로필을 누르세요.', 'v2', ('profile_edit',)),
+    ('presence', '친구·프로필', '상태 표시 (온라인·자리비움·다른 용무 중·회의 중·휴가 중)', '내 상태를 직접 고르면 모두에게 색 점으로 보입니다. 10분간 마우스를 움직이지 않으면 자동으로 자리비움이 되고, 다른 앱에서라도 움직이면 다시 온라인이 됩니다. 휴가 중은 접속하지 않아도 조직도·친구 목록에 보입니다.', 'v2', ('presence',)),
     ('friend_add', '친구·프로필', '친구 추가 (전화번호 · 이메일)', '친구 탭 위 👤+ 버튼 → 상대가 프로필에 등록한 휴대폰 번호나 이메일을 정확히 입력하면 친구로 추가됩니다. 내 번호·이메일은 프로필 편집에서 등록.', 'v3',
      ('ext_dialog', 'friends_tab', 'AddFriendDialog', '친구 탭 오른쪽 위 👤+ 버튼을 누르세요.')),
     ('favorites', '친구·프로필', '즐겨찾기 친구', '친구를 우클릭 → 즐겨찾기 추가. 즐겨찾기 섹션과 채팅 \'즐겨찾기\' 폴더에 모입니다.', 'v1', ('tab', 'friends', '친구를 우클릭해 즐겨찾기에 추가해 보세요.')),
@@ -167,6 +168,8 @@ FEATURES = [
      ('tab', 'more', '다음 로그인부터 아이디와 비밀번호를 입력합니다.')),
     ('admin', '설정·브랜드', '그룹사 관리자 (구성원 등록 · 조회 · 수정 · 삭제)', '관리자로 로그인하면 더보기 → 관리자 → 계정 관리. 그룹 관리자(모든 계열사)와 회사 관리자(자기 회사만)가 구성원을 등록·조회·수정·삭제·복원하고, 비밀번호 재설정, 등록 초기화, 사용 중지(퇴사자: 로그인 차단 + 접속 즉시 끊김)를 합니다. 관리자 지정과 전체 공지는 그룹 관리자만. 권한·범위는 서버가 요청마다 검사합니다.', 'v4',
      ('tab', 'more', '관리자에게만 보이는 더보기 → 관리자 줄')),
+    ('file_security', '설정·브랜드', '파일 전송 보안 (외부 유출 방지 · 승인 요청)', '그룹 관리자가 정한 형태(실행 파일 · 압축 · DB · 인증서 등)·확장자·파일 이름의 첨부는 보낼 수 없습니다. 확장자만 바꾼 파일도 내용으로 잡아냅니다. 꼭 필요하면 사유를 적어 승인을 요청하고, 관리자가 파일을 확인해 승인하면 그때 대화방으로 전송됩니다. 관리자는 특정인에게 특정 파일을 기간을 정해 풀어 줄 수 있습니다. 더보기 → 관리자 → 계정 관리 → [파일 전송 보안…]', 'v5',
+     ('tab', 'more', '그룹 관리자: 더보기 → 관리자 → 계정 관리 → 파일 전송 보안')),
     ('unread_blink', '설정·브랜드', '안 읽은 메시지 아이콘 깜박임', '안 읽은 메시지가 남아 있는 동안 트레이 아이콘과 Dock(작업 표시줄) 아이콘이 계속 깜박이고, 다 읽으면 멈춥니다. 알림 끈 방은 제외. 더보기 → 안 읽은 메시지 아이콘 깜박임에서 끌 수 있습니다.', 'v4',
      ('tab', 'more')),
     ('feature_tour', '설정·브랜드', '기능 둘러보기 · 데모 · 검증', '지금 이 창. python3 scripts/demo.py 로 데모 데이터와 클라이언트를, scripts/verify_features.py 로 기능별 테스트 결과를 만듭니다.', 'v3', ('verification',)),
@@ -196,6 +199,82 @@ def load_verification(path=None):
     return text, status
 
 
+def _inline(text):
+    """마크다운 한 줄의 `코드` · **굵게** 를 HTML 로 (나머지는 이스케이프)"""
+    out = html.escape(text)
+    out = re.sub(r'`([^`]+)`', lambda m: f'<code>{m.group(1)}</code>', out)
+    return re.sub(r'\*\*([^*]+)\*\*', r'<b>\1</b>', out)
+
+
+def verification_html(md):
+    """검증 결과 마크다운 → 대화 상자 폭에 맞춘 HTML.
+    QTextBrowser.setMarkdown 은 제목이 크고 표가 이중 테두리 · 좁은 칸이라 깨져 보여서 직접 그린다:
+    요약 숫자 → 영역별 묶음 표(기능 | 결과 | 테스트, 결과는 색 글자) → 그 밖의 절"""
+    c = theme.c
+    meta, rows, sections, title = [], [], [], ''
+    for line in md.splitlines():
+        line = line.rstrip()
+        if line.startswith('# '):
+            title = line[2:].strip()
+        elif line.startswith('## '):
+            sections.append([line[3:].strip(), []])
+        elif sections:
+            if line.strip():
+                sections[-1][1].append(line.strip())
+        elif line.startswith('- '):
+            meta.append(line[2:].strip())
+        elif line.startswith('|') and not re.fullmatch(r'\|[\s|:-]+\|?', line):
+            cells = [x.strip() for x in line.strip().strip('|').split('|')]
+            if len(cells) >= 4 and cells[0] != '영역':
+                rows.append(cells[:4])
+    passed = sum(1 for r in rows if 'PASS' in r[2])
+    failed = len(rows) - passed
+    fs = theme.fs
+    parts = [f'<div style="font-size:{fs("emphasis")}px; font-weight:bold; color:{c("text")};">'
+             f'{html.escape(title or "기능 검증 결과")}</div>']
+    if rows:
+        tone = c('success_text') if not failed else c('danger_text')
+        parts.append(f'<p style="margin:6px 0 2px 0;"><span style="font-size:{fs("headline")}px; font-weight:bold;'
+                     f' color:{tone};">{passed} / {len(rows)}</span>'
+                     f'<span style="color:{c("text_sub")};">&nbsp; 기능 통과'
+                     f'{f" · 실패 {failed}" if failed else ""}</span></p>')
+    for item in meta:
+        key, sep, value = item.partition(':')
+        text = (f'<span style="color:{c("text_hint")};">{html.escape(key)}</span>&nbsp; {_inline(value.strip())}'
+                if sep else _inline(item))
+        parts.append(f'<div style="color:{c("text_sub")}; font-size:{fs("meta")}px; margin:1px 0;">{text}</div>')
+    if rows:
+        cell = f'padding:6px 8px; border-bottom:1px solid {c("border")};'
+        table = [f'<table width="100%" cellspacing="0" cellpadding="0" style="margin-top:12px; border-collapse:collapse;'
+                 f' font-size:{fs("meta")}px;">',
+                 f'<tr style="background:{c("bg_alt")}; color:{c("text_sub")};">'
+                 f'<th align="left" style="{cell}">기능</th><th align="center" style="{cell}" width="64">결과</th>'
+                 f'<th align="right" style="{cell}" width="64">테스트</th></tr>']
+        group = None
+        for area, name, result, tests in rows:
+            if area != group:
+                group = area
+                count = sum(1 for r in rows if r[0] == area)
+                table.append(f'<tr><td colspan="3" style="padding:12px 8px 4px 8px; font-weight:bold;'
+                             f' color:{c("text")}; border-bottom:1px solid {c("border")};">{html.escape(area)}'
+                             f'<span style="color:{c("text_hint")}; font-weight:normal;">&nbsp; {count}</span></td></tr>')
+            ok = 'PASS' in result
+            verdict = (f'<span style="color:{c("success_text")}; font-weight:bold;">✓ 통과</span>' if ok else
+                       f'<span style="color:{c("danger_text")}; font-weight:bold;">✗ 실패</span>')
+            table.append(f'<tr><td style="{cell} color:{c("text")};">{_inline(name)}</td>'
+                         f'<td align="center" style="{cell}">{verdict}</td>'
+                         f'<td align="right" style="{cell} color:{c("text_sub")};">{html.escape(tests)}</td></tr>')
+        table.append('</table>')
+        parts.append(''.join(table))
+    for heading, body in sections:
+        parts.append(f'<div style="margin-top:16px; font-size:{fs("body")}px; font-weight:bold; color:{c("text")};">'
+                     f'{html.escape(heading)}</div>')
+        for line in body:
+            parts.append(f'<div style="color:{c("text_sub")}; font-size:{fs("meta")}px; margin-top:4px;">'
+                         f'{_inline(line[2:] if line.startswith("- ") else line)}</div>')
+    return ''.join(parts)
+
+
 # ================================================================ 행 위젯
 class FeatureRow(QFrame):
     try_clicked = pyqtSignal(str)
@@ -207,41 +286,78 @@ class FeatureRow(QFrame):
         self.key, self.name, self.desc = key, name, desc
         self.setObjectName('featureRow')
         row = QHBoxLayout(self)
-        row.setContentsMargins(10, 8, 10, 8)
-        row.setSpacing(10)
+        row.setContentsMargins(theme.sp('m'), theme.sp('m'), theme.sp('m'), theme.sp('m'))
+        row.setSpacing(theme.sp('m'))
         self.check = QCheckBox()
         self.check.setChecked(checked)
         self.check.setToolTip('해 본 기능 표시')
+        self.check.setAccessibleName(f'{name} 해 봄')
         self.check.setMinimumSize(24, 24)   # 클릭 영역 24px 이상 (WCAG 2.5.8)
-        row.addWidget(self.check, 0, Qt.AlignTop)
+        self.check.setFocusPolicy(Qt.TabFocus)
+        row.addWidget(self.check, 0, Qt.AlignVCenter)   # 체크 · 해보기 모두 카드 세로 가운데
         col = QVBoxLayout()
-        col.setSpacing(2)
+        col.setSpacing(theme.sp('xs'))
+        # 제목 바로 뒤에 딱지(기본 · v2 · 검증) - 제목 길이와 상관없이 같은 자리에서 읽힌다
         top = QHBoxLayout()
-        top.setSpacing(6)
+        top.setSpacing(theme.sp('xs') + 2)
         self.name_label = QLabel(name)
         self.name_label.setObjectName('featureName')
         self.name_label.setWordWrap(True)
-        top.addWidget(self.name_label, 1)
+        top.addWidget(self.name_label, 0, Qt.AlignVCenter)
         self.since_label = QLabel(SINCE_LABELS.get(since, since))
         self.since_label.setObjectName('since_' + since)
-        top.addWidget(self.since_label, 0, Qt.AlignTop)
+        top.addWidget(self.since_label, 0, Qt.AlignVCenter)
         self.verdict_label = QLabel({'PASS': '검증 ✓', 'FAIL': '검증 ✗'}.get(verdict, ''))
         self.verdict_label.setObjectName('verdictPass' if verdict == 'PASS' else 'verdictFail')
         self.verdict_label.setVisible(bool(verdict))
-        top.addWidget(self.verdict_label, 0, Qt.AlignTop)
+        top.addWidget(self.verdict_label, 0, Qt.AlignVCenter)
+        top.addStretch(1)
+        self._top = top
+        self._title_fits = None
         col.addLayout(top)
-        self.desc_label = QLabel(desc)
+        self.desc_label = QLabel()
         self.desc_label.setObjectName('featureDesc')
         self.desc_label.setWordWrap(True)
+        self.desc_label.setTextFormat(Qt.RichText)
         self.desc_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.set_desc(desc)
         col.addWidget(self.desc_label)
         row.addLayout(col, 1)
         self.try_button = QPushButton('해보기')
-        self.try_button.setObjectName('primary')
+        self.try_button.setObjectName('tryButton')
+        self.try_button.setAccessibleName(f'{name} 해보기')
         self.try_button.setCursor(Qt.PointingHandCursor)
+        # 마우스로 누를 때는 포커스를 가져가지 않는다 (macOS 파란 번짐 테두리 · 기본 단추 강조 없이). Tab 으로는 간다
+        self.try_button.setAutoDefault(False)
+        self.try_button.setFocusPolicy(Qt.TabFocus)
         row.addWidget(self.try_button, 0, Qt.AlignVCenter)
         self.try_button.clicked.connect(lambda: self.try_clicked.emit(self.key))
         self.check.toggled.connect(lambda on: self.check_changed.emit(self.key, on))
+
+    def _fit_title(self):
+        """제목이 한 줄에 들어가면 딱지를 제목 바로 뒤에, 넘치면 제목을 줄바꿈하고 딱지는 오른쪽 끝에"""
+        avail = self._top.geometry().width()
+        if avail <= 0:
+            return
+        badges = [w for w in (self.since_label, self.verdict_label) if not w.isHidden()]
+        need = (self.name_label.fontMetrics().horizontalAdvance(self.name) + 4
+                + sum(w.sizeHint().width() + self._top.spacing() for w in badges))
+        fits = need <= avail
+        if fits == self._title_fits:
+            return
+        self._title_fits = fits
+        self.name_label.setWordWrap(not fits)
+        self._top.setStretch(0, 0 if fits else 1)
+        self._top.setStretch(3, 1 if fits else 0)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._fit_title()
+
+    def set_desc(self, desc):
+        """설명: 줄 높이를 고정해 이모지(🔍 · 🎁 등)가 든 줄도 다른 줄과 같은 간격으로"""
+        line = round(theme.fs('meta') * 1.55)
+        self.desc_label.setText(f'<p style="margin:0; line-height:{line}px">{html.escape(desc)}</p>')
 
     def matches(self, query, group=''):
         q = query.lower()
@@ -347,22 +463,28 @@ class FeatureTourDialog(QDialog):
         vcol.setContentsMargins(0, 10, 0, 0)
         self.verify_view = QTextBrowser()
         self.verify_view.setOpenExternalLinks(True)
+        self.verify_view.setFrameShape(QFrame.NoFrame)
+        self.verify_view.document().setDocumentMargin(theme.sp('s'))
         vcol.addWidget(self.verify_view, 1)
-        vrow = QHBoxLayout()
+        self.tabs.addTab(vpage, '검증 결과')
+
+        # 아래 단추 줄 하나: (검증 결과 탭일 때) 파일 안내 · [다시 읽기]  ……  [닫기]
+        bottom = QHBoxLayout()
+        bottom.setSpacing(theme.sp('s'))
         self.verify_hint = QLabel('')
         self.verify_hint.setObjectName('panelHint')
         self.verify_hint.setWordWrap(True)
-        vrow.addWidget(self.verify_hint, 1)
+        bottom.addWidget(self.verify_hint, 1)
+        bottom.addStretch(0)                       # 안내가 숨으면 [닫기]가 늘어나지 않게 빈칸이 받는다
         self.reload_button = QPushButton('다시 읽기')
-        vrow.addWidget(self.reload_button)
-        vcol.addLayout(vrow)
-        self.tabs.addTab(vpage, '검증 결과')
-
-        bottom = QHBoxLayout()
-        bottom.addStretch(1)
+        bottom.addWidget(self.reload_button)
         self.close_button = QPushButton('닫기')
         bottom.addWidget(self.close_button)
         layout.addLayout(bottom)
+        self.tabs.currentChanged.connect(self._sync_bottom)
+        self._sync_bottom()
+        self.tabs.tabBar().setFocusPolicy(Qt.TabFocus)
+        self._no_focus_halo()
 
         self.search_edit.textChanged.connect(self.filter)
         self.reload_button.clicked.connect(self.load_verification)
@@ -372,24 +494,48 @@ class FeatureTourDialog(QDialog):
         self._update_progress()
 
     # ---- 표시
+    def _no_focus_halo(self):
+        """macOS 가 포커스 · 기본 단추 둘레에 그리는 파란 번짐(창 밖으로 번지는 테두리)을 끈다.
+        키보드 포커스는 QSS 의 :focus 테두리로 따로 보인다"""
+        for widget in self.findChildren(QWidget):
+            widget.setAttribute(Qt.WA_MacShowFocusRect, False)
+        for button in self.findChildren(QPushButton):
+            button.setAutoDefault(False)
+            button.setDefault(False)
+
+    def _sync_bottom(self, _index=None):
+        on_verify = self.tabs.currentIndex() == 1
+        self.verify_hint.setVisible(on_verify)
+        self.reload_button.setVisible(on_verify)
+
     def apply_theme(self):
         from client.kakao.chats_tab import panel_dialog_qss
         c = theme.c
         self.setStyleSheet(panel_dialog_qss() + f"""
             QFrame#featureRow {{ background: {c('bg_alt')}; border: 1px solid {c('border')}; border-radius: 10px; }}
+            QFrame#featureRow:hover {{ border-color: {c('text_hint')}; }}
             QLabel#featureName {{ font-size: {theme.fs('body')}px; font-weight: bold; }}
             QLabel#featureDesc {{ color: {c('text_sub')}; font-size: {theme.fs('meta')}px; }}
+            QPushButton#tryButton {{ background: {c('bg')}; color: {c('text')}; border: 1px solid {c('border')};
+                                     border-radius: 8px; padding: 6px 14px; font-weight: bold;
+                                     font-size: {theme.fs('meta')}px; min-height: 22px; }}
+            QPushButton#tryButton:hover {{ background: {c('yellow')}; color: {c('on_accent')};
+                                           border-color: {c('yellow')}; }}
+            QPushButton#tryButton:pressed {{ background: {c('yellow_dark')}; color: {c('on_accent')}; }}
+            QPushButton#tryButton[focusVisible="true"]:focus {{ border: 2px solid {c('yellow')}; padding: 5px 13px; }}
             QLabel#groupHeader {{ font-size: {theme.fs('emphasis')}px; font-weight: bold; color: {c('text')};
                                   padding: 10px 2px 2px 2px; }}
             QLabel[objectName^="since_"] {{ font-size: {theme.fs('micro')}px; color: {c('text_sub')};
                 border: 1px solid {c('border')}; border-radius: 4px; padding: 1px 5px; }}
             QLabel#since_v3, QLabel#since_2025 {{ color: {c('link')}; border-color: {c('link')}; }}
-            QLabel#verdictPass {{ font-size: {theme.fs('micro')}px; color: #FFFFFF; background: #3DA35D;
-                                  border-radius: 4px; padding: 1px 5px; }}
-            QLabel#verdictFail {{ font-size: {theme.fs('micro')}px; color: #FFFFFF; background: {c('badge')};
-                                  border-radius: 4px; padding: 1px 5px; }}
-            QPushButton#primary {{ padding: 6px 12px; }}
+            QLabel#verdictPass {{ font-size: {theme.fs('micro')}px; font-weight: bold; color: {c('success_text')};
+                                  background: {c('success_bg')}; border-radius: 4px; padding: 1px 6px; }}
+            QLabel#verdictFail {{ font-size: {theme.fs('micro')}px; font-weight: bold; color: {c('danger_text')};
+                                  background: {c('danger_bg')}; border-radius: 4px; padding: 1px 6px; }}
+            QTextBrowser {{ background: {c('bg')}; border: none; }}
         """)
+        if getattr(self, '_verify_loaded', False):     # 테마가 바뀌면 검증 결과 색도 다시
+            self.load_verification()
 
     def feature_keys(self):
         return list(self.rows)
@@ -415,8 +561,9 @@ class FeatureTourDialog(QDialog):
 
     def load_verification(self, _checked=False):
         md, verdicts = load_verification()
+        self._verify_loaded = True
         if md:
-            self.verify_view.setMarkdown(md)
+            self.verify_view.setHtml(verification_html(md))
             passed = sum(1 for v in verdicts.values() if v == 'PASS')
             self.verify_hint.setText(f'기능 {len(verdicts)}개 중 {passed}개 통과 · {osenv.display_path(VERIFICATION_PATH, ROOT)}')
         else:
@@ -431,6 +578,8 @@ class FeatureTourDialog(QDialog):
             row.verdict_label.setVisible(bool(verdict))
             row.verdict_label.style().unpolish(row.verdict_label)
             row.verdict_label.style().polish(row.verdict_label)
+            row._title_fits = None
+            row._fit_title()
         return verdicts
 
     # ---- 체크 상태 (설정 'tour_checked')
@@ -721,7 +870,7 @@ class FeatureTourDialog(QDialog):
         menu = presence_menu(self.state, self._parent_widget())
         self.opened.append(menu)
         menu.popup(QCursor.pos())
-        return '상태를 고르면 친구들에게 색 점으로 보입니다. 10분간 입력이 없으면 자동으로 자리비움이 됩니다.'
+        return '상태를 고르면 친구들에게 색 점으로 보입니다. 10분간 마우스를 움직이지 않으면 자동으로 자리비움이 되고, 다른 앱에서라도 움직이면 다시 온라인이 됩니다.'
 
     def do_story_view(self):
         owners = [u for u in self.state.story_owners() if u != self.state.me] if hasattr(self.state, 'story_owners') else []

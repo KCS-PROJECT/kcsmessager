@@ -242,8 +242,9 @@ class WorkFirstAndKeyboardTest(unittest.TestCase):
         sections = [d[1] for d in data if d[0] == 'section']
         self.assertEqual(sections[0], 'team')
         row = tab.list.itemWidget(tab.list.find_data(('friend', '김철수', 'team')))
-        self.assertIn('팀장', row.sub.text())
-        self.assertIn('1팀(Tandem)', row.sub.text())
+        self.assertEqual(row.title_label.text(), '팀장')                # '김철수 팀장' - 직함은 이름 옆
+        self.assertNotIn('팀장', row.sub.text())
+        self.assertTrue(row.sub.text().startswith('1팀(Tandem)'))      # 둘째 줄은 팀
         self.assertIn('일정 중 ~', row.sub.text())
         self.state.settings.set('social_features', True)
         self.assertFalse(tab.story_bar.isHidden())

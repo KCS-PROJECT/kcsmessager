@@ -284,6 +284,104 @@ class GroupwareOrgTabTest(unittest.TestCase):
         self.assertIn(('member', '박민수'), data)
         self.assertEqual(self.tab.search_edit.placeholderText(), '이름, 직위, 직책, 직급, 부서, 전화, 아이디')
 
+    def test_concurrent_tag_is_small_pill_next_to_name(self):
+        """겸직 표시: 줄 끝의 줄 높이만큼 늘어난 테두리 상자 대신 이름 바로 옆 작은 알약 (2026-10-11)"""
+        from client.kakao.org_tab import CompactMemberRow, MemberRow
+        for row in (CompactMemberRow(self.state, '김철수', depth=1, concurrent_title='실장'),
+                    MemberRow(self.state, '김철수', concurrent_title='실장')):
+            row.resize(400, 60)
+            row.show()
+            self.addCleanup(row.close)
+            app().processEvents()
+            tag = row.tag
+            self.assertEqual(tag.text(), '겸직')
+            self.assertLess(tag.height(), row.avatar.height())                      # 줄 높이로 늘지 않는다
+            before = getattr(row, 'title', None) or row.name                        # 큰 행은 '이름 직함' 다음
+            name_right = before.mapTo(row, before.rect().topRight()).x()
+            self.assertLess(tag.mapTo(row, tag.rect().topLeft()).x() - name_right, 24)   # 이름 바로 옆
+            self.assertLess(tag.mapTo(row, tag.rect().topRight()).x(), row.width() - 60)  # 줄 끝에 붙지 않음
+            self.assertIn('주소속', tag.toolTip())
+        self.assertIsNone(CompactMemberRow(self.state, '김철수').tag)
+
+    def test_search_box_sits_inside_header_above_divider(self):
+        """검색 칸이 헤더 구분선에 붙어 겹쳐 보이지 않게: 헤더 안(구분선 위)에 띄워 두고, 둥근 모서리(16)가
+        그려지도록 높이는 32px 이상 (2026-10-10)"""
+        from client.kakao.friends_tab import FriendsTab
+        self.tab.resize(400, 500)
+        self.tab.show()
+        self.addCleanup(self.tab.hide)
+        app().processEvents()
+        header, edit = self.tab.header, self.tab.search_edit
+        self.assertIs(edit.parentWidget(), header)
+        geo = edit.geometry()
+        self.assertGreaterEqual(geo.top() - self.tab.header.subtitle.geometry().bottom(), 8)   # 부제목과 띄움
+        self.assertGreaterEqual(header.height() - geo.bottom(), 8)                           # 구분선과 띄움
+        self.assertGreaterEqual(edit.height(), 32)                                           # 둥근 모서리가 보이는 높이
+        friends = FriendsTab(self.state, self.state.settings)
+        self.assertIs(friends.search_edit.parentWidget(), friends.header)
+        friends.show()
+        self.addCleanup(friends.close)
+        app().processEvents()
+        closed = friends.header.height()
+        friends.search_edit.show()
+        app().processEvents()
+        self.assertGreater(friends.header.height(), closed)                   # 펼치면 헤더가 칸만큼 커지고
+        friends.search_edit.hide()
+        app().processEvents()
+        app().processEvents()                                                  # 레이아웃이 한 번 더 돌아야 줄어든다
+        self.assertEqual(friends.header.height(), closed)                     # 숨기면 띄움까지 사라진다
+
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class DefaultCollapseTest(unittest.TestCase):
+    """조직도를 처음 열면 내가 속한 회사 · 부서 · 팀 · 그룹만 펼치고 나머지는 접혀 있다"""
+    def setUp(self):
+        app()
+        self.state, self.conn = make_demo_state()           # 나 = 홍길동
+        self.state.org = {'holding': {'name': '한국지주'},
+                          'companies': [{'name': '한네트'},
+                                        {'name': '케이씨에스', 'group_name': '케이씨에스', 'depth': 1,
+                                         'units': [[d] for d in imp.GROUPWARE_DEPTS]}],
+                          'groups': [{'group_id': 1, 'name': '경영위원회', 'description': '', 'members': ['홍길동']},
+                                     {'group_id': 2, 'name': '보안 TF', 'description': '', 'members': ['김철수']}]}
+        people = (('홍길동', ['기술연구소1실', '2팀(SI)']), ('이영희', ['기술연구소1실', '1팀(보안)']),
+                  ('박민수', ['영업1부', '1팀(보안)']), ('김철수', ['영업팀']))
+        for name, path in people:
+            self.conn.push('user_updated', user=dict(self.state.user(name), org_path=path, department=path[0],
+                                                    company='한네트' if name == '김철수' else '케이씨에스'))
+        self.tab = OrgTab(self.state, self.state.settings)
+
+    def test_only_my_branch_is_open(self):
+        data = rows(self.tab.list)
+        self.assertIn(('company', '케이씨에스'), data)
+        self.assertIn(('unit', '케이씨에스', ('기술연구소1실', '2팀(SI)')), data)   # 내 부서 펼침
+        self.assertIn(('member', '홍길동'), data)                                # 내 팀 펼침
+        self.assertIn(('unit', '케이씨에스', ('기술연구소1실', '1팀(보안)')), data)
+        self.assertNotIn(('member', '이영희'), data)                             # 내 부서의 다른 팀은 접힘
+        self.assertIn(('unit', '케이씨에스', ('영업1부',)), data)
+        self.assertNotIn(('member', '박민수'), data)                             # 다른 부서 접힘
+        self.assertIn(('company', '한네트'), data)
+        self.assertNotIn(('member', '김철수'), data)                             # 다른 회사 · 남의 그룹 접힘
+        self.assertEqual(data[data.index(('org_group', 1)) + 1], ('member', '홍길동'))   # 내 그룹 펼침
+        self.assertIn(2, self.tab.collapsed_groups)
+
+    def test_opening_other_group_shows_its_contents_and_choice_survives_refresh(self):
+        self.tab.list.itemClicked.emit(self.tab.list.find_data(('unit', '케이씨에스', ('영업1부',))))
+        self.assertIn(('member', '박민수'), rows(self.tab.list))                  # 다른 부서는 열면 팀까지 보인다
+        self.tab.toggle_company('한네트')
+        self.tab.list.itemClicked.emit(self.tab.list.find_data(('unit', '케이씨에스', ('기술연구소1실',))))
+        self.conn.push('user_updated', user=dict(self.state.user('최지우'), status_message='새 상태'))
+        self.tab.refresh()
+        data = rows(self.tab.list)
+        self.assertIn(('member', '박민수'), data)                                # 사용자가 접고 편 대로 유지
+        self.assertIn(('member', '김철수'), data)
+        self.assertNotIn(('unit', '케이씨에스', ('기술연구소1실', '2팀(SI)')), data)   # 내 부서도 접으면 접힌 채
+
+    def test_search_still_opens_everything(self):
+        self.tab.search_edit.setText('김철수')
+        self.assertIn(('member', '김철수'), rows(self.tab.list))
+        self.tab.search_edit.setText('')
+        self.assertNotIn(('member', '김철수'), rows(self.tab.list))

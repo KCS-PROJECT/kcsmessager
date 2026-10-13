@@ -168,5 +168,53 @@ class ChatRoomWindowTitleBarTests(unittest.TestCase):
         self.assertEqual(values, ['False', '10', 'True', str(10 + macos.TITLE_BAR_HEIGHT)])
 
 
+class DialogTitleBarTests(unittest.TestCase):
+    """모든 팝업: macOS 제목 표시줄을 본문과 같은 색으로 (시스템 다크 모드 + 앱 밝은 테마여도 검게 그리지 않는다)"""
+
+    def test_targets_dialogs_and_marked_windows_only(self):
+        from tests.kakao_fakes import app
+        app()
+        from PyQt5.QtWidgets import QDialog, QFileDialog, QMessageBox, QWidget
+        from client.kakao.widgets import wants_matched_title_bar
+        self.assertTrue(wants_matched_title_bar(QDialog()))
+        self.assertTrue(wants_matched_title_bar(QMessageBox()))
+        self.assertFalse(wants_matched_title_bar(QFileDialog()))             # macOS 기본 창
+        self.assertFalse(wants_matched_title_bar(QWidget()))                 # 일반 창은 자기 방식 (unify_title_bar)
+        marked = QWidget()
+        marked.setProperty('titleBarColor', '#E6ECF5')
+        self.assertTrue(wants_matched_title_bar(marked))                     # 통화 창처럼 표시한 창
+        self.assertFalse(macos.match_title_bar(QDialog(), '#FFFFFF', False))  # cocoa 가 아니면 아무것도 안 함
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'macOS 전용')
+    def test_cocoa_dialog_title_bar_matches_body(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        code = ("import ctypes, sys\n"
+                "from PyQt5.QtWidgets import QApplication, QDialog\n"
+                "app = QApplication([])\n"
+                "from client.kakao import main_window, theme\n"
+                "objc = ctypes.cdll.LoadLibrary('/usr/lib/libobjc.dylib')\n"
+                "objc.sel_registerName.restype = ctypes.c_void_p\n"
+                "send = objc.objc_msgSend\n"
+                "def msg(obj, sel, restype=ctypes.c_void_p):\n"
+                "    send.restype = restype; send.argtypes = [ctypes.c_void_p, ctypes.c_void_p]\n"
+                "    return send(obj, objc.sel_registerName(sel))\n"
+                "def state(d):\n"
+                "    w = msg(int(d.winId()), b'window')\n"
+                "    clear = msg(w, b'titlebarAppearsTransparent', ctypes.c_bool)\n"
+                "    name = ctypes.string_at(msg(msg(msg(w, b'appearance'), b'name'), b'UTF8String')).decode()\n"
+                "    return clear, name\n"
+                "for dark in (False, True):\n"
+                "    theme.set_dark(dark); main_window.apply_app_theme(None)\n"
+                "    d = QDialog(); d.show(); app.processEvents()\n"
+                "    print(*state(d)); d.close()\n")
+        env = dict(os.environ, QT_QPA_PLATFORM='cocoa', KCS_MESSENGER_HOME=os.path.join(root, '.no-such-home'))
+        result = subprocess.run([sys.executable, '-c', code], cwd=root, env=env, capture_output=True,
+                                text=True, timeout=30)
+        if result.returncode != 0 or not result.stdout.strip():
+            self.skipTest(f'GUI 세션이 없어 cocoa 창을 띄울 수 없음: {result.stderr.strip()[-80:]}')
+        # 투명 제목 표시줄(뒤는 본문 색) + 창 모양은 앱 테마를 따른다 (시스템 다크 모드와 상관없이)
+        self.assertEqual(result.stdout.split(), ['True', 'NSAppearanceNameAqua', 'True', 'NSAppearanceNameDarkAqua'])
+
+
 if __name__ == '__main__':
     unittest.main()

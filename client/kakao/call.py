@@ -23,7 +23,7 @@ import time
 import wave
 import zlib
 from collections import deque
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 try:
     import numpy as np
@@ -1545,6 +1545,7 @@ class CallWindow(QWidget):
         self.body_layout.addWidget(self.listener_list, 2)
 
     def _apply_style(self):
+        self.setProperty('titleBarColor', pal('bg_top'))   # macOS 제목 표시줄을 위쪽 배경색과 같게 (widgets.DialogTitleBarFilter)
         self.setStyleSheet(f"""
             QLabel {{ color: {pal('text')}; background: transparent; }}
             QLabel#callTitle {{ font-size: {theme.fs('heading')}px; font-weight: bold; }}
@@ -2026,8 +2027,14 @@ class CallWindow(QWidget):
         if rec is None:
             return None
         self._flush_recorder()
+        if self.recorder is None:            # 쓰다가 실패해 이미 멈춤 (알림도 이미 함)
+            return None
         self.recorder = None
-        path = rec.close()
+        try:
+            path = rec.close()
+        except OSError as e:
+            self.show_toast(f'녹음을 저장하지 못했습니다: {e}')
+            return None
         if notify:
             self.show_toast(f'녹음이 저장되었습니다 · {os.path.basename(path)}')
         if not self.closed:
@@ -2137,10 +2144,26 @@ class CallWindow(QWidget):
         if rec is None:
             return
         silence = b'\x00' * FRAME_BYTES
-        while self._rec_in or self._rec_out:
-            a = self._rec_in.popleft() if self._rec_in else silence
-            b = self._rec_out.popleft() if self._rec_out else silence
-            rec.write(mix_pcm([a, b]))
+        try:
+            while self._rec_in or self._rec_out:
+                a = self._rec_in.popleft() if self._rec_in else silence
+                b = self._rec_out.popleft() if self._rec_out else silence
+                rec.write(mix_pcm([a, b]))
+        except OSError as e:                 # 디스크 가득 참 · 빠진 USB 등 → 통화는 이어 가고 녹음만 멈춘다
+            self._abort_recording(e)
+
+    def _abort_recording(self, error):
+        rec, self.recorder = self.recorder, None
+        self._rec_in.clear()
+        self._rec_out.clear()
+        try:
+            if rec is not None:
+                rec.close()
+        except OSError:
+            pass
+        self.show_toast(f'녹음을 저장하지 못해 멈췄습니다: {error}')
+        if not self.closed:
+            self._sync_buttons()
 
     def _decay_levels(self):
         for user in list(self._levels):

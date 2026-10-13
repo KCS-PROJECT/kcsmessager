@@ -27,6 +27,11 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Any, Callable, Optional
 
+from . import file_policy
+from .admin_handlers import AdminHandlers
+from .protocol import (ACCOUNT_DISABLED, ADMIN_ONLY, EMAIL_RE, EMPLOYEE_NO_RE, INT_LIMIT,  # noqa: F401 (예전 import 경로 호환)
+                       ProtocolError, _bool, _norm_iso, _opt_int, _opt_str, _req_int, _req_str, _str_list,
+                       parse_iso)
 from . import summary as chat_summary
 from .store import BOT_USERNAME, ISO_FMT, PRESENCES, Store, now_iso
 
@@ -39,6 +44,7 @@ DEFAULT_DB_PATH = os.path.join(DATA_ROOT, 'server_data', 'kakao.db')
 
 MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
 MAX_AVATAR_BYTES = 512 * 1024
+MAX_DEPUTIES = 10                      # 대직자 최대 인원 (§8.13)
 MAX_BUFFER_CHARS = 16 * 1024 * 1024
 MAX_CONTENT_LEN = 10000
 MAX_HISTORY_LIMIT = 200
@@ -62,10 +68,8 @@ SECRET_MIN_BYTES = 12 + 16                   # nonce + GCM 태그
 SECRET_PEER_NO_KEY = '상대방이 아직 비밀채팅을 사용할 수 없습니다'
 SECRET_FORBIDDEN = '비밀채팅방에서는 사용할 수 없는 기능입니다.'
 LOGIN_FAILED = '아이디 또는 비밀번호가 올바르지 않습니다.'
-ACCOUNT_DISABLED = '사용이 중지된 계정입니다. 관리자에게 문의해 주세요.'
-ADMIN_ONLY = '관리자만 사용할 수 있습니다.'
 LOGIN_TOKEN_EXPIRED = '저장된 로그인 정보가 만료되었습니다. 비밀번호를 입력해 주세요.'
-RESET_MISMATCH = '아이디 또는 가입한 이메일이 일치하지 않습니다.'
+RESET_MISMATCH = '아이디 · 가입한 이메일 · 재설정 코드가 맞지 않습니다. 코드는 관리자에게 받고 30분 동안 한 번만 쓸 수 있습니다.'
 NEEDS_REGISTER = '처음 사용하는 아이디입니다. [처음 사용 등록]에서 소속 회사·이름·사번·이메일·비밀번호를 등록해 주세요.'
 
 CALL_MODES = ('voice', 'video', 'voiceroom')
@@ -95,19 +99,50 @@ RAG_UNAVAILABLE = 'AI 기능을 사용할 수 없습니다'
 RAG_FAILED = '답변을 생성하는 중 오류가 발생했습니다.'
 BOT_MENTION = '@' + BOT_USERNAME
 URL_RE = re.compile(r'https?://[^\s<>"]+')
-EMAIL_RE = re.compile(r'[^@\s]+@[^@\s]+\.[^@\s]+')
-EMPLOYEE_NO_RE = re.compile(r'[0-9A-Za-z][0-9A-Za-z_-]{0,19}')   # 사번: 영문·숫자(-, _) 1~20자
 PREVIEW_TIMEOUT = 3.0
 PREVIEW_MAX_BYTES = 256 * 1024
 
 
-def fetch_link_preview(url: str) -> Optional[dict]:
-    """URL 의 og:title / og:description / og:site_name (없으면 <title>). 실패하면 None."""
+def preview_host_allowed(url: str) -> bool:
+    """링크 미리보기로 서버가 가져가도 되는 주소인가. 서버 자신(127.x · ::1) · 링크 로컬(169.254.x - 클라우드 메타데이터)
+    · 0.0.0.0 · 멀티캐스트는 막는다 (메시지에 주소만 넣어 서버 안쪽 서비스 내용을 대화방으로 빼 가지 못하게).
+    사내망 주소(10.x · 192.168.x 등)는 그룹웨어 링크 미리보기에 필요해 허용한다"""
+    import ipaddress
+    import socket as socket_mod
+    from urllib.parse import urlsplit
+    try:
+        parts = urlsplit(url)
+        if parts.scheme not in ('http', 'https') or not parts.hostname:
+            return False
+        infos = socket_mod.getaddrinfo(parts.hostname, parts.port or (443 if parts.scheme == 'https' else 80),
+                                       proto=socket_mod.IPPROTO_TCP)
+    except (OSError, ValueError, UnicodeError):
+        return False
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0].split('%', 1)[0])
+        if ip.is_loopback or ip.is_link_local or ip.is_unspecified or ip.is_multicast or ip.is_reserved:
+            return False
+    return True
+
+
+def fetch_link_preview(url: str, block_internal: bool = True) -> Optional[dict]:
+    """URL 의 og:title / og:description / og:site_name (없으면 <title>). 실패하면 None.
+    block_internal: 서버 자신 · 링크 로컬 주소는 가져오지 않는다 (리다이렉트로 옮겨 가는 주소도 다시 검사)"""
     import html as html_mod
     import urllib.request
+
+    class _CheckedRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            if block_internal and not preview_host_allowed(newurl):
+                return None
+            return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+    if block_internal and not preview_host_allowed(url):
+        return None
     try:
         req = urllib.request.Request(url, headers={'User-Agent': 'KCSTalk-LinkPreview/1.0'})
-        with urllib.request.urlopen(req, timeout=PREVIEW_TIMEOUT) as resp:
+        opener = urllib.request.build_opener(_CheckedRedirect)
+        with opener.open(req, timeout=PREVIEW_TIMEOUT) as resp:
             ctype = resp.headers.get('Content-Type', '')
             if 'html' not in ctype:
                 return None
@@ -217,94 +252,20 @@ def _default_rag_factory(db_path: str) -> Any:
     return RagService(db_path)
 
 
-class ProtocolError(Exception):
-    """클라이언트에게 error 로 돌려줄 검증 오류 (메시지는 한국어)."""
-
-
-# ---------------------------------------------------------------------- 입력 검증 헬퍼
-def _req_str(msg: dict, key: str, max_len: int, allow_empty: bool = False, label: str = '') -> str:
-    value = msg.get(key)
-    if not isinstance(value, str):
-        raise ProtocolError(f'{label or key} 값이 올바르지 않습니다.')
-    value = value.strip()
-    if not value and not allow_empty:
-        raise ProtocolError(f'{label or key} 값을 입력하세요.')
-    if len(value) > max_len:
-        raise ProtocolError(f'{label or key} 값은 {max_len}자를 넘을 수 없습니다.')
-    return value
-
-
-def _opt_str(msg: dict, key: str, max_len: int, default: str = '') -> str:
-    if msg.get(key) is None:
-        return default
-    return _req_str(msg, key, max_len, allow_empty=True)
-
-
-def _req_int(msg: dict, key: str) -> int:
-    value = msg.get(key)
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise ProtocolError(f'{key} 값이 올바르지 않습니다.')
-    return value
-
-
-def _opt_int(msg: dict, key: str) -> Optional[int]:
-    return None if msg.get(key) is None else _req_int(msg, key)
-
-
-def _bool(msg: dict, key: str, default: bool = False) -> bool:
-    value = msg.get(key)
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, int) and value in (0, 1):
-        return bool(value)
-    raise ProtocolError(f'{key} 값이 올바르지 않습니다.')
-
-
-def _str_list(msg: dict, key: str, required: bool = True) -> list[str]:
-    value = msg.get(key)
-    if value is None and not required:
-        return []
-    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
-        raise ProtocolError(f'{key} 값이 올바르지 않습니다.')
-    seen: list[str] = []
-    for v in value:
-        v = v.strip()
-        if v and v not in seen:
-            seen.append(v)
-    return seen
-
-
-def parse_iso(value: Any, key: str) -> datetime:
-    """ISO 문자열 → 서버 로컬 naive datetime. 시간대가 있으면 로컬로 변환."""
-    if not isinstance(value, str) or not value.strip():
-        raise ProtocolError(f'{key} 시각 형식이 올바르지 않습니다.')
-    text = value.strip()
-    if text.endswith('Z'):
-        text = text[:-1] + '+00:00'
-    try:
-        dt = datetime.fromisoformat(text)
-    except ValueError:
-        raise ProtocolError(f'{key} 시각 형식이 올바르지 않습니다.') from None
-    if dt.tzinfo is not None:
-        dt = dt.astimezone().replace(tzinfo=None)
-    return dt
-
-
-def _norm_iso(value: Any, key: str) -> str:
-    return parse_iso(value, key).strftime(ISO_FMT)
 
 
 def _validate_birthday(value: Any) -> Optional[str]:
+    """생년월일 'YYYY-MM-DD' 또는 (연도 없이) 생일 'MM-DD'"""
     if value is None or value == '':
         return None
-    if not isinstance(value, str) or not re.fullmatch(r'\d{2}-\d{2}', value):
-        raise ProtocolError('생일은 MM-DD 형식이어야 합니다.')
+    if not isinstance(value, str) or not re.fullmatch(r'(\d{4}-)?\d{2}-\d{2}', value):
+        raise ProtocolError('생년월일은 YYYY-MM-DD(또는 MM-DD) 형식이어야 합니다.')
     try:
-        datetime.strptime('2000-' + value, '%Y-%m-%d')
+        day = datetime.strptime(value if len(value) == 10 else '2000-' + value, '%Y-%m-%d').date()
     except ValueError:
         raise ProtocolError('존재하지 않는 날짜입니다.') from None
+    if len(value) == 10 and not (1900 <= day.year and day <= datetime.now().date()):
+        raise ProtocolError('생년월일이 올바르지 않습니다.')
     return value
 
 
@@ -456,7 +417,7 @@ class Call:
 
 
 # ---------------------------------------------------------------------- 서버
-class KakaoServer:
+class KakaoServer(AdminHandlers):
     """카카오톡 기능 서버. ``start()``(블로킹) / ``serve_in_thread()`` / ``stop()``."""
 
     def __init__(self, host: str = '127.0.0.1', port: int = 5555, db_path: Optional[str] = None,
@@ -508,6 +469,7 @@ class KakaoServer:
             'admin_reset_password': self._h_admin_reset_password,
             'admin_clear_password': self._h_admin_clear_password,
             'admin_set_disabled': self._h_admin_set_disabled,
+            'admin_reset_code': self._h_admin_reset_code,
             'admin_set_admin': self._h_admin_set_admin,
             'admin_notice': self._h_admin_notice,
             'admin_member_create': self._h_admin_member_create,
@@ -519,6 +481,15 @@ class KakaoServer:
             'admin_group_delete': self._h_admin_group_delete,
             'admin_group_reorder': self._h_admin_group_reorder,
             'admin_org_order': self._h_admin_org_order,
+            # 파일 전송 보안 (명세 §10.10)
+            'admin_file_policy_set': self._h_admin_file_policy_set,
+            'admin_file_requests': self._h_admin_file_requests,
+            'admin_file_request_decide': self._h_admin_file_request_decide,
+            'admin_file_exceptions': self._h_admin_file_exceptions,
+            'admin_file_exception_add': self._h_admin_file_exception_add,
+            'admin_file_exception_delete': self._h_admin_file_exception_delete,
+            'file_send_request': self._h_file_send_request,
+            'file_request_list': self._h_file_request_list,
             'message': self._h_legacy_message,
             'room_open_direct': self._h_room_open_direct,
             'room_create': self._h_room_create,
@@ -711,10 +682,20 @@ class KakaoServer:
     def _apply_profile(user: dict, override: Optional[dict]) -> dict:
         return {**user, **override} if override else user
 
+    @staticmethod
+    def _private_view(user: dict, viewer: Optional[str], viewer_is_admin: bool) -> dict:
+        """다른 사람에게는 이메일을 보이지 않는다 (본인 · 관리자만). 이메일은 비밀번호 재설정 확인 값이고
+        친구 추가도 '정확히 아는 사람만' 이메일로 찾게 했다 - 모두에게 보내면 둘 다 의미가 없어진다"""
+        if viewer_is_admin or user.get('username') == viewer or not user.get('email'):
+            return user
+        return {**user, 'email': ''}
+
     def _users_for(self, viewer: str, online: set[str]) -> list[dict]:
         """viewer 에게 보낼 사용자 목록 (멀티프로필 적용, 조회 1회)."""
         overrides = self.store.profile_overrides_for_viewer(viewer)
-        return [self._apply_profile(u, overrides.get(u['username'])) for u in self.store.list_users(online)]
+        admin = self.store.admin_scope(viewer) is not None
+        return [self._private_view(self._apply_profile(u, overrides.get(u['username'])), viewer, admin)
+                for u in self.store.list_users(online)]
 
     def _broadcast_user(self, username: str, ctx: Optional[Ctx] = None, exclude_user: Optional[str] = None) -> None:
         """user_updated 를 수신자별(멀티프로필)로 만들어 모든 접속자에게 보낸다."""
@@ -722,10 +703,13 @@ class KakaoServer:
         if base is None:
             return
         overrides = self.store.profile_overrides_for_owner(username)
+        admins = set(self.store.admin_usernames())
         for conn in self._all_joined_conns():
             if exclude_user is not None and conn.username == exclude_user:
                 continue
-            payload = {'type': 'user_updated', 'user': self._apply_profile(base, overrides.get(conn.username))}
+            user = self._private_view(self._apply_profile(base, overrides.get(conn.username)), conn.username,
+                                      conn.username in admins)
+            payload = {'type': 'user_updated', 'user': user}
             if ctx is not None and conn is ctx.conn and ctx.has_req_id:
                 payload['req_id'] = ctx.req_id
             conn.send(payload)
@@ -933,7 +917,10 @@ class KakaoServer:
         with self._login_failures_lock:
             for key in keys:
                 recent = [t for t in self._login_failures.get(key, []) if now - t < self.LOGIN_LOCK_SECONDS]
-                self._login_failures[key] = recent
+                if recent:
+                    self._login_failures[key] = recent
+                else:                    # 없는 아이디로 계속 시도해도 빈 목록이 쌓이지 않게
+                    self._login_failures.pop(key, None)
                 if len(recent) >= self.LOGIN_MAX_FAILURES[key.split(':', 1)[0]]:
                     wait = int(self.LOGIN_LOCK_SECONDS - (now - recent[0])) // 60 + 1
                     raise ProtocolError(f'로그인 실패가 너무 많습니다. {wait}분 뒤에 다시 시도해 주세요.')
@@ -1030,11 +1017,13 @@ class KakaoServer:
         password = msg.get('password')
         if not isinstance(password, str) or not 4 <= len(password) <= 64:
             raise ProtocolError('비밀번호는 4~64자로 입력해 주세요.')
-        self._check_login_throttle(self._login_keys(conn, name))
+        keys = self._login_keys(conn, name)
+        self._check_login_throttle(keys)
         self._check_not_disabled(name)
         try:
             created = self.store.register_user(name, company.strip(), email, password, employee_no)
         except ValueError as exc:
+            self._record_login_failure(keys)   # 남의 조직도 계정 사번을 맞혀 보는 것도 로그인 실패처럼 막는다
             raise ProtocolError(str(exc)) from None
         self._complete_login(conn, msg, 'register', name, created, remember=msg.get('remember') is True)
 
@@ -1047,12 +1036,19 @@ class KakaoServer:
         password = msg.get('new_password')
         if not isinstance(password, str) or not 4 <= len(password) <= 64:
             raise ProtocolError('비밀번호는 4~64자로 입력해 주세요.')
+        code = msg.get('code')
+        if not isinstance(code, str) or not code.strip() or len(code) > 20:
+            # 이메일만으로는 바꾸지 못한다 - 메일 서버가 없어 관리자가 본인 확인 후 일회용 코드를 알려 준다
+            raise ProtocolError('관리자에게 받은 재설정 코드를 입력해 주세요.')
         keys = self._login_keys(conn, login_id)
         self._check_login_throttle(keys)
         username = self.store.resolve_login(login_id)
         if username:
             self._check_not_disabled(username)
-        changed = self.store.reset_password(username, email, password) if username else False
+        try:
+            changed = self.store.reset_password(username, email, password, code) if username else False
+        except ValueError as exc:          # 관리자 계정은 이메일만으로 바꾸지 못한다
+            raise ProtocolError(str(exc)) from None
         if changed is None:
             raise ProtocolError(NEEDS_REGISTER)
         if not changed:
@@ -1086,6 +1082,7 @@ class KakaoServer:
             'calls': self._calls_for_user(username),
             'blocked': self.store.blocked_list(username),
             'friends': self.store.friends_of(username),
+            'file_policy': file_policy.public_policy(self.store.file_policy()),
             **({'login_token': login_token} if login_token else {}),
         })
         conn.send({'type': 'all_users_list',
@@ -1253,7 +1250,7 @@ class KakaoServer:
         if kind == 'contact' and not self.store.user_exists(content):
             raise ProtocolError('보낼 연락처를 찾을 수 없습니다. 연락처 목록에서 다시 골라 주세요.')
         if kind == 'voice':
-            if not content.isdigit() or not 1 <= int(content) <= MAX_VOICE_SECONDS:
+            if not (content.isascii() and content.isdecimal()) or not 1 <= int(content) <= MAX_VOICE_SECONDS:
                 raise ProtocolError(f'음성메시지는 1초에서 {MAX_VOICE_SECONDS // 60}분 사이로 녹음해 주세요.')
 
         reply_to_id = _opt_int(msg, 'reply_to_id')
@@ -1275,6 +1272,13 @@ class KakaoServer:
             name, mime, data = self._decode_attachment(msg.get('attachment'))
             if kind == 'voice' and not mime.startswith('audio/'):
                 raise ProtocolError('음성메시지는 오디오 파일이어야 합니다.')
+            violation = self._file_violation(ctx.username, name, data)
+            if violation is not None:          # 파일 전송 보안 (§10.10): 오류 대신 승인 요청을 낼 수 있게 알려 준다
+                self._reply(ctx, {'type': 'file_blocked', 'room_id': room_id, 'kind': kind, 'name': name,
+                                  'size': len(data), 'client_tmp_id': msg.get('client_tmp_id'), **violation,
+                                  'message': f"보낼 수 없는 파일입니다 ({violation['detail']})."})
+                logger.info('파일 전송 차단 %s: %s (%s)', ctx.username, name, violation['detail'])
+                return
         elif msg.get('attachment') is not None:
             raise ProtocolError('텍스트 메시지에는 첨부 파일을 보낼 수 없습니다.')
 
@@ -1341,7 +1345,7 @@ class KakaoServer:
     def _deliver_message(self, room_id: str, sender: str, kind: str, content: str,
                          reply_to_id: Optional[int], mentions: list[str], attachment_id: Optional[int],
                          client_tmp_id: Any, ctx: Optional[Ctx], silent: bool = False,
-                         thread_root_id: Optional[int] = None) -> None:
+                         thread_root_id: Optional[int] = None) -> dict:
         restored = self.store.restore_direct_members(room_id)
         if restored:
             self._push_room_updated(room_id, restored)
@@ -1353,6 +1357,7 @@ class KakaoServer:
             if root is not None:
                 self._push_msg_updated(root)
         self._after_user_message(message)
+        return message
 
     def _h_read(self, ctx: Ctx, msg: dict) -> None:
         meta = self._require_room_member(msg.get('room_id'), ctx.username)
@@ -1619,247 +1624,6 @@ class KakaoServer:
     def _h_todo_list(self, ctx: Ctx, msg: dict) -> None:
         self._reply(ctx, {'type': 'todo_list', 'todos': self.store.list_todos(ctx.username)})
 
-    # ------------------------------------------------------------------ 관리자 (명세 §4.2)
-    def _require_admin(self, ctx: Ctx) -> str:
-        """관리 범위 ('' = 그룹 전체, '회사' = 그 회사만 - 명세 §4.3). 관리자가 아니면 오류"""
-        scope = self.store.admin_scope(ctx.username)
-        if scope is None:
-            raise ProtocolError(ADMIN_ONLY)
-        return scope
-
-    def _require_group_admin(self, ctx: Ctx) -> None:
-        if self._require_admin(ctx):
-            raise ProtocolError('그룹 관리자만 할 수 있습니다.')
-
-    def _check_scope(self, scope: str, company: Optional[str]) -> None:
-        if scope and company != scope:
-            raise ProtocolError(f'관리 범위({scope}) 밖의 구성원입니다.')
-
-    def _admin_target(self, ctx: Ctx, msg: dict) -> str:
-        scope = self._require_admin(ctx)
-        username = _req_str(msg, 'username', 120, label='사용자')
-        if not self.store.user_exists(username):
-            raise ProtocolError('사용자를 찾을 수 없습니다.')
-        if self.store.is_bot(username):
-            raise ProtocolError('봇 계정은 관리할 수 없습니다.')
-        self._check_scope(scope, self.store.user_company(username))
-        return username
-
-    MEMBER_TEXT_LIMITS = {'department': 60, 'title': 60, 'account': 60, 'extension': 60, 'mobile': 60, 'email': 120}
-
-    def _member_fields(self, msg: dict, scope: str, creating: bool) -> dict:
-        """구성원 필드 검사 (명세 §4.3) → 바꿀 필드만"""
-        fields: dict = {}
-        if creating or 'company' in msg:
-            company = msg.get('company').strip() if isinstance(msg.get('company'), str) else ''
-            if company not in self.store.company_names():
-                raise ProtocolError('소속 회사를 선택해 주세요.')
-            self._check_scope(scope, company)
-            fields['company'] = company
-        for key, limit in self.MEMBER_TEXT_LIMITS.items():
-            if key in msg:
-                value = msg[key]
-                if value is None:
-                    value = ''
-                if not isinstance(value, str) or len(value.strip()) > limit or any(ord(ch) < 32 for ch in value):
-                    raise ProtocolError(f'{key} 값이 올바르지 않습니다.')
-                fields[key] = value.strip()
-        if fields.get('email') and not EMAIL_RE.fullmatch(fields['email']):
-            raise ProtocolError('이메일 주소 형식이 올바르지 않습니다.')
-        if 'employee_no' in msg:
-            number = msg['employee_no'].strip() if isinstance(msg['employee_no'], str) else ''
-            if number and not EMPLOYEE_NO_RE.fullmatch(number):
-                raise ProtocolError('사번은 영문·숫자 20자 이내로 입력해 주세요.')
-            fields['employee_no'] = number
-        return fields
-
-    def _h_admin_member_create(self, ctx: Ctx, msg: dict) -> None:
-        scope = self._require_admin(ctx)
-        name = _req_str(msg, 'username', 20, label='이름')
-        if any(ord(ch) < 32 for ch in name) or '@' in name or name == BOT_USERNAME:
-            raise ProtocolError('이름에 사용할 수 없는 문자가 있습니다.')
-        fields = self._member_fields(msg, scope, creating=True)
-        try:
-            self.store.member_create(name, fields)
-        except ValueError as exc:
-            raise ProtocolError(str(exc)) from None
-        self._broadcast_user(name)
-        self._admin_done(ctx, 'member_create', '구성원 등록', username=name)
-
-    def _h_admin_member_update(self, ctx: Ctx, msg: dict) -> None:
-        username = self._admin_target(ctx, msg)
-        fields = self._member_fields(msg, self._require_admin(ctx), creating=False)
-        try:
-            self.store.member_update(username, fields)
-        except ValueError as exc:
-            raise ProtocolError(str(exc)) from None
-        self._broadcast_user(username)
-        self._admin_done(ctx, 'member_update', '구성원 수정', username=username)
-
-    def _h_admin_member_delete(self, ctx: Ctx, msg: dict) -> None:
-        username = self._admin_target(ctx, msg)
-        if username == ctx.username:
-            raise ProtocolError('자기 계정은 삭제할 수 없습니다.')
-        self.store.member_set_removed(username, True)
-        for conn in self._user_conns([username]):
-            conn.send({'type': 'account_disabled', 'message': ACCOUNT_DISABLED})
-            self._disconnect(conn)
-        self._broadcast({'type': 'user_removed', 'username': username})
-        self._admin_done(ctx, 'member_delete', '구성원 삭제', username=username)
-
-    def _h_admin_member_restore(self, ctx: Ctx, msg: dict) -> None:
-        username = self._admin_target(ctx, msg)
-        self.store.member_set_removed(username, False)
-        self._broadcast_user(username)
-        self._admin_done(ctx, 'member_restore', '구성원 복원', username=username)
-
-    def _admin_done(self, ctx: Ctx, action: str, what: str, **fields: Any) -> None:
-        logger.info('관리자 %s: %s %s', ctx.username, what, fields.get('username', ''))
-        self._reply(ctx, {'type': 'admin_done', 'action': action, **fields})
-
-    def _h_admin_users(self, ctx: Ctx, msg: dict) -> None:
-        scope = self._require_admin(ctx)
-        users = [u for u in self.store.admin_user_list(self._online_users()) if not scope or u['company'] == scope]
-        self._reply(ctx, {'type': 'admin_users', 'users': users, 'scope': scope})
-
-    def _h_admin_reset_password(self, ctx: Ctx, msg: dict) -> None:
-        username = self._admin_target(ctx, msg)
-        password = msg.get('new_password')
-        if not isinstance(password, str) or not 4 <= len(password) <= 64:
-            raise ProtocolError('비밀번호는 4~64자로 입력해 주세요.')
-        self.store.set_password(username, password)
-        self.store.revoke_all_login_tokens(username)
-        self._admin_done(ctx, 'reset_password', '비밀번호 재설정', username=username)
-
-    def _h_admin_clear_password(self, ctx: Ctx, msg: dict) -> None:
-        username = self._admin_target(ctx, msg)
-        self.store.clear_password(username)
-        self._admin_done(ctx, 'clear_password', '등록 초기화', username=username)
-
-    def _h_admin_set_disabled(self, ctx: Ctx, msg: dict) -> None:
-        username = self._admin_target(ctx, msg)
-        disabled = msg.get('disabled')
-        if not isinstance(disabled, bool):
-            raise ProtocolError('disabled 는 true/false 여야 합니다.')
-        if disabled and username == ctx.username:
-            raise ProtocolError('자기 계정은 사용 중지할 수 없습니다.')
-        self.store.set_disabled(username, disabled)
-        self._admin_done(ctx, 'set_disabled', '사용 중지' if disabled else '사용 중지 해제',
-                         username=username, disabled=disabled)
-        if disabled:        # 접속 중이면 알리고 끊는다 (재연결해도 join 이 거절된다)
-            for conn in self._user_conns([username]):
-                conn.send({'type': 'account_disabled', 'message': ACCOUNT_DISABLED})
-                self._disconnect(conn)   # 읽기 스레드를 기다리지 않고 바로 접속 목록에서 뺀다 (두 번 불려도 안전)
-
-    def _h_admin_set_admin(self, ctx: Ctx, msg: dict) -> None:
-        self._require_group_admin(ctx)
-        username = self._admin_target(ctx, msg)
-        is_admin = msg.get('is_admin')
-        if not isinstance(is_admin, bool):
-            raise ProtocolError('is_admin 은 true/false 여야 합니다.')
-        company = msg.get('company') or ''
-        if not isinstance(company, str) or (company and company.strip() not in self.store.company_names()):
-            raise ProtocolError('소속 회사를 선택해 주세요.')
-        try:
-            self.store.set_admin(username, is_admin, company.strip())
-        except ValueError as exc:
-            raise ProtocolError(str(exc)) from None
-        self._broadcast_user(username)
-        self._admin_done(ctx, 'set_admin', '관리자 지정' if is_admin else '관리자 해제',
-                         username=username, is_admin=is_admin, company=company.strip() if is_admin else '')
-
-    def _h_admin_notice(self, ctx: Ctx, msg: dict) -> None:
-        self._require_group_admin(ctx)
-        content = _req_str(msg, 'content', 1000, label='공지 내용')
-        conns = self._all_joined_conns()
-        payload = {'type': 'admin_notice', 'sender': ctx.username, 'content': content, 'timestamp': now_iso()}
-        for conn in conns:
-            conn.send(payload)
-        self._admin_done(ctx, 'notice', '전체 공지', delivered=len({c.username for c in conns}))
-
-    # ---- 조직도 그룹 (명세 §4.4) ----
-    GROUP_MEMBERS_MAX = 500
-
-    def _group_fields(self, msg: dict) -> tuple[str, str, list[str]]:
-        name = _req_str(msg, 'name', 40, label='그룹 이름')
-        description = _opt_str(msg, 'description', 100)
-        if any(ord(ch) < 32 for ch in name + description):
-            raise ProtocolError('그룹 이름에 사용할 수 없는 문자가 있습니다.')
-        members = msg.get('members', [])
-        if not isinstance(members, list) or len(members) > self.GROUP_MEMBERS_MAX \
-                or not all(isinstance(m, str) and m.strip() for m in members):
-            raise ProtocolError('members 값이 올바르지 않습니다.')
-        return name, description, list(dict.fromkeys(m.strip() for m in members))
-
-    def _group_target(self, ctx: Ctx, msg: dict) -> int:
-        self._require_group_admin(ctx)
-        group_id = _req_int(msg, 'group_id')
-        if self.store.org_group(group_id) is None:
-            raise ProtocolError('그룹을 찾을 수 없습니다.')
-        return group_id
-
-    def _broadcast_org_groups(self) -> None:
-        self._broadcast({'type': 'org_groups', 'groups': self.store.org_groups(), 'order': self.store.org_order()})
-
-    ORG_ORDER_MAX = 600
-
-    def _h_admin_org_order(self, ctx: Ctx, msg: dict) -> None:
-        """조직도 아래쪽 덩어리(그룹 · 게스트 등) 순서 - 그룹 관리자만. KCS AI · 그룹사는 고정이라 목록에 없다"""
-        self._require_group_admin(ctx)
-        order = msg.get('order')
-        if not isinstance(order, list) or len(order) > self.ORG_ORDER_MAX or len(set(map(str, order))) != len(order):
-            raise ProtocolError('order 값이 올바르지 않습니다.')
-        for token in order:
-            kind, _, value = token.partition(':') if isinstance(token, str) else ('', '', '')
-            if not ((kind == 'group' and value.isdigit()) or
-                    (kind == 'company' and value.strip() and len(value) <= 60 and value == value.strip())):
-                raise ProtocolError('order 값이 올바르지 않습니다.')
-        try:
-            self.store.set_org_order(order)
-        except ValueError as exc:
-            self._broadcast_org_groups()          # 실패해도 요청한 사람 화면을 서버 순서로 되돌린다
-            raise ProtocolError(str(exc)) from None
-        self._broadcast_org_groups()
-        self._admin_done(ctx, 'org_order', '조직도 순서 변경', order=order)
-
-    def _h_admin_group_create(self, ctx: Ctx, msg: dict) -> None:
-        self._require_group_admin(ctx)
-        name, description, members = self._group_fields(msg)
-        try:
-            group_id = self.store.org_group_create(name, description, members, ctx.username)
-        except ValueError as exc:
-            raise ProtocolError(str(exc)) from None
-        self._broadcast_org_groups()
-        self._admin_done(ctx, 'group_create', '그룹 만들기', group_id=group_id, name=name)
-
-    def _h_admin_group_update(self, ctx: Ctx, msg: dict) -> None:
-        group_id = self._group_target(ctx, msg)
-        name, description, members = self._group_fields(msg)
-        try:
-            self.store.org_group_update(group_id, name, description, members)
-        except ValueError as exc:
-            raise ProtocolError(str(exc)) from None
-        self._broadcast_org_groups()
-        self._admin_done(ctx, 'group_update', '그룹 수정', group_id=group_id, name=name)
-
-    def _h_admin_group_reorder(self, ctx: Ctx, msg: dict) -> None:
-        self._require_group_admin(ctx)
-        ids = msg.get('group_ids')
-        if not isinstance(ids, list) or not all(isinstance(i, int) and not isinstance(i, bool) for i in ids):
-            raise ProtocolError('group_ids 값이 올바르지 않습니다.')
-        try:
-            self.store.org_group_reorder(ids)
-        except ValueError as exc:
-            self._broadcast_org_groups()          # 실패해도 요청한 사람 화면을 서버 순서로 되돌린다
-            raise ProtocolError(str(exc)) from None
-        self._broadcast_org_groups()
-        self._admin_done(ctx, 'group_reorder', '그룹 순서 변경', group_ids=ids)
-
-    def _h_admin_group_delete(self, ctx: Ctx, msg: dict) -> None:
-        group_id = self._group_target(ctx, msg)
-        self.store.org_group_delete(group_id)
-        self._broadcast_org_groups()
-        self._admin_done(ctx, 'group_delete', '그룹 삭제', group_id=group_id)
 
     def _h_login_token_revoke(self, ctx: Ctx, msg: dict) -> None:
         token = msg.get('token')
@@ -1887,36 +1651,61 @@ class KakaoServer:
             mime, ext = sniffed
             fields['avatar_id'] = self.store.save_attachment(f'avatar.{ext}', mime, data, ctx.username)
         if 'mobile' in msg:
-            mobile = (msg.get('mobile') or '').strip()
+            mobile = _opt_str(msg, 'mobile', 40).strip()
             if mobile and not (9 <= len(Store.phone_digits(mobile)) <= 13):
                 raise ProtocolError('전화번호 형식이 올바르지 않습니다.')
             fields['mobile'] = mobile[:20]
         if 'email' in msg:
-            email = (msg.get('email') or '').strip()
+            email = _opt_str(msg, 'email', 120).strip()
             if email and not EMAIL_RE.fullmatch(email):
                 raise ProtocolError('이메일 형식이 올바르지 않습니다.')
             fields['email'] = email[:120]
+        if 'deputies' in msg:
+            fields['deputies'] = self._validate_deputies(ctx.username, msg.get('deputies'))
         if not fields:
             raise ProtocolError('변경할 항목이 없습니다.')
         self.store.update_profile(ctx.username, fields)
         self._broadcast_user(ctx.username, ctx)
 
+    def _validate_deputies(self, me: str, value) -> list:
+        """대직자 목록 (§8.13): username 문자열 목록, 중복 제거 · 순서 유지 · 최대 MAX_DEPUTIES"""
+        if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+            raise ProtocolError('대직자는 사용자 이름 목록이어야 합니다.')
+        out = []
+        for name in value:
+            name = name.strip()
+            if name and name not in out:
+                out.append(name)
+        if len(out) > MAX_DEPUTIES:
+            raise ProtocolError(f'대직자는 {MAX_DEPUTIES}명까지 지정할 수 있습니다.')
+        for name in out:
+            if name == me or not self.store.can_be_deputy(name):
+                raise ProtocolError(f'대직자로 지정할 수 없는 사용자입니다: {name[:20]}')
+        return out
+
     # ------------------------------------------------------------------ 친구 등록
     def _h_friend_add(self, ctx: Ctx, msg: dict) -> None:
-        """전화번호 또는 이메일로 친구 추가 (정확히 일치할 때만 - 목록 조회 방지)"""
-        query = _req_str(msg, 'query', 120, label='전화번호 또는 이메일')
-        if '@' in query and not EMAIL_RE.fullmatch(query.strip()):
-            raise ProtocolError('이메일 형식이 올바르지 않습니다.')
-        if '@' not in query and len(Store.phone_digits(query)) < 9:
-            raise ProtocolError('전화번호를 정확히 입력해 주세요.')
-        target = self.store.find_user_by_contact(query)
-        if target is None:
-            raise ProtocolError('해당 전화번호·이메일로 가입한 사용자가 없습니다. 상대가 프로필에 등록한 번호·이메일인지 확인하세요.')
+        """전화번호 또는 이메일로 친구 추가 (정확히 일치할 때만 - 목록 조회 방지).
+        username 을 주면 그 사람을 바로 (프로필 창의 [친구 추가] - 이미 보고 있는 동료라 연락처가 필요 없다)"""
+        if msg.get('username') is not None:
+            target = _req_str(msg, 'username', 120, label='사용자')
+            if not self.store.user_exists(target) or self.store.is_removed(target) or self.store.is_bot(target):
+                raise ProtocolError('사용자를 찾을 수 없습니다.')
+        else:
+            query = _req_str(msg, 'query', 120, label='전화번호 또는 이메일')
+            if '@' in query and not EMAIL_RE.fullmatch(query.strip()):
+                raise ProtocolError('이메일 형식이 올바르지 않습니다.')
+            if '@' not in query and len(Store.phone_digits(query)) < 9:
+                raise ProtocolError('전화번호를 정확히 입력해 주세요.')
+            target = self.store.find_user_by_contact(query)
+            if target is None:
+                raise ProtocolError('해당 전화번호·이메일로 가입한 사용자가 없습니다. 상대가 프로필에 등록한 번호·이메일인지 확인하세요.')
         if target == ctx.username:
             raise ProtocolError('나 자신은 친구로 추가할 수 없습니다.')
         added = self.store.add_friend(ctx.username, target)
         base = self.store.get_user(target, self._online_users())
         user = self._apply_profile(base, self.store.profile_overrides_for_viewer(ctx.username).get(target))
+        user = self._private_view(user, ctx.username, self.store.admin_scope(ctx.username) is not None)
         self._reply(ctx, {'type': 'friend_added', 'user': user, 'already': not added})
         self._reply(ctx, {'type': 'friend_list', 'friends': self.store.friends_of(ctx.username)})
 
@@ -1935,7 +1724,13 @@ class KakaoServer:
         self._broadcast_user(ctx.username, ctx)
 
     def _h_attachment_get(self, ctx: Ctx, msg: dict) -> None:
-        att = self.store.get_attachment_for(_req_int(msg, 'attachment_id'), ctx.username)
+        attachment_id = _req_int(msg, 'attachment_id')
+        att = self.store.get_attachment_for(attachment_id, ctx.username)
+        if att is None and self.store.admin_scope(ctx.username) == '' \
+                and self.store.file_request_for_attachment(attachment_id) is not None:
+            att = self.store.get_attachment(attachment_id)        # 그룹 관리자: 승인 요청 파일을 받아 확인 (§10.10)
+            if att is not None and not att['data']:
+                att['expired'] = True
         if att is None:
             raise ProtocolError('첨부 파일을 찾을 수 없거나 접근 권한이 없습니다.')
         if att.get('expired'):
@@ -1959,16 +1754,31 @@ class KakaoServer:
                 logger.exception('스케줄러 오류')
 
     def _run_scheduled(self) -> None:
+        # 꺼낼 때 delivered 로 표시한다(두 번 보내지 않게). 대신 못 보낸 건은 조용히 사라지지 않게 보낸 사람에게 알린다
         for item in self.store.pop_due_scheduled(now_iso()):
             try:
                 self._deliver_scheduled(item)
             except Exception:   # 한 건이 실패해도 같은 시각의 나머지 예약 메시지는 보낸다
                 logger.exception('예약 메시지 %s 전송 실패', item.get('scheduled_id'))
+                self._scheduled_failed(item, '서버 오류로 예약 메시지를 보내지 못했습니다. 다시 보내 주세요.')
+
+    def _scheduled_failed(self, item: dict, reason: str) -> None:
+        """예약 메시지를 못 보냄: 보낸 사람에게 scheduled_failed, 보관하던 첨부는 지운다"""
+        p = item.get('payload') or {}
+        if p.get('attachment_id'):
+            try:
+                self.store.discard_attachment(p['attachment_id'])
+            except Exception:
+                logger.exception('예약 메시지 %s 첨부 정리 실패', item.get('scheduled_id'))
+        self._push([item['sender']], {'type': 'scheduled_failed', 'scheduled_id': item['scheduled_id'],
+                                      'room_id': item['room_id'], 'kind': p.get('kind', 'text'),
+                                      'content': p.get('content', ''), 'reason': reason})
 
     def _deliver_scheduled(self, item: dict) -> None:
         room_id, sender, p = item['room_id'], item['sender'], item['payload']
         if not self.store.is_member(room_id, sender):
             logger.info('예약 메시지 %s 취소: 발신자가 방을 나감', item['scheduled_id'])
+            self._scheduled_failed(item, '채팅방을 나가서 예약 메시지가 취소되었습니다.')
             return
         reply_to_id = p.get('reply_to_id')
         if reply_to_id is not None:

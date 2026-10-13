@@ -12,8 +12,8 @@
 
 import os
 
-from PyQt5.QtCore import Qt, QSize, QUrl
-from PyQt5.QtGui import QIcon, QPixmap, QDesktopServices, QColor, QPainter
+from PyQt5.QtCore import Qt, QSize
+from PyQt5.QtGui import QIcon, QPixmap, QColor, QPainter
 from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QTabWidget, QListWidget,
                              QListWidgetItem, QListView, QWidget, QPushButton, QMenu, QFileDialog,
                              QStackedWidget)
@@ -21,7 +21,7 @@ from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QTabWidg
 from client.kakao import theme
 from client.kakao import osenv
 from client.kakao.state import parse_dt, URL_RE
-from client.kakao.widgets import make_icon
+from client.kakao.widgets import make_icon, human_size as _human_size
 
 KINDS = ('image', 'file', 'link')
 KIND_LABELS = {'image': '사진', 'file': '파일', 'link': '링크'}
@@ -30,15 +30,8 @@ MAX_THUMB_REQUESTS = 80     # 한 번에 받아 올 썸네일 수 (너무 많은
 
 
 def human_size(size):
-    try:
-        size = float(size or 0)
-    except (TypeError, ValueError):
-        return ''
-    for unit in ('B', 'KB', 'MB', 'GB'):
-        if size < 1024 or unit == 'GB':
-            return f'{size:.0f}{unit}' if unit == 'B' else f'{size:.1f}{unit}'
-        size /= 1024
-    return ''
+    """톡서랍 표기 '1.5MB' (붙여 쓴다)"""
+    return _human_size(size, sep='')
 
 
 def short_time(value):

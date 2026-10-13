@@ -46,6 +46,48 @@ DEFAULTS = {
 
 _UNSAFE_FILE_CHARS = set('\\/:*?"<>|')
 
+# ---------------------------------------------------------------- 이 PC 의 서버 주소 (그룹 관리자만 더보기 → 정보에서 바꾼다)
+SERVER_FILE = 'server.json'
+DEFAULT_HOST, DEFAULT_PORT = '127.0.0.1', 5555
+
+
+def parse_server_address(host, port):
+    """칸 값 → (host, port). 틀리면 ValueError(화면에 보일 문장)"""
+    host = (host or '').strip()
+    if not host or len(host) > 253 or any(ch.isspace() or ord(ch) < 32 for ch in host) or '/' in host:
+        raise ValueError('서버 주소를 올바르게 입력해 주세요. (예: 192.168.0.10 또는 chat.kcs.co.kr)')
+    try:
+        port = int(str(port).strip())
+    except ValueError:
+        port = 0
+    if not 1 <= port <= 65535:
+        raise ValueError('포트는 1~65535 사이 숫자로 입력해 주세요.')
+    return host, port
+
+
+def load_server_address(base_dir=None):
+    """저장된 (host, port) - 없거나 깨졌으면 None"""
+    path = os.path.join(base_dir or osenv.app_home(), SERVER_FILE)
+    try:
+        with open(path, encoding='utf-8') as f:
+            data = json.load(f)
+        return parse_server_address(data.get('host'), data.get('port'))
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+
+
+def save_server_address(host, port, base_dir=None):
+    """검사한 뒤 저장 (임시 파일 → 교체). 저장한 (host, port)"""
+    host, port = parse_server_address(host, port)
+    base = base_dir or osenv.app_home()
+    os.makedirs(base, exist_ok=True)
+    path = os.path.join(base, SERVER_FILE)
+    tmp = path + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump({'host': host, 'port': port}, f, ensure_ascii=False)
+    os.replace(tmp, path)
+    return host, port
+
 
 def settings_file_name(username):
     """사용자 이름 → 설정 파일 이름. 경로 구분자·예약 문자·제어 문자는 _XX 로 바꿔 디렉터리를 벗어나지 않게 한다"""

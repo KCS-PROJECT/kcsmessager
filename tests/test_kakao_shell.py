@@ -19,7 +19,7 @@ from tests.kakao_fakes import make_demo_state, app
 
 from PyQt5.QtCore import Qt, QEvent, QPoint
 from PyQt5.QtGui import QImage, QColor
-from PyQt5.QtWidgets import QMessageBox, QApplication, QLineEdit
+from PyQt5.QtWidgets import QMessageBox, QApplication, QLineEdit, QPushButton
 
 from client.kakao import theme
 from client.kakao.main_window import MainWindow, IdleWatcher, apply_app_theme
@@ -215,6 +215,55 @@ class IdleTests(ShellTestBase):
             self.assertIsNone(self.conn.last('presence_set'))
         finally:
             watcher.stop()
+
+    def test_movement_in_other_apps_counts(self):
+        """KCS Talk 창 밖(다른 앱)에서 마우스를 움직여도: OS 무입력 시간으로 자리비움을 막고, 자리비움이면 곧 온라인"""
+        idle = {'s': 0.0}
+        watcher = IdleWatcher(self.state, idle_seconds=600, system_idle=lambda: idle['s'])
+        try:
+            watcher.last_input = 1000.0
+            idle['s'] = 30.0                                   # 다른 앱에서 30초 전에 움직임
+            watcher.poll(now=1000.0 + 700)
+            self.assertIsNone(self.conn.last('presence_set'))   # 앱 안 입력은 700초 없지만 자리비움 아님
+            self.assertAlmostEqual(watcher.last_input, 1670.0)
+            idle['s'] = 601.0                                   # 10분 넘게 아무 데서도 입력 없음
+            watcher.poll(now=1670.0 + 601)
+            self.assertEqual(self.conn.last('presence_set'), {'presence': 'away'})
+            self.conn.push('user_updated', user=dict(self.state.user('홍길동'), presence='away'))
+            self.conn.sent.clear()
+            idle['s'] = 1.0                                     # 다른 앱에서 마우스를 움직이면
+            watcher.poll(now=3000.0)
+            self.assertEqual(self.conn.last('presence_set'), {'presence': 'online'})   # 곧바로 온라인
+            self.assertFalse(watcher.auto_away)
+        finally:
+            watcher.stop()
+
+    def test_cursor_fallback_when_os_idle_unknown(self):
+        """OS 무입력 시간을 모르면(Wayland 등) 마우스 포인터 위치가 바뀌었는지로 본다"""
+        pos = {'p': (10, 10)}
+        watcher = IdleWatcher(self.state, idle_seconds=600, system_idle=lambda: None, cursor_pos=lambda: pos['p'])
+        try:
+            watcher.last_input = 0.0
+            watcher.poll(now=100.0)                             # 처음 위치만 기억
+            self.assertEqual(watcher.last_input, 0.0)
+            watcher.poll(now=700.0)                             # 그대로면 10분 뒤 자리비움
+            self.assertEqual(self.conn.last('presence_set'), {'presence': 'away'})
+            self.conn.push('user_updated', user=dict(self.state.user('홍길동'), presence='away'))
+            pos['p'] = (200, 340)
+            watcher.poll(now=710.0)
+            self.assertEqual(self.conn.last('presence_set'), {'presence': 'online'})
+            self.assertEqual(watcher.last_input, 710.0)
+        finally:
+            watcher.stop()
+
+    def test_poll_interval_is_short(self):
+        watcher = IdleWatcher(self.state, idle_seconds=600, system_idle=lambda: 0.0)
+        try:
+            self.assertLessEqual(watcher.poll_timer.interval(), 5000)   # 돌아오면 몇 초 안에 온라인
+            self.assertTrue(watcher.poll_timer.isActive())
+        finally:
+            watcher.stop()
+            self.assertFalse(watcher.poll_timer.isActive())
 
     def test_presence_menu_sends(self):
         menu = presence_menu(self.state)
@@ -726,12 +775,10 @@ class DialogTests(ShellTestBase):
         self.assertEqual(dlg.password_edit.echoMode(), QLineEdit.Password)
         dlg.password_edit.setText('pw1234')
         self.assertTrue(dlg.login_button.isEnabled())
-        self.assertFalse(dlg.server_box.isVisibleTo(dlg))
-        dlg.server_toggle.click()
-        self.assertTrue(dlg.server_box.isVisibleTo(dlg))
-        dlg.host_edit.setText('192.168.0.5')
-        dlg.port_edit.setText('5556')
-        self.assertEqual(dlg.values(), ('이영희', '192.168.0.5', 5556))
+        # 로그인 창에는 서버 설정이 없다 - 받은 주소로만 접속 (그룹 관리자가 더보기 → 정보에서 정함, 명세 §4.3)
+        self.assertFalse(hasattr(dlg, 'server_toggle') or hasattr(dlg, 'host_edit'))
+        self.assertFalse(any('서버' in b.text() for b in dlg.findChildren(QPushButton)))
+        self.assertEqual(dlg.values(), ('이영희', '10.0.0.1', 6000))
         self.assertEqual(dlg.password(), 'pw1234')
         self.assertEqual(dlg.windowTitle(), 'KCS Talk 로그인')
         dlg.accept()
@@ -873,6 +920,32 @@ class DialogTests(ShellTestBase):
         self.assertEqual(calls, [1, 1])
         win.close()
 
+    def test_sidebar_avatar_right_click_quick_logout(self):
+        """왼쪽 아래 내 사진 우클릭 → 로그아웃: 확인 창 없이 바로 (간편 로그아웃)"""
+        from client.kakao.main_window import MainWindow
+        from client.kakao.logout_dialog import LogoutDialog
+        calls = []
+        win = MainWindow(self.state, self.state.settings, logout=lambda: calls.append(1))
+        avatar = win.sidebar.me_avatar
+        self.assertEqual(avatar.contextMenuPolicy(), Qt.CustomContextMenu)
+        self.assertIn('우클릭: 로그아웃', avatar.toolTip())
+        menu = win.sidebar.me_menu()
+        texts = [a.text() for a in menu.actions() if a.text()]
+        self.assertEqual(texts, ['홍길동', '로그아웃'])
+        self.assertFalse(menu.actions()[0].isEnabled())                       # 이름은 표시만
+        with mock.patch.object(LogoutDialog, 'exec_') as asked:
+            next(a for a in menu.actions() if a.text() == '로그아웃').trigger()
+        asked.assert_not_called()                                             # 확인 창 없이
+        self.assertEqual(calls, [1])
+        with mock.patch.object(win.sidebar, 'me_menu', wraps=win.sidebar.me_menu) as built, \
+                mock.patch('client.kakao.main_window.QMenu.exec_'):
+            avatar.customContextMenuRequested.emit(avatar.rect().center())    # 실제 우클릭 신호
+        built.assert_called_once()
+        win.close()
+        bare = MainWindow(self.state, self.state.settings)                    # 로그아웃 처리가 없으면 메뉴만 꺼 둔다
+        self.assertFalse(next(a for a in bare.sidebar.me_menu().actions() if a.text() == '로그아웃').isEnabled())
+        bare.close()
+
     def test_logout_dialog_says_what_changes_and_what_stays(self):
         from client.kakao.logout_dialog import LogoutDialog, logout_effects
         auto = {'login_id': 'hgd', 'token': 't', 'auto_login': True, 'host': '', 'port': 0}
@@ -950,13 +1023,17 @@ class DialogTests(ShellTestBase):
             self.assertFalse(dlg.login_button.isEnabled())
             dlg.reset_email_edit.setText('not-email')
             dlg.reset_password_edit.setText('new-pw')
+            self.assertFalse(dlg.login_button.isEnabled())                       # 재설정 코드가 있어야
+            dlg.reset_code_edit.setText('ABCD-EF23')
+            self.assertTrue(dlg.login_button.isEnabled())
             dlg.accept()
             self.assertIn('이메일', dlg.error_label.text())
             reset.assert_not_called()
             dlg.reset_email_edit.setText('kms@kcs.test')
             self.assertEqual(dlg.reset_password_edit.echoMode(), QLineEdit.Password)   # 눈 아이콘 있는 칸
             dlg.accept()
-            reset.assert_called_once_with('10.0.0.9', 6000, 'kms', 'kms@kcs.test', 'new-pw')
+            reset.assert_called_once_with('10.0.0.9', 6000, 'kms', 'kms@kcs.test', 'new-pw', code='ABCD-EF23')
+            self.assertEqual(dlg.reset_code_edit.text(), '')                      # 쓴 코드는 지운다
             self.assertEqual(dlg._mode, 'login')                                  # 로그인 화면으로 돌아옴
             self.assertEqual((dlg.name_edit.text(), dlg.password_edit.text()), ('kms', ''))
             self.assertEqual(dlg.error_label.property('tone'), 'notice')
@@ -964,6 +1041,7 @@ class DialogTests(ShellTestBase):
             self.assertNotEqual(dlg.result(), login.LoginDialog.Accepted)           # 창은 닫히지 않는다
         with mock.patch.object(login, 'reset_password', side_effect=net.ResetRejected('아이디 또는 가입한 이메일이 일치하지 않습니다.')):
             dlg.set_mode('reset')
+            dlg.reset_code_edit.setText('ABCD-EF23')
             dlg.reset_email_edit.setText('x@kcs.test')
             dlg.reset_password_edit.setText('new-pw')
             dlg.accept()
@@ -987,11 +1065,6 @@ class DialogTests(ShellTestBase):
         dlg = LoginDialog()
         dlg.show()
         QApplication.processEvents()
-        self.assertGreaterEqual(dlg.height(), dlg.layout().sizeHint().height())
-        before = dlg.height()
-        dlg.server_toggle.click()
-        QApplication.processEvents()
-        self.assertGreater(dlg.height(), before)
         self.assertGreaterEqual(dlg.height(), dlg.layout().sizeHint().height())
         dlg.hide()
 
@@ -1025,14 +1098,19 @@ class OrgAndMoreTests(ShellTestBase):
         self.assertEqual(set(tab.companies()), {'KCS 홀딩스', 'KCS 물류', 'KCS 커머스', 'KCS AI'})
         self.assertEqual(tab.members_of('KCS 홀딩스', '경영지원팀'), ['홍길동', '김철수'])
         self.assertEqual(tab.members_of('KCS 물류'), ['이영희', '박민수'])
-        tab.toggle_company('KCS 물류')
+        # 처음엔 내 회사(KCS 홀딩스)만 펼치고 다른 회사는 접어 둔다
+        self.assertIn(('member', '김철수'), rows(tab.list))
         self.assertNotIn(('member', '이영희'), rows(tab.list))
         self.assertIn(('company', 'KCS 물류'), rows(tab.list))
         tab.toggle_company('KCS 물류')
         self.assertIn(('member', '이영희'), rows(tab.list))
+        tab.toggle_company('KCS 물류')
+        self.assertNotIn(('member', '이영희'), rows(tab.list))
+        tab.toggle_company('KCS 물류')
         tab.search_edit.setText('마케팅')
         self.assertEqual(tab.companies(), ['KCS 커머스'])
         tab.search_edit.setText('')
+        tab.toggle_company('KCS 커머스')
         tab.list.itemDoubleClicked.emit(tab.list.find_data(('member', '최지우')))
         self.assertEqual(self.conn.last('room_open_direct'), {'target': '최지우'})
         menu = tab.context_menu_for(('member', '이영희'))
@@ -1042,6 +1120,7 @@ class OrgAndMoreTests(ShellTestBase):
         tab = MoreTab(self.state, self.settings, server_address='127.0.0.1:5555')
         self.assertEqual(tab.name_label.text(), '홍길동')
         self.assertEqual(tab.server_value.text(), '127.0.0.1:5555')
+        self.assertFalse(tab.info_group.isVisibleTo(tab))                     # 정보 구역은 그룹 관리자만
         self.assertEqual(tab.version_value.text(), '2.0')
         self.conn.push('user_updated', user=dict(self.state.user('홍길동'), status_message='새 상태'))
         self.assertEqual(tab.status_label.text(), '새 상태')
@@ -1234,7 +1313,12 @@ class OrgHierarchyTests(ShellTestBase):
         self.assertEqual(units[:4], [('기술연구소',), ('기술연구소', '연구1실'), ('기술연구소', '연구1실', '1팀'),
                                      ('기술연구소', '연구1실', '2팀(SI)')])
         self.assertEqual(tab.members_of('케이씨에스', ('신사업팀',)), ['이영희'])  # 겸직자는 주소속 목록에서 제외
+        # 내 소속(기술연구소) 옆 조직인 신사업팀은 처음엔 접혀 있다
+        idx = data.index(('unit', '케이씨에스', ('신사업팀',)))
+        self.assertNotIn(('member', '김철수'), data[idx:idx + 2])
+        tab.toggle_unit('케이씨에스', ('신사업팀',))
         # 신사업팀 아래에는 겸직자 김철수도 행으로 나온다
+        data = rows(tab.list)
         idx = data.index(('unit', '케이씨에스', ('신사업팀',)))
         self.assertIn(('member', '김철수'), data[idx:])
         tab.toggle_unit('케이씨에스', ('기술연구소',))

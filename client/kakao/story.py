@@ -10,7 +10,7 @@ import os
 from datetime import datetime
 
 from PyQt5.QtCore import Qt, QRectF, QTimer, QElapsedTimer, pyqtSignal
-from PyQt5.QtGui import QPainter, QColor, QImage, QPixmap, QPainterPath, QFontMetrics, QLinearGradient
+from PyQt5.QtGui import QPainter, QColor, QImage, QPainterPath, QFontMetrics, QLinearGradient
 from PyQt5.QtWidgets import (QDialog, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
                              QPlainTextEdit, QFileDialog, QListWidget, QListWidgetItem, QAbstractButton,
                              QMessageBox, QSizePolicy)

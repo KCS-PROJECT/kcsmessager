@@ -62,10 +62,11 @@ def doctor(_args=None, out=print):
             mark = '✗' if required else '·'
             out(f'  {mark} {module} 없음 - {feature}' + ('' if required else ' (선택)'))
             ok = ok and not required
-    fonts = [f for f in ('Pretendard-Regular.otf', 'Pretendard-SemiBold.otf', 'Pretendard-Bold.otf')
-             if os.path.exists(osenv.resource_path('assets', 'fonts', f))]
-    out(f"  {'✓' if len(fonts) == 3 else '✗'} 앱 글꼴 Pretendard {len(fonts)}/3")
-    ok = ok and len(fonts) == 3
+    from client.kakao.theme import BUNDLED_FONTS
+    fonts = [f for f in BUNDLED_FONTS if os.path.exists(osenv.resource_path('assets', 'fonts', f))]
+    total = len(BUNDLED_FONTS)
+    out(f"  {'✓' if len(fonts) == total else '✗'} 앱 글꼴 Pretendard {len(fonts)}/{total} (300~900)")
+    ok = ok and len(fonts) == total
     home = osenv.app_home()
     try:
         os.makedirs(home, exist_ok=True)

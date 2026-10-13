@@ -16,6 +16,7 @@ from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QRadioBu
 
 from client.kakao import theme
 from client.kakao import osenv
+from client.kakao.widgets import disconnect_signals
 
 FORMATS = (   # (키, 화면 이름, 확장자, 저장 창 필터)
     ('txt', '텍스트 (.txt) — 카카오톡 PC 와 같은 형식', 'txt', '텍스트 파일 (*.txt)'),
@@ -172,15 +173,20 @@ class AttachmentCollector(QObject):
         self.state.attachment_failed.connect(self._on_failed)
         self._next()
 
-    def _done(self):
+    def _stop(self):
         self._timer.stop()
-        for signal, slot in ((self.state.attachment_loaded, self._on_loaded),
-                             (self.state.attachment_failed, self._on_failed)):
-            try:
-                signal.disconnect(slot)
-            except TypeError:
-                pass
+        disconnect_signals((self.state.attachment_loaded, self._on_loaded),
+                           (self.state.attachment_failed, self._on_failed))
         self.state.quiet_attachment_errors = False
+
+    def cancel(self):
+        """채팅방 창을 닫아 저장을 그만둠: finished 없이 멈춘다. 오류 알림 숨김도 푼다 - 남아 있으면
+        그 뒤로 어느 방에서도 첨부 받기 오류가 보이지 않았다"""
+        self.queue = []
+        self._stop()
+
+    def _done(self):
+        self._stop()
         self.finished.emit(self.files, self.notes)
 
     def _next(self):

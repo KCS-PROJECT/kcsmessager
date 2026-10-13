@@ -31,7 +31,21 @@ OTHER = '기타'
 
 # (테스트 id 정규식 'module.Class.method', 기능 key) - 위에서부터 먼저 맞는 것
 MAPPING = [
-    (r'test_kakao_admin|test_kakao_member_admin|disabled_by_admin', 'admin'),
+    (r'test_kakao_file_security|test_kakao_bugfixes\.FilePolicyBypass', 'file_security'),
+    (r'test_kakao_bugfixes\.(ServerInput|StoreRollback|CrashGuard)', 'platforms'),
+    (r'test_kakao_bugfixes\.(Connection|SessionReconnect|AccountSecurity)', 'login'),
+    (r'test_kakao_bugfixes\.ScheduledFailure', 'scheduled'),
+    (r'test_kakao_bugfixes\.SecretKey', 'secret'),
+    (r'test_kakao_bugfixes\.LinkPreviewGuard', 'link_preview'),
+    (r'test_kakao_bugfixes\.StateTests\.test_older_history', 'thread'),
+    (r'test_kakao_bugfixes\.StateTests\.test_pending', 'direct'),
+    (r'test_kakao_bugfixes\.StateTests\.test_failed', 'failed_resend'),
+    (r'test_kakao_bugfixes\.StateTests\.test_unreadable|test_kakao_bugfixes\.WidgetTests\.test_image', 'attach'),
+    (r'test_kakao_bugfixes\.WidgetTests\.test_export', 'chat_export'),
+    (r'test_kakao_bugfixes\.WidgetTests\.test_recording', 'voice_call'),
+    (r'test_kakao_bugfixes\.WidgetTests\.test_reopened', 'multi_profile'),
+    (r'test_kakao_bugfixes\.WidgetTests\.test_member_edit', 'admin'),
+    (r'test_kakao_admin|test_kakao_member_admin|test_kakao_member_edit_mode|test_kakao_server_address|disabled_by_admin', 'admin'),
     (r'(?i)Login(Flow)?Tests|login_dialog|logout|auto_login|fresh_login|password_reset|SavedLoginDialog|LoginHardening|RequirePassword', 'login'),
     (r'test_kakao_review_fixes\.ServerReviewFixTests\.test_(deleted|edit)', 'edit'),
     (r'test_kakao_review_fixes\.ServerReviewFixTests\.test_one_failing_scheduled', 'scheduled'),
@@ -40,7 +54,7 @@ MAPPING = [
     (r'(?i)UnreadBlink', 'unread_blink'),
     # 사내 그룹웨어와 같은 조직도 (엑셀 → 그룹사 › 한국지주 · 계열사 13곳 같은 단계, 지식봇 맨 위, 조직도 그룹)
     # v5 - 업무용 메신저 필수 기능 (test_kakao_v5, 명세 §10)
-    (r'test_kakao_v5\.(Dnd)', 'dnd'),
+    (r'test_kakao_v5\.(Dnd)|test_kakao_input_controls', 'dnd'),
     (r'test_kakao_v5\.Vacation', 'presence'),
     (r'test_kakao_v5\.RoomOwner', 'room_owner'),
     (r'test_kakao_v5\.Thread', 'thread'),
@@ -63,6 +77,7 @@ MAPPING = [
     (r'test_kakao_v4\..*org_contact', 'contact_share'),
     (r'test_kakao_org_groupware\.|test_kakao_org_groups\.', 'org_chart'),
     (r'test_kakao_friend_add\.', 'friend_add'),
+    (r'test_kakao_profile_edit\.(ProfileEdit|DeputyServer)', 'profile_edit'),
     (r'test_kakao_osenv\.', 'platforms'),   # OS 공통 계층 · kcs.py · 빌드 · 바로가기
     (r'test_kakao_login_perf\.', 'font_size'),   # 로그인 직후 사진이 몰려와도 화면이 멈추지 않음
     # v3 화면 (이 스크립트와 함께 만든 테스트)

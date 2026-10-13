@@ -109,7 +109,7 @@ class AddFriendUiTest(unittest.TestCase):
         prof = ProfileDialog(self.state, '최지우')
         self.assertEqual(prof.friend_button.text(), '친구 추가')
         prof.toggle_friend()
-        self.assertEqual(self.conn.last('friend_add'), {'query': '010-7777-8888'})
+        self.assertEqual(self.conn.last('friend_add'), {'username': '최지우'})   # 연락처를 몰라도 보고 있는 동료를 바로
 
 
 class AddFriendE2ETest(unittest.TestCase):
@@ -136,7 +136,9 @@ class AddFriendE2ETest(unittest.TestCase):
         try:
             hong, outsider = login('홍길동'), login('외부파트너')
             outsider.update_profile(mobile='010-4321-8765', email='partner@kct.co.kr')
-            self.assertTrue(pump(lambda: hong.user('외부파트너').get('email') == 'partner@kct.co.kr'))
+            self.assertTrue(pump(lambda: hong.user('외부파트너').get('mobile') == '010-4321-8765'))
+            self.assertEqual(hong.user('외부파트너').get('email'), '')          # 다른 사람의 이메일은 오지 않는다
+            self.assertEqual(outsider.user('외부파트너').get('email'), 'partner@kct.co.kr')   # 본인에게는 온다
             added = []
             hong.friend_added.connect(lambda u, already: added.append((u['username'], already)))
             self.assertIsNone(hong.add_friend('010 4321 8765'))

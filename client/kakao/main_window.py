@@ -8,7 +8,7 @@
 import time
 
 from PyQt5.QtCore import Qt, QRectF, QTimer, QEvent, QObject, QPoint, pyqtSignal
-from PyQt5.QtGui import QPainter, QColor, QPalette, QKeySequence, QIcon, QPixmap
+from PyQt5.QtGui import QPainter, QColor, QPalette, QKeySequence, QIcon, QPixmap, QCursor
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QLabel,
                              QPushButton, QStackedWidget, QAbstractButton, QSystemTrayIcon, QMenu,
                              QSizePolicy, QFrame, QShortcut, QDialog, QLineEdit, QListWidget,
@@ -16,7 +16,8 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout, QV
 
 from client.kakao import theme
 from client.kakao import osenv
-from client.kakao.widgets import paint_icon, Badge
+from client.kakao.widgets import (paint_icon, Badge, install_focus_visible, input_controls_qss, install_input_controls,
+                                  install_dialog_title_bars)
 from client.kakao.login import talk_icon, talk_icon_pixmap
 from client.kakao import brand, macos
 from client.kakao.chats_tab import presence_of, set_presence, user_pixmap, connect_avatar_changed
@@ -58,7 +59,10 @@ def apply_app_theme(settings=None):
     pal.setColor(QPalette.Disabled, QPalette.ButtonText, QColor(theme.c('text_hint')))
     app.setPalette(pal)
     app.setFont(theme.font())
-    app.setStyleSheet(theme.base_qss())
+    app.setStyleSheet(theme.base_qss() + input_controls_qss())
+    install_focus_visible(app)        # 포커스 테두리는 키보드로 옮겼을 때만
+    install_input_controls(app)       # 콤보 목록이 QSS 줄 높이 · 선택 색을 따르도록
+    install_dialog_title_bars(app)    # 팝업 제목 표시줄을 본문과 같은 색으로 (macOS)
 
 
 # ================================================================ 사이드바
@@ -111,6 +115,7 @@ class SidebarButton(QAbstractButton):
 
 class Sidebar(QWidget):
     tab_selected = pyqtSignal(str)
+    logout_requested = pyqtSignal()      # 왼쪽 아래 내 사진 우클릭 → 로그아웃 (간편 로그아웃)
 
     def __init__(self, state, parent=None):
         super().__init__(parent)
@@ -138,6 +143,11 @@ class Sidebar(QWidget):
         self.me_avatar = QLabel()
         self.me_avatar.setFixedSize(theme.AVATAR_ROW, theme.AVATAR_ROW)   # 모든 목록과 같은 사진 크기
         self.me_avatar.setToolTip('내 프로필')
+        self.me_avatar.setAccessibleName('내 프로필')
+        self.me_avatar.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.me_avatar.customContextMenuRequested.connect(
+            lambda pos: self._show_me_menu(self.me_avatar.mapToGlobal(pos)))
+        self.can_logout = False          # 메인 창이 로그아웃 처리를 연결하면 True
         col.addWidget(self.me_avatar, 0, Qt.AlignHCenter)
         self.chat_badge = Badge(0, self.buttons['chats'])
         self._place_badge()
@@ -147,7 +157,22 @@ class Sidebar(QWidget):
     def refresh_me(self):
         if self.state.me:
             self.me_avatar.setPixmap(user_pixmap(self.state, self.state.me, theme.AVATAR_ROW, show_presence=True))
-            self.me_avatar.setToolTip(f"{self.state.display_name(self.state.me)} · 내 프로필")
+            tip = f"{self.state.display_name(self.state.me)} · 내 프로필"
+            self.me_avatar.setToolTip(tip + ('\n우클릭: 로그아웃' if self.can_logout else ''))
+
+    def me_menu(self):
+        """내 사진 우클릭 메뉴: 이름(표시만) · 로그아웃(확인 창 없이 바로)"""
+        menu = QMenu(self)
+        if self.state.me:
+            title = menu.addAction(self.state.display_name(self.state.me))
+            title.setEnabled(False)
+            menu.addSeparator()
+        logout = menu.addAction('로그아웃', self.logout_requested.emit)
+        logout.setEnabled(self.can_logout)
+        return menu
+
+    def _show_me_menu(self, global_pos):
+        self.me_menu().exec_(global_pos)
 
     def _place_badge(self):
         btn = self.buttons['chats']
@@ -430,27 +455,38 @@ class UnreadBlinker(QObject):
 
 # ================================================================ 자동 자리비움
 class IdleWatcher(QObject):
-    """앱 전체 키보드/마우스 입력을 감시해 10분 무입력 시 자동 자리비움, 입력 시 복원.
+    """컴퓨터 전체 마우스/키보드 입력을 보고 10분 무입력이면 자동 자리비움, 다시 움직이면 곧바로 온라인.
+    KCS Talk 창 밖(다른 앱)에서 마우스를 움직여도 입력으로 센다 - OS 무입력 시간(osenv.system_idle_seconds),
+    알 수 없는 OS 에서는 마우스 포인터 위치 변화로 본다. 앱 안 입력은 이벤트로 바로 받는다.
     lock_seconds(초를 돌려주는 함수, 0/None = 꺼짐)와 on_lock 을 주면 무입력 잠금도 담당한다."""
 
     INPUT_EVENTS = {QEvent.KeyPress, QEvent.MouseButtonPress, QEvent.MouseMove, QEvent.Wheel,
                     QEvent.TouchBegin}
+    POLL_MS = 3 * 1000          # 다른 앱에서의 움직임을 이 간격으로 확인 (자리비움 → 온라인이 몇 초 안에)
 
-    def __init__(self, state, idle_seconds=IDLE_SECONDS, parent=None, lock_seconds=None, on_lock=None):
+    def __init__(self, state, idle_seconds=IDLE_SECONDS, parent=None, lock_seconds=None, on_lock=None,
+                 system_idle=None, cursor_pos=None):
         super().__init__(parent)
         self.state = state
         self.idle_seconds = idle_seconds
         self.lock_seconds = lock_seconds
         self.on_lock = on_lock
+        self.system_idle = system_idle or osenv.system_idle_seconds
+        self.cursor_pos = cursor_pos or (lambda: QCursor.pos())
+        self._last_cursor = None
         self.last_input = time.monotonic()
         self.auto_away = False
         self.timer = QTimer(self)
         self.timer.setInterval(30 * 1000)
         self.timer.timeout.connect(self.check)
+        self.poll_timer = QTimer(self)
+        self.poll_timer.setInterval(self.POLL_MS)
+        self.poll_timer.timeout.connect(self.poll)
         app = QApplication.instance()
         if app is not None:
             app.installEventFilter(self)
         self.timer.start()
+        self.poll_timer.start()
 
     def eventFilter(self, obj, event):
         if event.type() in self.INPUT_EVENTS:
@@ -463,6 +499,21 @@ class IdleWatcher(QObject):
             self.auto_away = False
             if presence_of(self.state, self.state.me) == 'away':
                 set_presence(self.state, 'online')
+
+    def poll(self, now=None):
+        """앱 밖 입력 반영: OS 무입력 시간이 우리가 아는 마지막 입력보다 짧으면 그 사이에 움직인 것"""
+        now = time.monotonic() if now is None else now
+        idle = self.system_idle()
+        if idle is not None:
+            if now - idle > self.last_input + 0.5:
+                self.activity(now - idle)
+        else:
+            pos = self.cursor_pos()
+            pos = (pos.x(), pos.y()) if hasattr(pos, 'x') else tuple(pos)
+            if self._last_cursor is not None and pos != self._last_cursor:
+                self.activity(now)
+            self._last_cursor = pos
+        self.check(now)
 
     def check(self, now=None):
         now = time.monotonic() if now is None else now
@@ -486,6 +537,7 @@ class IdleWatcher(QObject):
 
     def stop(self):
         self.timer.stop()
+        self.poll_timer.stop()
         app = QApplication.instance()
         if app is not None:
             app.removeEventFilter(self)
@@ -622,6 +674,8 @@ class MainWindow(QMainWindow):
         state.error.connect(self.show_toast)
         state.notify.connect(self.show_notification)
         state.admin_notice.connect(self.show_admin_notice)
+        state.file_blocked.connect(self.show_file_blocked)
+        state.file_request_changed.connect(self._on_file_request_changed)
         settings.changed.connect(self._on_setting_changed)
         self.banner.reconnect_clicked.connect(self.reconnect)
 
@@ -733,6 +787,10 @@ class MainWindow(QMainWindow):
             self.tabs['calendar'] = PlaceholderTab(f'캘린더를 불러올 수 없습니다\n({e.__class__.__name__})')
         self.tabs['more'] = MoreTab(self.state, self.settings, server_address=self.server_address)
         self.tabs['more'].logout_requested.connect(lambda: self.logout_cb and self.logout_cb())
+        # 왼쪽 아래 내 사진 우클릭 → 로그아웃: 메뉴를 고른 것이 확인이라 확인 창 없이 바로 (간편 로그아웃)
+        self.sidebar.can_logout = self.logout_cb is not None
+        self.sidebar.logout_requested.connect(lambda: self.logout_cb and self.logout_cb())
+        self.sidebar.refresh_me()
         for key in TAB_KEYS:
             self.stack.addWidget(self.tabs[key])
 
@@ -1018,6 +1076,21 @@ class MainWindow(QMainWindow):
             self.tray.showMessage('관리자 공지', notice.get('content', ''), talk_icon(), 6000)
         self.admin_notice_box = show_admin_notice(self, notice)
         return self.admin_notice_box
+
+    def show_file_blocked(self, info):
+        """파일 전송 보안 (명세 §10.10): 막힌 파일 → 승인 요청 창 (비모달)"""
+        from client.kakao.file_guard import show_file_blocked
+        self.file_blocked_dialog = show_file_blocked(self.state, info, self)
+        return self.file_blocked_dialog
+
+    def _on_file_request_changed(self, request):
+        if request.get('status') == 'pending':
+            self.show_toast(f"'{request.get('name', '')}' 승인 요청을 보냈어요. 관리자가 승인하면 전송돼요.")
+        elif request.get('status') == 'approved':
+            self.show_toast(f"'{request.get('name', '')}' 전송이 승인되어 보냈어요.")
+        elif request.get('status') == 'rejected':
+            note = f" ({request['note']})" if request.get('note') else ''
+            self.show_toast(f"'{request.get('name', '')}' 요청이 반려됐어요{note}")
 
     # ---- 연결 ----
     def _on_connection_lost(self, reason=''):
