@@ -14,9 +14,11 @@
 |------|--------------|-----------|------|
 | 친구 | 친구 목록, 내 프로필, 상태메시지, 즐겨찾기, 생일인 친구, 온라인 상태 | ✅ | 즐겨찾기는 클라이언트 로컬 |
 | 친구 | 프로필 편집(이름·상태메시지) | ✅ | `profile_update` |
+| 친구 | 친구 목록 여러 명 선택(Shift/Ctrl+클릭 토글, Shift+누른 채 끌기 범위 선택·끝에서 자동 스크롤·접힌 구역 포함, 우클릭 '대화상대로 선택'·'선택한 N명(+그 친구) 대화방 만들기') → 대화방 만들기 | ✅ | 클라이언트 전용, 1명이면 `room_open_direct` · 2명 이상 `room_create` |
 | 채팅방 | 1:1 채팅, 그룹 채팅, 나와의 채팅 | ✅ | `direct` / `group` / `self` |
 | 채팅방 | 채팅방 목록(마지막 메시지, 시간, 안 읽은 수 배지) | ✅ | |
 | 채팅방 | 채팅방 이름 변경, 친구 초대, 나가기 | ✅ | 시스템 메시지 생성 |
+| 채팅방 | 참여자 줄(나와의 채팅 외 모든 방, 헤더 아래. 접힘 '대화상대 N명 이름… ›' ⇄ 펼침 사진·이름 칩 '⌄', 머리 줄·›·방 메뉴로 토글, 방마다 기억, 내가 만든 그룹방은 펼친 채로 열림) | ✅ | 클라이언트 전용, 설정 `members_strip_open:[room_id]`, `AppState.created_rooms` |
 | 채팅방 | 채팅방 상단 고정, 알림 끄기 | ✅ | 클라이언트 로컬 |
 | 메시지 | 텍스트, 이모티콘, 사진, 파일 | ✅ | 첨부 2MB 제한 |
 | 메시지 | 읽음 표시(안 읽은 사람 수 노란 숫자) | ✅ | read pointer 기반 |
@@ -53,6 +55,7 @@
 ```text
 User    {username, display_name, status_message, birthday:"YYYY-MM-DD"|"MM-DD"|null, online:bool}
         # birthday: 생년월일(YYYY-MM-DD, 연도 1900~올해). 예전 값·연도 비공개는 MM-DD. 생일 비교는 끝 5자(MM-DD)로 한다.
+        # 클라이언트 프로필 편집(2026-10-13)은 연도까지(YYYY-MM-DD)만 저장한다. 저장된 값이 MM-DD 면 칸 아래 '연도가 빠져 있어요' 안내 + 그 칸에 포커스. 서버는 예전 클라이언트 호환으로 MM-DD 도 받는다.
         # 프로필 카드는 "생년월일 1990년 3월 15일", 연도가 없으면 "생일 3월 15일"로 보여 준다.
 
 Room    {room_id:str, type:"direct"|"group"|"self", name:str,        # direct/self의 name은 ""(클라이언트가 표시명 계산)
@@ -302,6 +305,17 @@ online `#3DD16B` · away `#F5B400`(자리비움) · busy `#FF4B3E`(다른 용무
 - 구현: `server/kakao/rag.py` `RagService(db_path)` — SQLite FTS5(trigram) 검색 + 생성기:
   `ANTHROPIC_API_KEY`와 `anthropic` 패키지가 있으면 Claude로 답변 생성, 없으면 검색 결과 기반 요약(추출형) 답변.
 
+#### 7.6.1 사내 포털 RAG 연동 (portal.kcins.co.kr, 2026-10-13)
+- `server/kakao/portal.py` `PortalRag(local, config, outbox_path)` 가 `RagService` 를 감싼다(같은 메서드 제공, 색인·문서 학습은 자체 RAG 에 위임). 배포 진입점 `server/chat/chat_server.py`(= `kcs.py server`)는 기본으로 켜고 `--no-portal` · `KCS_PORTAL=off` 로 끈다. `KakaoServer(portal=None)`(테스트 기본)이면 자체 RAG 만.
+- **질문:** AI 비서 트리거(§7.6 (a)(b) 그대로 - 봇 1:1 방 · 그룹방 `@AI 비서`)가 오면 서버가 포털 RAG 에 묻고 그 답을 봇 메시지로 게시. 출처가 오면 답 끝에 `📎 출처 (사내 포털)` 목록. 포털이 준 대화 id 는 (방, 사용자)별로 기억해 다음 질문에 넘긴다(앞 대화 맥락).
+- **대체:** 포털 연결 실패 · HTTP 오류 · 답 없음 → 자체 RAG 답 + "(사내 포털에 연결하지 못해 메신저 자료로 답했어요)". 실패 후 30초 동안은 포털을 건너뛴다(답 지연 방지).
+- **저장:** 질문·답변 한 쌍을 매번 포털 저장 API 로 보낸다(포털 답 · 자체 답 모두, `answered_by: portal|local`). DB 폴더의 `portal_outbox.db` 보낼 함에 먼저 넣고 백그라운드 스레드가 보낸다. 실패하면 남겨 두고 `retry_seconds`(기본 60초)마다 순서대로 다시 보낸다(서버 재시작 후에도).
+- **요청 (api_style=kcs, 기본):** `POST {base_url}{ask_path}`(기본 `/api/rag/ask`) `{question, query, user, user_name, room_id, conversation_id, history:[{role,content}] (최근 10, 지금 질문 제외), source:"kcs-talk", model?}` → 응답에서 답(`answer` · `data.answer` · `response` · `text` · `content` · `choices[0].message.content` · `result` 중 처음), 출처(`sources` · `references` · `citations` · `documents` - 문자열 또는 `{title|name, url|link}`), 대화 id(`conversation_id` · `session_id` · `chat_id` · `id`). 일반 텍스트 응답도 답으로 받는다.
+  `api_style=openai`: `POST /api/chat/completions`(ask_path 를 바꾸면 그 경로) `{model?, messages, stream:false, user}`.
+- **저장 요청:** `POST {base_url}{save_path}`(기본 `/api/rag/conversations`) `{source:"kcs-talk", conversation_id, user, user_name, room_id, room_name, answered_by, messages:[{role:"user",content,timestamp},{role:"assistant",content,timestamp}], created_at}`. 2xx 면 보냄.
+- **인증 · 설정:** `{auth_header}: {auth_scheme} {token}`(기본 `Authorization: Bearer …`) + `headers`. 설정은 DB 폴더의 `portal.json`(예: `docs/portal.example.json`) 위에 환경변수 `KCS_PORTAL_URL` · `KCS_PORTAL_TOKEN` · `KCS_PORTAL_ASK_PATH` · `KCS_PORTAL_SAVE_PATH` · `KCS_PORTAL_STYLE` · `KCS_PORTAL_MODEL` · `KCS_PORTAL_TIMEOUT` 가 덮어쓴다. `verify_tls:false` 는 사내 사설 인증서용.
+- 연결 점검: `python3 scripts/portal_check.py ["질문"]` - 설정을 읽어 질문 1건 · 저장 1건을 보내고 결과를 보여 준다.
+
 ### 7.7 조직도 v2 (2026-10-08)
 - `server_data/org.json` v2: `{"version":2, "holding":{name,business,homepage,phone}, "companies":[{name,business,homepage,phone,units:[[경로]...]}], "include_demo_users":false, "users":[...]}` — `scripts/import_org_xlsx.py`가 회사 엑셀에서 생성.
 - User 추가 필드: `org_path:[str]`(예: ["기술연구소","연구1실","2팀(SI)"]), `account`, `extension`, `mobile`, `concurrent:[{org_path,title}]`.
@@ -324,7 +338,7 @@ online `#3DD16B` · away `#F5B400`(자리비움) · busy `#FF4B3E`(다른 용무
 | 채팅방 폴더 | 클라이언트 로컬 설정 `chat_folders:[{name, room_ids}]`. 기본 폴더: 전체 / 안읽음 / 즐겨찾기(고정된 방 + 즐겨찾기 친구와의 1:1). 안읽음 폴더에서 **읽지 않고 미리보기** |
 | 일정 변경 알림 | 클라이언트: 이미 알고 있는 일정이 다른 사람에 의해 바뀌면(제목/시간/장소) 트레이 알림 "일정이 변경되었습니다" |
 | 수정·삭제와 답장 | 원문을 수정·삭제하면 그 원문을 인용한 답장의 `reply_to.preview` 도 바꾸고 답장마다 `msg_updated` 를 보낸다(삭제된 원문 내용이 답장에 남지 않게). 이미 삭제된 메시지 수정은 오류 "삭제된 메시지는 수정할 수 없습니다." |
-| 안 읽은 메시지 아이콘 깜박임 | 클라이언트 전용: `total_unread()`(알림 끈 방 제외) > 0 이고 설정 `blink_unread`(기본 켬)면 600ms 간격으로 트레이·앱·창 아이콘(macOS Dock·Windows 작업 표시줄) 전체를 평소 아이콘 ↔ 거의 투명(12%)한 같은 아이콘으로 번갈아 보여 준다(빨간 점 등 덧그림 없음). 0이 되면 멈추고 평소 아이콘. `reduce_motion`이면 깜박이지 않고 흐린(45%) 아이콘 고정. macOS 에서 `python3` 로 실행해도 Dock 이름은 `client/kakao/macos.py` `set_app_name` 으로 'KCS Talk' |
+| 안 읽은 메시지 아이콘 깜박임 | 클라이언트 전용: `total_unread()`(알림 끈 방 제외) > 0 이고 설정 `blink_unread`(기본 켬)면 600ms 간격으로 트레이·앱·창 아이콘(macOS Dock·Windows 작업 표시줄) 전체를 평소 아이콘 ↔ 거의 투명(12%)한 같은 아이콘으로 번갈아 보여 준다(빨간 점 등 덧그림 없음). 0이 되면 멈추고 평소 아이콘. `reduce_motion`이면 깜박이지 않고 흐린(45%) 아이콘 고정. macOS 에서 `python3` 로 실행해도 Dock 이름은 'KCS Talk'(런처도): 요즘 Dock 은 실행 파일이 든 번들 이름(Python.app)만 보이므로 `client/kakao/macos.py` `run_in_app_bundle` 이 데이터 폴더 `macos/<번들 ID>/KCS Talk.app`(파이썬 실행 파일로의 심볼릭 링크 + Info.plist)에서 같은 프로세스를 다시 실행한다. 테스트(offscreen) · 빌드한 앱 · `KCS_NO_APP_BUNDLE=1` 은 그대로 |
 | 채팅방 사이드 일정 | 채팅방 서랍에 '일정' 탭 (그 방에서 만든 일정) |
 | AI 챗봇 | 채팅방 메뉴 "AI 비서 부르기"(초대), 채팅탭 상단 AI 버튼(봇 1:1 열기) |
 

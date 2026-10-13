@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""macOS 보정 (client/kakao/macos.py): Dock 이름 '케이씨에스' · 로그인 창 제목 표시줄을 본문과 한 배경으로"""
+"""macOS 보정 (client/kakao/macos.py): Dock 이름 'KCS Talk'(번들에서 다시 실행) · 로그인 창 제목 표시줄을 본문과 한 배경으로"""
 
 import os
 import subprocess
@@ -13,8 +13,8 @@ from client.kakao import macos
 
 
 class DockNameTests(unittest.TestCase):
-    def test_default_dock_name_is_company(self):
-        self.assertEqual(macos.DOCK_NAME, '케이씨에스')
+    def test_default_dock_name_is_product(self):
+        self.assertEqual(macos.DOCK_NAME, 'KCS Talk')
 
     def test_noop_off_macos_and_in_frozen_app(self):
         with mock.patch.object(sys, 'platform', 'linux'):
@@ -38,7 +38,44 @@ class DockNameTests(unittest.TestCase):
                              text=True, timeout=30).stdout
         if not out.startswith('ok'):
             self.skipTest(f'GUI 세션이 없어 LaunchServices 를 쓸 수 없음: {out.strip()[:80]}')
-        self.assertIn('"케이씨에스"', out)
+        self.assertIn('"KCS Talk"', out)
+
+
+class AppBundleTests(unittest.TestCase):
+    def test_noop_off_macos_frozen_and_offscreen(self):
+        with mock.patch.object(sys, 'platform', 'linux'):
+            self.assertFalse(macos.run_in_app_bundle('KCS Talk', 'kr.co.kcs.talk', '/tmp/x'))
+        with mock.patch.object(sys, 'frozen', True, create=True):
+            self.assertFalse(macos.run_in_app_bundle('KCS Talk', 'kr.co.kcs.talk', '/tmp/x'))
+        with mock.patch.dict(os.environ, {'QT_QPA_PLATFORM': 'offscreen'}):
+            self.assertFalse(macos.run_in_app_bundle('KCS Talk', 'kr.co.kcs.talk', '/tmp/x'))   # 테스트는 그대로
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'macOS 전용')
+    def test_dock_shows_bundle_name_not_python(self):
+        # 요즘 Dock 은 실행 파일이 든 번들 이름을 보인다: KCS Talk.app 안에서 다시 실행되어 번들 경로 · 이름이 바뀐다
+        import tempfile
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        code = ("import os, subprocess, sys\n"
+                "from client.kakao.macos import run_in_app_bundle\n"
+                "run_in_app_bundle('KCS Talk', 'kr.co.kcs.talk.test', sys.argv[1])\n"
+                "from PyQt5.QtWidgets import QApplication\n"
+                "app = QApplication([])\n"
+                "print(sys.argv[1:], subprocess.run(['lsappinfo', 'info', str(os.getpid())],"
+                " capture_output=True, text=True).stdout)\n")
+        with tempfile.TemporaryDirectory() as home:
+            env = dict(os.environ, QT_QPA_PLATFORM='cocoa')
+            env.pop('KCS_NO_APP_BUNDLE', None)
+            out = subprocess.run([sys.executable, '-c', code, home], cwd=root, env=env, capture_output=True,
+                                 text=True, timeout=30).stdout
+            if 'bundle path' not in out:
+                self.skipTest(f'GUI 세션이 없어 LaunchServices 를 쓸 수 없음: {out.strip()[:80]}')
+            self.assertIn(repr([home]), out)                                   # 인자는 그대로 넘어간다
+            self.assertIn('"KCS Talk"', out)
+            self.assertIn('kr.co.kcs.talk.test/KCS Talk.app"', out)
+            self.assertNotIn('Python.app"', out.split('bundle path')[1].splitlines()[0])
+            again = subprocess.run([sys.executable, '-c', code, home], cwd=root, env=env, capture_output=True,
+                                   text=True, timeout=30).stdout
+            self.assertIn('KCS Talk.app"', again)                              # 이미 있는 번들을 그대로 쓴다
 
 
 class UnifiedTitleBarTests(unittest.TestCase):

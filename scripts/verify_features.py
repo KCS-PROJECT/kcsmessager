@@ -31,6 +31,7 @@ OTHER = '기타'
 
 # (테스트 id 정규식 'module.Class.method', 기능 key) - 위에서부터 먼저 맞는 것
 MAPPING = [
+    (r'test_kakao_portal\.', 'ai_chat'),          # 사내 포털 RAG 연동 (명세 §7.6.1)
     (r'test_kakao_file_security|test_kakao_bugfixes\.FilePolicyBypass', 'file_security'),
     (r'test_kakao_bugfixes\.(ServerInput|StoreRollback|CrashGuard)', 'platforms'),
     (r'test_kakao_bugfixes\.(Connection|SessionReconnect|AccountSecurity)', 'login'),

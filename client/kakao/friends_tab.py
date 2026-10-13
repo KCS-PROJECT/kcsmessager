@@ -6,11 +6,11 @@
 
 import base64
 
-from PyQt5.QtCore import Qt, QBuffer, QByteArray, QIODevice, QRectF
+from PyQt5.QtCore import Qt, QBuffer, QByteArray, QIODevice, QRectF, QEvent, QPoint, QTimer
 from PyQt5.QtGui import QImage, QPainter, QColor, QPen, QFontMetrics
 from PyQt5.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QLabel, QMenu, QDialog,
                              QLineEdit, QPushButton, QFileDialog, QFormLayout, QSizePolicy,
-                             QMessageBox, QFrame, QGridLayout, QAbstractButton, QScrollArea)
+                             QMessageBox, QFrame, QGridLayout, QAbstractButton, QScrollArea, QApplication)
 
 from client.kakao import theme
 from client.kakao.widgets import Avatar, make_icon
@@ -46,6 +46,22 @@ def parse_birthday(text):
     if len(text) == 10 and not (1900 <= day.year and day <= date.today()):
         return None
     return day
+
+
+def normalize_birthday(text):
+    """'198001-04' · '19800104' · '1980.01.04' · '1980/1/4' 처럼 입력해도 'YYYY-MM-DD' 로 맞춘다 (못 맞추면 그대로)"""
+    import re
+    text = (text or '').strip()
+    m = re.fullmatch(r'(\d{4})[-./ ]?(\d{1,2})[-./ ]?(\d{1,2})', text)
+    if not m or (not re.search(r'[-./ ]', text) and len(text) != 8):     # 구분자 없으면 8자리만 (짐작 금지)
+        return text
+    return f'{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}'
+
+
+def birthday_missing_year(value):
+    """월·일만 있는 생일(MM-DD)인가 - 프로필 편집에서 연도를 넣도록 안내한다"""
+    text = (value or '').strip()
+    return len(text) == 5 and parse_birthday(text) is not None
 
 
 def birthday_text(value):
@@ -389,6 +405,15 @@ class ProfileEditDialog(QDialog):
         form.addRow('이름', self.name_edit)
         form.addRow('상태메시지', self.status_edit)
         form.addRow('생년월일', self.birthday_edit)
+        # 예전에 월·일만(MM-DD) 저장된 생일은 연도가 안 보인다 - 연도를 넣도록 칸 아래에 안내하고 그 칸으로 이동
+        md = (me.get('birthday') or '').strip() if birthday_missing_year(me.get('birthday')) else '03-15'
+        self.birthday_hint = QLabel(f'연도가 빠져 있어요. 1990-{md}처럼 앞에 연도를 넣어 주세요.')
+        self.birthday_hint.setWordWrap(True)
+        self.birthday_hint.setStyleSheet(f"color: {theme.c('danger_text')}; font-size: {theme.fs('caption')}px;")
+        self.birthday_hint.setVisible(birthday_missing_year(me.get('birthday')))
+        form.addRow('', self.birthday_hint)
+        self.birthday_edit.textChanged.connect(
+            lambda text: self.birthday_hint.setVisible(birthday_missing_year(text)))
         self.mobile_edit = QLineEdit(me.get('mobile') or '')
         self.mobile_edit.setPlaceholderText('010-1234-5678')
         self.mobile_edit.setMaxLength(20)
@@ -428,6 +453,14 @@ class ProfileEditDialog(QDialog):
         self.clear_photo_button.clicked.connect(self.clear_photo)
         connect_avatar_changed(state, self._refresh_avatar)
         self._refresh_avatar()
+        if self.birthday_hint.isVisibleTo(self):
+            self.birthday_edit.setFocus()
+            QTimer.singleShot(0, self._caret_before_birthday)   # 창이 뜬 뒤 (포커스가 글자를 전체 선택하므로)
+
+    def _caret_before_birthday(self):
+        """월·일은 남겨 두고 맨 앞에 연도를 바로 입력하게 - 전체 선택을 풀고 커서를 맨 앞으로"""
+        self.birthday_edit.deselect()
+        self.birthday_edit.setCursorPosition(0)
 
     def _refresh_avatar(self):
         self.avatar.setPixmap(user_pixmap(self.state, self.state.me, 96))
@@ -464,7 +497,7 @@ class ProfileEditDialog(QDialog):
     def values(self):
         return {'display_name': self.name_edit.text().strip() or self.state.me,
                 'status_message': self.status_edit.text().strip(),
-                'birthday': self.birthday_edit.text().strip() or None,
+                'birthday': normalize_birthday(self.birthday_edit.text()) or None,
                 **self._contact_changes(), **self._deputy_changes()}
 
     def _deputy_changes(self):
@@ -486,8 +519,9 @@ class ProfileEditDialog(QDialog):
     def accept(self):
         values = self.values()
         birthday = values['birthday']
-        if birthday and parse_birthday(birthday) is None:
-            self._show_error('생년월일은 YYYY-MM-DD 형식으로 입력해 주세요. (예: 1990-03-15)', self.birthday_edit)
+        if birthday and (parse_birthday(birthday) is None or birthday_missing_year(birthday)):
+            self._show_error('생년월일은 연도까지 YYYY-MM-DD 형식으로 입력해 주세요. (예: 1990-03-15)',
+                             self.birthday_edit)
             return
         if values.get('mobile') and self.state.contact_kind(values['mobile']) != 'phone':
             self._show_error('전화번호 형식이 올바르지 않습니다. (예: 010-1234-5678)', self.mobile_edit)
@@ -942,6 +976,17 @@ class FriendRow(QWidget):
         elif kind != 'bot' and user.get('status_message'):
             self.status = StatusPill(user['status_message'])
             row.addWidget(self.status, 0, Qt.AlignVCenter)
+        self.picked = False
+        self.setObjectName('friendRow')
+        self.setAttribute(Qt.WA_StyledBackground, True)
+
+    def set_picked(self, picked):
+        """Shift+클릭 · Shift+끌기로 대화상대에 고른 행 - 선택 바탕으로 칠한다"""
+        if picked == self.picked:
+            return
+        self.picked = picked
+        self.setStyleSheet(f"QWidget#friendRow {{ background: {theme.c('bg_selected')}; }}" if picked else '')
+        self.setAccessibleDescription('대화상대로 선택됨' if picked else '')
 
 
 class SectionHeader(QWidget):
@@ -995,6 +1040,8 @@ class FriendsTab(QWidget):
         self.settings = settings
         self.collapsed = {'offline'}
         self.sections = {}
+        self.picked = {}            # Shift+클릭 · Shift+끌기로 고른 대화상대 (고른 순서 유지)
+        self._pick_drag = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -1018,6 +1065,37 @@ class FriendsTab(QWidget):
 
         self.list = RowList()
         layout.addWidget(self.list, 1)
+
+        # 여러 명 고르기: 'N명 선택 · 이름…  [선택 해제] [대화방 만들기]' (고른 사람이 있을 때만)
+        self.pick_bar = QFrame()
+        self.pick_bar.setObjectName('pickBar')
+        bar = QHBoxLayout(self.pick_bar)
+        bar.setContentsMargins(theme.GUTTER, theme.sp('s'), theme.sp('m'), theme.sp('s'))
+        bar.setSpacing(theme.sp('xs'))
+        self.pick_count = ElidedLabel('', 'body', 'text', bold=True)
+        self.pick_count.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.pick_names = ElidedLabel('', 'meta', 'text_sub')
+        self.pick_clear_button = QPushButton('선택 해제')
+        self.pick_clear_button.setObjectName('pickClear')
+        self.pick_chat_button = QPushButton('대화방 만들기')
+        self.pick_chat_button.setObjectName('pickChat')
+        for btn in (self.pick_clear_button, self.pick_chat_button):
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setAccessibleName(btn.text())
+        bar.addWidget(self.pick_count, 0, Qt.AlignVCenter)
+        bar.addWidget(self.pick_names, 1, Qt.AlignVCenter)
+        bar.addWidget(self.pick_clear_button, 0, Qt.AlignVCenter)
+        bar.addWidget(self.pick_chat_button, 0, Qt.AlignVCenter)
+        self.pick_bar.hide()
+        layout.addWidget(self.pick_bar)
+        self.pick_clear_button.clicked.connect(lambda _c=False: self.clear_picks())
+        self.pick_chat_button.clicked.connect(lambda _c=False: self.create_from_picks())
+        # 끌다가 목록 위/아래 끝에 닿으면 저절로 넘겨 끝까지 고를 수 있게
+        self._pick_scroll = QTimer(self)
+        self._pick_scroll.setInterval(30)
+        self._pick_scroll.timeout.connect(self._pick_autoscroll)
+        self.list.viewport().installEventFilter(self)
+        self.list.installEventFilter(self)
 
         self.search_button.clicked.connect(self.toggle_search)
         self.group_button.clicked.connect(self.show_create_dialog)
@@ -1117,6 +1195,159 @@ class FriendsTab(QWidget):
                 self.list.add_row(FriendRow(self.state, name, kind, on_gift=self.send_gift),
                                   ('friend', name, key))
         self.list.verticalScrollBar().setValue(scroll)
+        # 친구가 아니게 된 사람은 고른 목록에서 뺀다 (검색으로 가려진 사람은 그대로 둔다)
+        friends_now = {f['username'] for f in friends}
+        self.picked = {n: True for n in self.picked if n in friends_now}
+        self._apply_picks()
+
+    # ---- 여러 명 골라 대화방 만들기 (Shift+클릭 · Shift+끌기) ----
+    @staticmethod
+    def _pickable(data):
+        """대화상대로 고를 수 있는 행이면 사용자명 (AI 비서 · 내 프로필 · 구역 머리글 제외)"""
+        if data and data[0] == 'friend' and tuple(data[2:3]) != ('bot',):
+            return data[1]
+        return None
+
+    def picked_members(self):
+        return list(self.picked)
+
+    def toggle_pick(self, username):
+        if username in self.picked:
+            del self.picked[username]
+        else:
+            self.picked[username] = True
+        self._apply_picks()
+
+    def clear_picks(self):
+        self.picked = {}
+        self._apply_picks()
+
+    def pick_range(self, first, last, base=None):
+        """목록 행 first~last(순서 무관) 사이 친구를 모두 고른다. 끌기 범위 안의 접힌 구역은
+        구성원 전체를 넣는다 (기본으로 접힌 '오프라인'까지 끝까지 끌면 모두 선택)"""
+        lo, hi = sorted((first, last))
+        picked = dict(self.picked if base is None else base)
+        query = self.search_edit.text().strip()
+        for i in range(max(lo, 0), min(hi, self.list.count() - 1) + 1):
+            data = self.list.item(i).data(Qt.UserRole)
+            name = self._pickable(data)
+            if name:
+                picked[name] = True
+            elif data and data[0] == 'section' and data[1] != 'bot' and data[1] in self.collapsed and not query:
+                for member in self.sections.get(data[1], []):
+                    picked[member] = True
+        self.picked = picked
+        self._apply_picks()
+
+    def _apply_picks(self):
+        for item in self.list.items():
+            widget = self.list.itemWidget(item)
+            if isinstance(widget, FriendRow):
+                widget.set_picked(widget.username in self.picked)
+        names = list(self.picked)
+        self.pick_bar.setVisible(bool(names))
+        if not names:
+            return
+        shown = [self.state.display_name(n) for n in names[:3]]
+        rest = f' 외 {len(names) - 3}명' if len(names) > 3 else ''
+        self.pick_count.setText(f'{len(names)}명 선택')
+        self.pick_count.setFixedWidth(self.pick_count.sizeHint().width())
+        self.pick_names.setText(', '.join(shown) + rest)
+        self.pick_names.setToolTip(', '.join(self.state.display_name(n) for n in names))
+        # 한 명이면 1:1 채팅, 두 명 이상이면 그룹 대화방 (CreateGroupDialog 와 같은 규칙)
+        self.pick_chat_button.setText('1:1 채팅' if len(names) == 1 else '대화방 만들기')
+        self.pick_chat_button.setAccessibleName(self.pick_chat_button.text())
+
+    def create_from_picks(self, exec_=True, also=None):
+        """고른 사람(+ also)이 미리 체크된 대화상대 선택 창 → 확인하면 방 이름을 정해 대화방을 만든다"""
+        if also:
+            self.picked[also] = True
+            self._apply_picks()
+        if not self.picked:
+            return None
+        dlg = CreateGroupDialog(self.state, self.window(), preselected=list(self.picked))
+        if exec_ and dlg.exec_() == QDialog.Accepted:
+            self.clear_picks()
+        return dlg
+
+    def _row_at(self, pos):
+        """뷰포트 좌표의 행 번호. 목록 위/아래 밖이면 맨 처음/맨 끝 행"""
+        count = self.list.count()
+        if not count:
+            return -1
+        vp = self.list.viewport()
+        y = min(max(pos.y(), 0), vp.height() - 1)
+        item = self.list.itemAt(QPoint(max(0, min(pos.x(), vp.width() - 1)), y))
+        if item is not None:
+            return self.list.row(item)
+        last = self.list.item(count - 1)
+        return count - 1 if y >= self.list.visualItemRect(last).top() else 0
+
+    def _pick_drag_to(self, pos):
+        drag = self._pick_drag
+        drag['pos'] = pos
+        self.pick_range(drag['anchor'], self._row_at(pos), base=drag['base'])
+
+    def _pick_autoscroll(self):
+        drag = self._pick_drag
+        if not drag or not drag.get('moved'):
+            self._pick_scroll.stop()
+            return
+        bar = self.list.verticalScrollBar()
+        y, h, edge = drag['pos'].y(), self.list.viewport().height(), theme.px(24)
+        step = 0
+        if y < edge:
+            step = -max(4, (edge - y) // 2)
+        elif y > h - edge:
+            step = max(4, (y - (h - edge)) // 2)
+        if not step:
+            self._pick_scroll.stop()
+            return
+        bar.setValue(bar.value() + step)
+        self._pick_drag_to(drag['pos'])
+
+    def eventFilter(self, obj, event):
+        kind = event.type()
+        if obj is self.list:
+            if kind == QEvent.KeyPress and event.key() == Qt.Key_Escape and self.picked:
+                self.clear_picks()                       # Esc → 고른 사람 모두 해제
+                return True
+            return False
+        if obj is not self.list.viewport():
+            return False
+        # 빠르게 두 번 누르면 두 번째 누름은 DblClick 으로 온다 - Shift 중이면 1:1 방 대신 한 번 더 넣고 빼기
+        if kind in (QEvent.MouseButtonPress, QEvent.MouseButtonDblClick) and event.button() == Qt.LeftButton:
+            item = self.list.itemAt(event.pos())
+            name = self._pickable(item.data(Qt.UserRole) if item else None)
+            mods = event.modifiers()
+            if name and mods & (Qt.ShiftModifier | Qt.ControlModifier):
+                # Shift(·Ctrl/⌘)+누름: 놓으면 한 명씩 넣고 빼기, 누른 채 끌면 그 사이 전부 선택
+                self._pick_drag = {'anchor': self.list.row(item), 'name': name, 'start': event.pos(),
+                                   'pos': event.pos(), 'base': dict(self.picked), 'moved': False}
+                self.list.setFocus(Qt.MouseFocusReason)
+                return True
+            if name and self.picked:
+                self.clear_picks()                       # 그냥 누르면 여러 명 선택은 풀린다
+            return False
+        if self._pick_drag is None:
+            return False
+        if kind == QEvent.MouseMove and event.buttons() & Qt.LeftButton:
+            drag = self._pick_drag
+            if not drag['moved']:
+                if (event.pos() - drag['start']).manhattanLength() < QApplication.startDragDistance():
+                    return True
+                drag['moved'] = True
+            self._pick_drag_to(event.pos())
+            if not self._pick_scroll.isActive():
+                self._pick_scroll.start()
+            return True
+        if kind == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
+            drag, self._pick_drag = self._pick_drag, None
+            self._pick_scroll.stop()
+            if not drag['moved']:
+                self.toggle_pick(drag['name'])
+            return True
+        return False
 
     # ---- 동작 ----
     def _on_setting(self, key):
@@ -1157,8 +1388,33 @@ class FriendsTab(QWidget):
             dlg.exec_()
         return dlg
 
+    def _add_pick_actions(self, menu, name=None):
+        """우클릭으로 대화상대 고르기 · 고른 사람들과 대화방 만들기 (Shift+클릭과 같은 선택 목록)"""
+        picked = list(self.picked)
+        if name and name not in self.picked and picked:
+            # 고른 사람들 + 우클릭한 사람으로 바로 방 만들기
+            menu.addAction(f'선택한 {len(picked)}명 + {self.state.display_name(name)} 대화방 만들기…',
+                           lambda: self.create_from_picks(also=name))
+        elif picked:
+            menu.addAction(f'선택한 {len(picked)}명과 대화방 만들기…' if len(picked) > 1
+                           else f'{self.state.display_name(picked[0])}님과 1:1 채팅',
+                           lambda: self.create_from_picks())
+        if name:
+            menu.addAction('선택에서 빼기' if name in self.picked else '대화상대로 선택 (Shift+클릭)',
+                           lambda: self.toggle_pick(name))
+        if picked:
+            menu.addAction('선택 해제', self.clear_picks)
+        if not menu.isEmpty():
+            menu.addSeparator()
+
     def context_menu_for(self, data):
         menu = QMenu(self)
+        if data is None or data[0] == 'section':
+            # 빈 곳 · 구역 머리글 우클릭: 고른 사람이 있을 때만 대화방 만들기 메뉴
+            if not self.picked:
+                return None
+            self._add_pick_actions(menu)
+            return menu
         if data[0] == 'me':
             menu.addAction('프로필 편집', self.edit_profile)
             menu.addAction('나와의 채팅', lambda: self.state.open_direct(self.state.me))
@@ -1167,6 +1423,8 @@ class FriendsTab(QWidget):
         if data[0] != 'friend':
             return None
         name = data[1]
+        if self._pickable(data) and not self.state.user(name).get('is_bot'):
+            self._add_pick_actions(menu, name)
         menu.addAction('1:1 채팅', lambda: self.state.open_direct(name))
         if not self.state.user(name).get('is_bot'):
             fav = self.state.is_favorite(name)
@@ -1199,9 +1457,7 @@ class FriendsTab(QWidget):
 
     def _show_context_menu(self, pos):
         item = self.list.itemAt(pos)
-        if item is None:
-            return
-        menu = self.context_menu_for(item.data(Qt.UserRole))
+        menu = self.context_menu_for(item.data(Qt.UserRole) if item is not None else None)
         if menu is not None:
             menu.exec_(self.list.viewport().mapToGlobal(pos))
 
@@ -1210,6 +1466,10 @@ class FriendsTab(QWidget):
         self.search_edit.setStyleSheet(search_box_qss())
         self.story_bar.apply_theme()
         self.story_line.setStyleSheet(f"background: {theme.c('border')}; margin: 0 16px;")
+        self.pick_bar.setStyleSheet(
+            f"QFrame#pickBar {{ background: {theme.c('bg')}; border-top: 1px solid {theme.c('border')}; }}"
+            + theme.button_qss('pickClear', 'ghost', size='meta', pad='6px 10px')
+            + theme.button_qss('pickChat', 'primary', size='meta', pad='6px 12px'))
         self.setAttribute(Qt.WA_StyledBackground, True)
         self.setStyleSheet(f"FriendsTab {{ background: {theme.c('bg')}; }}")
         self.refresh()

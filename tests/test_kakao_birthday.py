@@ -9,7 +9,8 @@ from datetime import date, timedelta
 from tests.kakao_fakes import app, make_demo_state
 from tests.test_kakao_server import ServerTestBase
 
-from client.kakao.friends_tab import ProfileDialog, ProfileEditDialog, parse_birthday, birthday_text
+from client.kakao.friends_tab import (ProfileDialog, ProfileEditDialog, birthday_missing_year, birthday_text,
+                                     normalize_birthday, parse_birthday)
 from client.kakao.state import birthday_md
 
 
@@ -77,6 +78,52 @@ class BirthDateClientTests(unittest.TestCase):
         dlg.birthday_edit.setText('1990-03-15')
         dlg.accept()
         self.assertEqual(self.conn.last('profile_update')['birthday'], '1990-03-15')
+
+    def test_birthday_profile_edit_asks_year_when_missing(self):
+        """예전에 월·일만 저장된 생일(01-04)이면 연도가 빠졌다고 안내하고, 연도 없이는 저장하지 않는다"""
+        self.assertTrue(birthday_missing_year('01-04'))
+        self.assertFalse(birthday_missing_year('1980-01-04'))
+        self.assertFalse(birthday_missing_year(''))
+        self.assertFalse(birthday_missing_year('13-40'))
+        self.state.users[self.state.me]['birthday'] = '01-04'
+        dlg = ProfileEditDialog(self.state)
+        self.assertEqual(dlg.birthday_edit.text(), '01-04')
+        self.assertTrue(dlg.birthday_hint.isVisibleTo(dlg))
+        self.assertIn('연도', dlg.birthday_hint.text())
+        dlg.accept()
+        self.assertIsNone(self.conn.last('profile_update'))
+        self.assertIn('연도까지', dlg.error_label.text())
+        dlg.birthday_edit.setText('1980-01-04')
+        self.assertFalse(dlg.birthday_hint.isVisibleTo(dlg))
+        dlg.accept()
+        self.assertEqual(self.conn.last('profile_update')['birthday'], '1980-01-04')
+        self.state.users[self.state.me]['birthday'] = '1980-01-04'
+        dlg2 = ProfileEditDialog(self.state)
+        self.assertFalse(dlg2.birthday_hint.isVisibleTo(dlg2))
+        self.state.users[self.state.me]['birthday'] = None        # 생일을 비우는 것은 된다
+        dlg3 = ProfileEditDialog(self.state)
+        dlg3.accept()
+        self.assertIsNone(self.conn.last('profile_update')['birthday'])
+
+    def test_birthday_type_year_in_front(self):
+        """01-04 앞에 커서가 있어 연도만 치면(198001-04) 1980-01-04 로 저장된다"""
+        from PyQt5.QtCore import QCoreApplication
+        from PyQt5.QtTest import QTest
+        self.assertEqual(normalize_birthday('19800104'), '1980-01-04')
+        self.assertEqual(normalize_birthday('1980/1/4'), '1980-01-04')
+        self.assertEqual(normalize_birthday('1980104'), '1980104')          # 짐작하지 않는다
+        self.state.users[self.state.me]['birthday'] = '01-04'
+        dlg = ProfileEditDialog(self.state)
+        self.assertIn('1990-01-04', dlg.birthday_hint.text())
+        dlg.show()
+        QCoreApplication.processEvents()
+        dlg._caret_before_birthday()
+        self.assertFalse(dlg.birthday_edit.hasSelectedText())
+        self.assertEqual(dlg.birthday_edit.cursorPosition(), 0)
+        QTest.keyClicks(dlg.birthday_edit, '1980')
+        self.assertEqual(dlg.birthday_edit.text(), '198001-04')
+        dlg.accept()
+        self.assertEqual(self.conn.last('profile_update')['birthday'], '1980-01-04')
 
     def test_birthday_friends_match_birth_date(self):
         today = date.today()

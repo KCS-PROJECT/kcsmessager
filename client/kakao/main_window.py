@@ -593,6 +593,16 @@ class TitleBand(QWidget):
                     p.fillRect(widget.x(), 0, widget.width(), self.band, theme.qc(key))
 
 
+def bring_window_to_front(win):
+    """창을 맨 앞에 활성화. 최소화돼 있으면 되살리되 최대화 · 전체 화면은 그대로 둔다 -
+    showNormal() 은 최대화를 풀고 처음 크기로 되돌려, 채팅 목록에서 연 방이 새 창으로 다시 열린 것처럼 보였다"""
+    if win.isMinimized():
+        win.setWindowState(win.windowState() & ~Qt.WindowMinimized)
+    win.show()
+    win.raise_()
+    win.activateWindow()
+
+
 class MainWindow(QMainWindow):
     def __init__(self, state, settings, reconnect=None, server_address='', parent=None, logout=None):
         super().__init__(parent)
@@ -926,9 +936,7 @@ class MainWindow(QMainWindow):
                     self.room_pane.setCurrentWidget(win)
                     win.setFocus()
                     return win
-                win.showNormal()
-                win.raise_()
-                win.activateWindow()
+                bring_window_to_front(win)   # 이미 열린 창을 그대로 (최대화 · 전체 화면 · 크기 · 위치 유지)
                 return win
             except RuntimeError:  # 이미 삭제된 C++ 객체
                 self.room_windows.pop(room_id, None)
@@ -1032,9 +1040,7 @@ class MainWindow(QMainWindow):
     def bring_to_front(self):
         if self.is_locked():
             self.lock_screen.show_over()
-        self.showNormal()
-        self.raise_()
-        self.activateWindow()
+        bring_window_to_front(self)
 
     def _app_focused_on(self, room_id):
         active = QApplication.activeWindow()

@@ -27,6 +27,7 @@ DEFAULTS = {
     'chat_folders': [],
     'hidden_friends': [],
     'hidden_story_users': [],
+    'members_strip_open': [],   # 참여자 줄을 펼쳐 둔 채팅방 room_id (방마다 기억)
     'failed_messages': [],      # 연결이 끊겨 보내지 못한 메시지 (재전송/삭제 전까지 보존)   # 소식(펑)을 숨긴 친구 (카카오톡 2026 2차 업데이트)
     'alert_keywords': [],
     'dnd_until': '',             # 방해금지: 이 시각까지 알림 일시중지 (§10.1)

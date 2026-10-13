@@ -365,6 +365,52 @@ class LauncherTest(unittest.TestCase):
 
 
 
+class LatinInputTests(unittest.TestCase):
+    """사번 칸: 포커스가 오면 한글 대신 영문 입력 (macOS 입력 소스 · Windows IME)"""
+
+    def setUp(self):
+        app()
+
+    def test_login_id_fields_prefer_latin(self):
+        from PyQt5.QtCore import Qt
+        from client.kakao.login import LoginDialog
+        dlg = LoginDialog(fresh=True)
+        self.addCleanup(dlg.deleteLater)
+        for edit in (dlg.name_edit, dlg.reg_employee_edit, dlg.reset_id_edit):
+            self.assertTrue(edit.inputMethodHints() & Qt.ImhLatinOnly, edit.objectName())
+            self.assertTrue(hasattr(edit, '_latin_filter'))
+
+    def test_focus_switches_input_per_os(self):
+        from PyQt5.QtCore import QEvent
+        from PyQt5.QtGui import QFocusEvent
+        from PyQt5.QtWidgets import QLineEdit
+        edit = QLineEdit()
+        self.addCleanup(edit.deleteLater)
+        flt = osenv.prefer_latin_input(edit)
+        with mock.patch.object(osenv, 'select_latin_input') as select, \
+                mock.patch.object(edit, 'hasFocus', return_value=True):
+            flt.eventFilter(edit, QFocusEvent(QEvent.FocusIn))
+            select.assert_not_called()                      # Qt 의 IME 처리 다음에
+            app().processEvents()
+        select.assert_called_once_with(edit)
+
+    def test_dispatch_by_os(self):
+        with mock.patch('PyQt5.QtGui.QGuiApplication.platformName', return_value='cocoa'):
+            with mock.patch.object(sys, 'platform', 'darwin'), \
+                    mock.patch('client.kakao.macos.select_ascii_input', return_value=True) as mac:
+                self.assertTrue(osenv.select_latin_input())
+            mac.assert_called_once()
+            widget = mock.Mock()
+            widget.window.return_value.winId.return_value = 42
+            with mock.patch.object(sys, 'platform', 'win32'), \
+                    mock.patch.object(osenv, '_windows_ime_alphanumeric', return_value=True) as win:
+                self.assertTrue(osenv.select_latin_input(widget))
+            win.assert_called_once_with(42)
+            with mock.patch.object(sys, 'platform', 'linux'):
+                self.assertFalse(osenv.select_latin_input(widget))
+        self.assertFalse(osenv.select_latin_input(mock.Mock()))   # offscreen: 이 PC 입력 소스는 건드리지 않는다
+
+
 class SystemIdleTests(unittest.TestCase):
     """컴퓨터 전체 무입력 시간 (자동 자리비움이 다른 앱에서의 마우스 움직임도 세도록)"""
 

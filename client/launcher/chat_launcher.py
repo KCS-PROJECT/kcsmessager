@@ -35,7 +35,7 @@ class ChatLauncher(QMainWindow):
         
     def init_ui(self):
         """Initialize launcher UI"""
-        self.setWindowTitle("KCS Talk Real Chat Launcher")
+        self.setWindowTitle("KCS Talk")
         
         # 윈도우 아이콘 설정 (옵션)
         self.setWindowIcon(self.style().standardIcon(QStyle.SP_ComputerIcon))
@@ -67,7 +67,7 @@ class ChatLauncher(QMainWindow):
             layout.addWidget(logo)
 
         # Title - 더 나은 타이포그래피
-        title = QLabel("KCS Talk 실시간 채팅 런처")
+        title = QLabel("KCS Talk")
         title.setAlignment(Qt.AlignCenter)
         title.setStyleSheet("""
             QLabel {
@@ -476,6 +476,9 @@ class ChatLauncher(QMainWindow):
         event.accept()
 
 
+LAUNCHER_NAME = 'KCS Talk'   # Dock 툴팁 · 메뉴 막대 이름 (번들 ID 로 메신저와 구분)
+
+
 def main():
     """Run the launcher"""
     # High DPI 지원 설정
@@ -488,10 +491,12 @@ def main():
     project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     if project_root not in sys.path:
         sys.path.insert(0, project_root)
-    from client.kakao.macos import set_app_name, set_dock_name
-    set_app_name('KCS Talk 런처')
+    from client.kakao import osenv
+    from client.kakao.macos import run_in_app_bundle, set_app_name, set_dock_name
+    run_in_app_bundle(LAUNCHER_NAME, osenv.APP_ID + '.launcher', osenv.app_home())   # Dock 툴팁 (되면 번들에서 다시 시작)
+    set_app_name(LAUNCHER_NAME)
     app = QApplication(sys.argv)
-    set_dock_name('케이씨에스 런처')   # Dock 툴팁 (QApplication 다음에)
+    set_dock_name(LAUNCHER_NAME)   # 번들로 못 옮겼을 때 (QApplication 다음에)
     from client.kakao import brand
     app.setWindowIcon(brand.app_icon())
     
@@ -507,7 +512,7 @@ def main():
     app.setFont(font)
     
     # 애플리케이션 정보 설정
-    app.setApplicationName("KCS Talk Real Chat Launcher")
+    app.setApplicationName("KCS Talk")
     app.setApplicationVersion("1.0")
     app.setOrganizationName("KCS Messenger")
     

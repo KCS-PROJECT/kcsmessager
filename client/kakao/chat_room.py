@@ -2022,6 +2022,183 @@ class ForwardDialog(_Dialog):
 
 
 
+class _StripHead(QWidget):
+    """참여자 줄 머리: 누르면 펼치기/접기 (키보드 Space·Enter 도)"""
+
+    def __init__(self, strip, parent=None):
+        super().__init__(parent)
+        self.strip = strip
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFocusPolicy(Qt.StrongFocus)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self.rect().contains(event.pos()):
+            self.strip.toggle()
+            return
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Space, Qt.Key_Return, Qt.Key_Enter):
+            self.strip.toggle()
+            return
+        super().keyPressEvent(event)
+
+
+def strip_chevron_pixmap(expanded, color, size=12):
+    """'›'(접힘) / '⌄'(펼침) - 친구 탭 구역 머리글과 같은 모양"""
+    pm = QPixmap(size * 2, size * 2)
+    pm.setDevicePixelRatio(2.0)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing)
+    pen = QPen(QColor(color), 1.6)
+    pen.setCapStyle(Qt.RoundCap)
+    pen.setJoinStyle(Qt.RoundJoin)
+    p.setPen(pen)
+    pts = [(2.5, 4), (6, 8), (9.5, 4)] if expanded else [(4, 2.5), (8, 6), (4, 9.5)]
+    p.drawPolyline(*[QPointF(x * size / 12, y * size / 12) for x, y in pts])
+    p.end()
+    return pm
+
+
+class MembersStrip(QFrame):
+    """헤더 아래 참여자 줄 - 모든 채팅방(나와의 채팅 제외)에 있다.
+    접힘: '대화상대 N명  김철수, 박민수 …  ›' 한 줄 / 펼침: + 사진·이름 칩 가로 목록, '⌄'.
+    머리 줄(또는 › 버튼)을 누르면 열렸다 닫혔다 하고, 방마다 설정 members_strip_open 에 기억한다.
+    내가 방금 만든 그룹방은 펼친 채로 연다. 초대 · 나가기로 인원이 바뀌면 refresh() 로 바로 고친다"""
+
+    CHIP_AVATAR = 32
+
+    def __init__(self, win, parent=None):
+        super().__init__(parent)
+        self.win, self.state = win, win.state
+        self.expanded = False
+        self.setObjectName('membersStrip')
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+        self.head = _StripHead(self, self)
+        self.head.setObjectName('stripHead')
+        self.head.setAttribute(Qt.WA_StyledBackground, True)
+        top = QHBoxLayout(self.head)
+        top.setContentsMargins(theme.sp('m'), theme.sp('xxs'), theme.sp('xs'), theme.sp('xxs'))
+        top.setSpacing(theme.sp('xs'))
+        self.title = _label('', 'stripTitle', self.head)
+        top.addWidget(self.title)
+        from client.kakao.chats_tab import ElidedLabel
+        self.preview = ElidedLabel('', 'meta', 'text_sub', parent=self.head)   # 접혔을 때 이름 미리보기
+        top.addWidget(self.preview, 1)
+        self.all_button = QPushButton('전체 보기', self.head)
+        self.all_button.setObjectName('stripAll')
+        self.all_button.setCursor(Qt.PointingHandCursor)
+        self.all_button.setAccessibleName('대화상대 전체 보기')
+        self.all_button.clicked.connect(lambda _c=False: self.win.show_members_popup(anchor=self.all_button))
+        top.addWidget(self.all_button)
+        self.toggle_button = QToolButton(self.head)
+        self.toggle_button.setObjectName('stripToggle')
+        self.toggle_button.setCursor(Qt.PointingHandCursor)
+        self.toggle_button.setAutoRaise(True)
+        self.toggle_button.setIconSize(QSize(12, 12))
+        self.toggle_button.setMinimumSize(theme.px(26), theme.px(26))
+        self.toggle_button.clicked.connect(lambda _c=False: self.toggle())
+        top.addWidget(self.toggle_button)
+        v.addWidget(self.head)
+        self.area = QScrollArea(self)
+        self.area.setObjectName('stripArea')
+        self.area.setFrameShape(QFrame.NoFrame)
+        self.area.setWidgetResizable(True)
+        self.area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.area.viewport().setObjectName('stripViewport')
+        self.area.hide()
+        wrap = QHBoxLayout()
+        wrap.setContentsMargins(theme.sp('s'), 0, theme.sp('s'), theme.sp('xs'))
+        wrap.addWidget(self.area)
+        v.addLayout(wrap)
+        self.chips = {}
+        self.refresh()
+
+    def members(self):
+        room = self.state.room(self.win.room_id) or {}
+        owner = room.get('owner')
+        # 나 → 방장 → 이름순 (팝업과 같은 기준에 방장을 앞으로)
+        return sorted(room.get('members', []), key=lambda u: (u != self.state.me, u != owner,
+                                                               self.state.display_name(u)))
+
+    def toggle(self):
+        self.win.set_members_strip(not self.expanded)
+
+    def set_expanded(self, expanded):
+        self.expanded = bool(expanded)
+        self.area.setVisible(self.expanded)
+        # 펼치면 사진 칩이 이름을 보여 주므로 미리보기는 비운다 (숨기면 늘림 칸이 사라져 버튼이 가운데로 온다)
+        self.preview.setText('' if self.expanded else self._preview_text)
+        self._refresh_toggle()
+
+    def _refresh_toggle(self):
+        self.toggle_button.setIcon(QIcon(strip_chevron_pixmap(self.expanded, theme.c('text_sub'))))
+        text = '대화상대 목록 접기' if self.expanded else '대화상대 목록 펼치기'
+        self.toggle_button.setToolTip(text)
+        self.toggle_button.setAccessibleName(text)
+        self.head.setToolTip(text)
+        self.head.setAccessibleName(f'{self.title.text()} - {text}')
+
+    def refresh(self):
+        c = theme.c
+        self.setStyleSheet(f"""
+            QFrame#membersStrip {{ background: {c('bg')}; border-bottom: 1px solid {c('border')}; }}
+            QWidget#stripHead {{ background: transparent; }}
+            QWidget#stripHead:hover {{ background: {c('bg_hover')}; }}
+            QLabel#stripTitle {{ background: transparent; color: {c('text')}; font-size: {theme.fs('meta')}px;
+                font-weight: bold; }}
+            QToolButton#stripToggle {{ background: transparent; border: none; border-radius: 6px; }}
+            QToolButton#stripToggle:hover {{ background: {c('bg_selected')}; }}
+            QScrollArea#stripArea, QWidget#stripViewport, QWidget#stripHost {{ background: transparent; border: none; }}
+            QToolButton#memChip {{ background: transparent; border: none; border-radius: 8px; padding: 2px 4px;
+                color: {c('text')}; font-size: {theme.fs('caption')}px; }}
+            QToolButton#memChip:hover {{ background: {c('bg_hover')}; }}
+            {theme.button_qss('stripAll', 'ghost', size='meta', pad='3px 8px')}
+            {theme.scrollbar_qss()}
+        """)
+        room = self.state.room(self.win.room_id) or {}
+        members = self.members()
+        self.title.setText(f'대화상대 {len(members)}명')
+        names = [('나' if u == self.state.me else self.state.member_name(self.win.room_id, u)) for u in members]
+        self._preview_text = ', '.join(names)
+        self.preview.setToolTip(self._preview_text)
+        host = QWidget()
+        host.setObjectName('stripHost')
+        h = QHBoxLayout(host)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(theme.sp('xxs'))
+        self.chips = {}
+        size = theme.px(self.CHIP_AVATAR)
+        fm = QFontMetrics(theme.font('caption'))
+        name_w = theme.px(60)
+        for u in members:
+            name = self.state.member_name(self.win.room_id, u)
+            label = '나' if u == self.state.me else fm.elidedText(name, Qt.ElideRight, name_w)
+            chip = QToolButton(host)
+            chip.setObjectName('memChip')
+            chip.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
+            chip.setIcon(QIcon(user_avatar_pixmap(self.state, u, size, show_presence=True)))
+            chip.setIconSize(QSize(size, size))
+            chip.setText(label)
+            chip.setCursor(Qt.PointingHandCursor)
+            extra = [x for x in ('방장' if u == room.get('owner') else '', self.state.org_text(u)) if x]
+            chip.setToolTip(' · '.join([name + (' (나)' if u == self.state.me else '')] + extra))
+            chip.setAccessibleName(f'{name} 프로필 보기')
+            chip.clicked.connect(lambda _c=False, name=u: self.win.open_profile(name))
+            h.addWidget(chip)
+            self.chips[u] = chip
+        h.addStretch(1)
+        self.area.setWidget(host)
+        bar = self.area.horizontalScrollBar().sizeHint().height()
+        self.area.setFixedHeight(host.sizeHint().height() + bar)
+        self.set_expanded(self.expanded)
+
+
 class MembersPopup(QFrame):
     """헤더의 대화상대 목록 팝업 (그룹방이면 초대 버튼 포함)"""
 
@@ -2314,6 +2491,11 @@ class ChatRoomWindow(QWidget):
         self._apply_styles()
         self._refresh_header()
         self._refresh_notice()
+        self._ensure_members_strip()
+        created = getattr(state, 'created_rooms', None)
+        if created is not None and room_id in created:
+            created.discard(room_id)
+            self.set_members_strip(True)    # 방금 만든 방: 누가 들어왔는지 펼쳐서 바로 보이게
         self._relayout_timer = QTimer(self)
         self._relayout_timer.setSingleShot(True)
         self._relayout_timer.setInterval(30)
@@ -2402,6 +2584,11 @@ class ChatRoomWindow(QWidget):
             btns.addWidget(b)
         hh.addLayout(btns)
         root.addWidget(self.header)
+
+        # 참여자 줄 (방을 만든 직후 · 방 메뉴에서 켜기)
+        self.members_strip = None
+        self._strip_index = root.count()
+        self._root_layout = root
 
         # 비밀채팅 안내 띠
         self.secret_banner = _label(SECRET_BANNER, 'secretBanner', self)
@@ -2905,6 +3092,8 @@ class ChatRoomWindow(QWidget):
         self._seps = {}
         self._refresh_header()
         self._refresh_notice()
+        if self.members_strip is not None:
+            self.members_strip.refresh()
         self._rebuild()
         self.update()
 
@@ -3468,6 +3657,8 @@ class ChatRoomWindow(QWidget):
         self._mention_names = None
         self._refresh_header()
         self._refresh_notice()
+        if self.members_strip is not None:
+            self.members_strip.refresh()        # 초대 · 나가기 · 방장 변경을 참여자 줄에도
         for row in self.rows.values():
             row.refresh_unread()
 
@@ -4181,6 +4372,10 @@ class ChatRoomWindow(QWidget):
         for _btn, label, slot in getattr(self, 'overflowed', []):   # 헤더에서 밀려난 아이콘
             if label not in present:
                 menu.addAction(label, slot)
+        if self.members_strip is not None:
+            shown = self.members_strip_visible()
+            menu.addAction('대화상대 목록 접기' if shown else '대화상대 목록 펼치기',
+                           lambda: self.set_members_strip(not shown))
         if room.get('type') == 'group':
             menu.addAction('채팅방 이름 변경', self.rename_room)
         bot_action = self._bot_menu_action(room)
@@ -4273,13 +4468,41 @@ class ChatRoomWindow(QWidget):
         popup.show()
         return popup
 
+    def members_strip_visible(self):
+        """참여자 줄이 펼쳐져(사진·이름 칩이 보여) 있나"""
+        return self.members_strip is not None and self.members_strip.expanded
+
+    def _ensure_members_strip(self):
+        """나와의 채팅을 뺀 모든 방에 참여자 줄(접힘)을 둔다. 펼침 여부는 방마다 설정에서 읽는다"""
+        room = self.state.room(self.room_id) or {}
+        if room.get('type') in (None, 'self'):
+            return None
+        if self.members_strip is None:
+            self.members_strip = MembersStrip(self, self)
+            self._root_layout.insertWidget(self._strip_index, self.members_strip)
+            settings = self.state.settings
+            opened = settings is not None and self.room_id in (settings.get('members_strip_open') or [])
+            self.members_strip.set_expanded(opened)
+        return self.members_strip
+
+    def set_members_strip(self, expanded):
+        """참여자 줄 펼치기/접기 - 방마다 기억한다"""
+        strip = self._ensure_members_strip()
+        if strip is None:
+            return
+        strip.set_expanded(expanded)
+        settings = self.state.settings
+        if settings is not None and (self.room_id in (settings.get('members_strip_open') or [])) != bool(expanded):
+            settings.toggle_in('members_strip_open', self.room_id)
+
     def build_members_popup(self):
         return MembersPopup(self, self)
 
-    def show_members_popup(self):
+    def show_members_popup(self, anchor=None):
         popup = self.build_members_popup()
         popup.adjustSize()
-        pos = self.count_label.mapToGlobal(self.count_label.rect().bottomLeft())
+        anchor = anchor if anchor is not None else self.count_label
+        pos = anchor.mapToGlobal(anchor.rect().bottomLeft())
         popup.move(pos.x(), pos.y() + 4)
         popup.show()
         self._members_popup = popup

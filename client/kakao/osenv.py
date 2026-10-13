@@ -11,6 +11,7 @@
   (Qt 는 QKeySequence 의 Ctrl 을 macOS 에서 ⌘ 로 자동으로 바꾸므로 키 연결은 어디서나 'Ctrl+…' 로 쓴다)
 - 시작 보정: prepare_process() (QApplication 전) · configure_app(app) (QApplication 직후)
 - 다시 실행: relaunch_command(argv)
+- 영문 입력: prefer_latin_input(edit) - 사번 칸에 포커스가 오면 한글 대신 영문 입력 상태로
 
 함수는 부를 때마다 sys.platform 을 읽는다 (테스트에서 OS 를 바꿔 끼울 수 있게).
 """
@@ -225,7 +226,8 @@ def prepare_process():
         from PyQt5.QtGui import QGuiApplication
         QGuiApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     if is_mac():
-        from client.kakao.macos import set_app_name
+        from client.kakao.macos import run_in_app_bundle, set_app_name
+        run_in_app_bundle(APP_NAME, APP_ID, app_home())   # Dock 툴팁에 'Python' 대신 (되면 번들에서 다시 시작)
         set_app_name(APP_NAME)                 # 메뉴 막대에 'Python' 대신
     elif is_windows():
         set_windows_app_id()                   # 작업 표시줄에 python.exe 아이콘 대신 앱 아이콘 · 한 묶음
@@ -251,9 +253,69 @@ def configure_app(app):
     app.setStyle('Fusion')                     # 세 OS 에서 같은 모양 (기본 스타일은 OS 마다 다르다)
     if is_mac():
         from client.kakao.macos import set_dock_name
-        set_dock_name()
+        set_dock_name(APP_NAME)
     elif is_linux() and hasattr(app, 'setDesktopFileName'):
         app.setDesktopFileName(DESKTOP_FILE)   # Wayland/GNOME 이 작업 표시줄 아이콘을 .desktop 과 잇는다
+
+
+# ---------------------------------------------------------------- 영문 입력 (사번 칸)
+def prefer_latin_input(edit):
+    """edit(QLineEdit)에 포커스가 올 때마다 입력을 영문으로 - 한글 상태로 사번을 치면 'ㅏㅡ' 처럼 들어갔다.
+    macOS: 입력 소스를 영문 자판으로, Windows: 그 창의 IME 를 영숫자 모드로, 그 밖: Qt 입력 힌트만"""
+    from PyQt5 import sip
+    from PyQt5.QtCore import QEvent, QObject, Qt, QTimer
+
+    edit.setInputMethodHints(edit.inputMethodHints() | Qt.ImhLatinOnly | Qt.ImhPreferLatin
+                             | Qt.ImhNoPredictiveText | Qt.ImhNoAutoUppercase)
+
+    class _Latin(QObject):
+        def eventFilter(self, obj, event):
+            if event.type() == QEvent.FocusIn:
+                QTimer.singleShot(0, self.apply)  # Qt 의 IME 처리 다음에 (이 객체가 지워지면 불리지 않는다)
+            return False
+
+        def apply(self):
+            if not sip.isdeleted(edit) and edit.hasFocus():   # 그사이 칸이 지워졌거나 포커스가 떠났으면 그대로
+                select_latin_input(edit)
+
+    edit._latin_filter = _Latin(edit)
+    edit.installEventFilter(edit._latin_filter)
+    if edit.hasFocus():
+        select_latin_input(edit)
+    return edit._latin_filter
+
+
+def select_latin_input(widget=None):
+    """지금 입력을 영문으로 바꾼다. 바꿨으면 True (이미 영문이거나 할 수 없으면 False)"""
+    from PyQt5.QtGui import QGuiApplication
+    if QGuiApplication.platformName() in ('offscreen', 'minimal'):   # 화면 없는 테스트: 이 PC 입력 소스는 그대로
+        return False
+    if is_mac():
+        from client.kakao.macos import select_ascii_input
+        return select_ascii_input()
+    if is_windows() and widget is not None:
+        return _windows_ime_alphanumeric(int(widget.window().winId()))
+    return False
+
+
+def _windows_ime_alphanumeric(hwnd):
+    """Windows: 창 hwnd 의 IME 를 영숫자(한/영 키의 '영') 상태로"""
+    try:
+        import ctypes
+        imm = ctypes.windll.imm32
+        imm.ImmGetContext.restype = ctypes.c_void_p
+        imm.ImmGetContext.argtypes = [ctypes.c_void_p]
+        imm.ImmReleaseContext.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        imm.ImmSetConversionStatus.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32]
+        himc = imm.ImmGetContext(hwnd)
+        if not himc:
+            return False
+        try:
+            return bool(imm.ImmSetConversionStatus(himc, 0, 0))   # IME_CMODE_ALPHANUMERIC · IME_SMODE_NONE
+        finally:
+            imm.ImmReleaseContext(hwnd, himc)
+    except (OSError, AttributeError):
+        return False
 
 
 # ---------------------------------------------------------------- 컴퓨터 전체 무입력 시간 (자동 자리비움)

@@ -183,6 +183,28 @@ class MainWindowTests(ShellTestBase):
         for w in list(win.room_windows.values()):
             w.close()
 
+    def test_chat_list_click_brings_existing_room_window_as_is(self):
+        # 채팅 목록에서 이미 열린 방을 다시 누르면 새로 열린 것처럼(처음 크기) 되지 않고 그 창이 그대로 앞에
+        win = self.make_window()
+        if not HAS_CHAT_ROOM:
+            self.skipTest('chat_room 미완성')
+        win.show()
+        win.sidebar.buttons['chats'].click()
+        chats = win.tabs['chats']
+        item = chats.list.find_data('r1')
+        chats.list.row_activated.emit(item)
+        room = win.room_windows['r1']
+        self.addCleanup(room.close)
+        room.setWindowState(Qt.WindowMaximized)
+        chats.list.row_activated.emit(item)
+        self.assertIs(win.room_windows['r1'], room)
+        self.assertTrue(room.windowState() & Qt.WindowMaximized)              # 최대화가 풀리지 않는다
+        room.setWindowState(Qt.WindowMinimized | Qt.WindowMaximized)
+        chats.list.row_activated.emit(item)
+        self.assertFalse(room.windowState() & Qt.WindowMinimized)             # 최소화는 되살린다
+        self.assertTrue(room.windowState() & Qt.WindowMaximized)
+        self.assertTrue(room.isVisible())
+
 
 # ================================================================ 자동 자리비움
 class IdleTests(ShellTestBase):
@@ -360,6 +382,124 @@ class FriendsTabTests(ShellTestBase):
         self.assertIsNone(self.conn.last('room_open_direct'))
         self.assertEqual(opened[-1], 'r2')
 
+    # ---- 여러 명 골라 대화방 만들기 (Shift+클릭 · Shift+누른 채 끌기) ----
+    def _mouse(self, kind, data, mods=Qt.NoModifier, buttons=Qt.LeftButton, pos=None):
+        from PyQt5.QtGui import QMouseEvent
+        vp = self.tab.list.viewport()
+        if pos is None:
+            pos = self.tab.list.visualItemRect(self.tab.list.find_data(data)).center()
+        event = QMouseEvent(kind, pos, Qt.LeftButton, buttons, mods)
+        QApplication.sendEvent(vp, event)
+        return pos
+
+    def _shift_click(self, data):
+        self._mouse(QEvent.MouseButtonPress, data, Qt.ShiftModifier)
+        self._mouse(QEvent.MouseButtonRelease, data, Qt.ShiftModifier, Qt.NoButton)
+
+    def test_shift_click_picks_friends_one_by_one(self):
+        self.tab.resize(360, 700)
+        self.tab.show()
+        self.assertTrue(self.tab.pick_bar.isHidden())
+        self._shift_click(('friend', '김철수', 'online'))
+        self._shift_click(('friend', '박민수', 'online'))
+        self.assertEqual(self.tab.picked_members(), ['김철수', '박민수'])
+        self.assertFalse(self.tab.pick_bar.isHidden())
+        self.assertEqual(self.tab.pick_count.text(), '2명 선택')
+        self.assertEqual(self.tab.pick_chat_button.text(), '대화방 만들기')
+        row = self.tab.list.itemWidget(self.tab.list.find_data(('friend', '박민수', 'online')))
+        self.assertTrue(row.picked)
+        # 다시 Shift+클릭하면 빠진다 · 한 명이면 1:1 채팅
+        self._shift_click(('friend', '박민수', 'online'))
+        self.assertEqual(self.tab.picked_members(), ['김철수'])
+        self.assertFalse(row.picked)
+        self.assertEqual(self.tab.pick_chat_button.text(), '1:1 채팅')
+        # 내 프로필 · 구역 머리글 · AI 비서는 고를 수 없다
+        for data in (('me', '홍길동'), ('section', 'online'), ('friend', 'AI 비서', 'bot')):
+            self.assertIsNone(self.tab._pickable(data))
+        # 목록을 다시 그려도(상태 변경) 고른 사람은 유지, Esc 로 모두 해제
+        self.tab.refresh()
+        self.assertTrue(self.tab.list.itemWidget(self.tab.list.find_data(('friend', '김철수', 'online'))).picked)
+        QApplication.sendEvent(self.tab.list, __import__('PyQt5.QtGui', fromlist=['QKeyEvent']).QKeyEvent(
+            QEvent.KeyPress, Qt.Key_Escape, Qt.NoModifier))
+        self.assertEqual(self.tab.picked_members(), [])
+        self.assertTrue(self.tab.pick_bar.isHidden())
+
+    def test_shift_double_click_does_not_open_direct_room(self):
+        self.tab.resize(360, 700)
+        self.tab.show()
+        data = ('friend', '김철수', 'online')
+        self._shift_click(data)
+        self._mouse(QEvent.MouseButtonDblClick, data, Qt.ShiftModifier)
+        self._mouse(QEvent.MouseButtonRelease, data, Qt.ShiftModifier, Qt.NoButton)
+        self.assertIsNone(self.conn.last('room_open_direct'))
+        self.assertEqual(self.tab.picked_members(), [])
+
+    def test_shift_press_and_move_picks_range_to_the_end(self):
+        self.tab.resize(360, 700)
+        self.tab.show()
+        start = ('friend', '김철수', 'online')
+        self._mouse(QEvent.MouseButtonPress, start, Qt.ShiftModifier)
+        # 누른 채 바로 아래 친구까지 → 둘
+        self._mouse(QEvent.MouseMove, ('friend', '박민수', 'online'), Qt.ShiftModifier)
+        self.assertEqual(sorted(self.tab.picked_members()), ['김철수', '박민수'])
+        # 목록 아래 끝 밖까지 끌면 접힌 '오프라인' 구역까지 전부 선택
+        below = QPoint(10, self.tab.list.viewport().height() + 40)
+        self._mouse(QEvent.MouseMove, None, Qt.ShiftModifier, pos=below)
+        self.assertEqual(sorted(self.tab.picked_members()), ['김철수', '박민수', '이영희', '최지우'])
+        # 다시 위로 올리면 범위가 줄어든다
+        self._mouse(QEvent.MouseMove, start, Qt.ShiftModifier)
+        self.assertEqual(self.tab.picked_members(), ['김철수'])
+        self._mouse(QEvent.MouseMove, None, Qt.ShiftModifier, pos=below)
+        self._mouse(QEvent.MouseButtonRelease, None, Qt.ShiftModifier, Qt.NoButton, pos=below)
+        self.assertEqual(len(self.tab.picked_members()), 4)
+        self.assertFalse(self.tab._pick_scroll.isActive())
+        # 그냥 클릭하면 여러 명 선택이 풀린다
+        self._mouse(QEvent.MouseButtonPress, start)
+        self.assertEqual(self.tab.picked_members(), [])
+
+    def test_pick_bar_creates_group_room(self):
+        self.tab.pick_range(0, self.tab.list.count() - 1)
+        members = self.tab.picked_members()
+        self.assertEqual(sorted(members), ['김철수', '박민수', '이영희', '최지우'])
+        dlg = self.tab.create_from_picks(exec_=False)
+        self.assertEqual(sorted(dlg.selected_members()), sorted(members))
+        dlg.name_edit.setText('전체방')
+        dlg.accept()
+        sent = self.conn.last('room_create')
+        self.assertEqual(sorted(sent['members']), sorted(members))
+        self.assertEqual(sent['name'], '전체방')
+
+    def test_right_click_menu_picks_and_creates_room(self):
+        texts = lambda m: [a.text() for a in m.actions() if a.text()]
+        # 고른 사람이 없을 때: 우클릭 → '대화상대로 선택'
+        menu = self.tab.context_menu_for(('friend', '김철수', 'online'))
+        next(a for a in menu.actions() if a.text() == '대화상대로 선택 (Shift+클릭)').trigger()
+        self.assertEqual(self.tab.picked_members(), ['김철수'])
+        # 고른 사람 우클릭 → 1:1 / 선택에서 빼기 / 선택 해제
+        menu = self.tab.context_menu_for(('friend', '김철수', 'online'))
+        self.assertIn('김철수님과 1:1 채팅', texts(menu))
+        self.assertIn('선택에서 빼기', texts(menu))
+        self.assertIn('선택 해제', texts(menu))
+        # 고르지 않은 사람 우클릭 → '선택한 1명 + 박민수 대화방 만들기…' 로 둘이 체크된 창
+        menu = self.tab.context_menu_for(('friend', '박민수', 'online'))
+        create = next(a for a in menu.actions() if a.text() == '선택한 1명 + 박민수 대화방 만들기…')
+        with mock.patch.object(CreateGroupDialog, 'exec_', return_value=0) as run:
+            create.trigger()
+        run.assert_called_once()
+        self.assertEqual(self.tab.picked_members(), ['김철수', '박민수'])
+        # 빈 곳 · 구역 머리글 우클릭 → '선택한 2명과 대화방 만들기…'
+        menu = self.tab.context_menu_for(None)
+        self.assertEqual(texts(menu), ['선택한 2명과 대화방 만들기…', '선택 해제'])
+        self.assertEqual(texts(self.tab.context_menu_for(('section', 'online')))[0], '선택한 2명과 대화방 만들기…')
+        with mock.patch.object(CreateGroupDialog, 'exec_', return_value=1):
+            menu.actions()[0].trigger()
+        self.assertEqual(self.tab.picked_members(), [])   # 방을 만들면 선택이 풀린다
+        self.assertIsNone(self.tab.context_menu_for(None))
+        # AI 비서 · 내 프로필 메뉴에는 고르기 항목이 없다
+        add_org(self.state, self.conn)
+        self.assertNotIn('대화상대로 선택 (Shift+클릭)', texts(self.tab.context_menu_for(('friend', 'AI 비서', 'bot'))))
+        self.assertNotIn('대화상대로 선택 (Shift+클릭)', texts(self.tab.context_menu_for(('me', '홍길동'))))
+
     def test_birthday_gift_opens_chat(self):
         item = self.tab.list.find_data(('friend', '김철수', 'birthday'))
         row = self.tab.list.itemWidget(item)
@@ -374,10 +514,13 @@ class FriendsTabTests(ShellTestBase):
         dlg.accept()
         self.assertIsNone(self.conn.last('profile_update'))
         self.assertTrue(dlg.error_label.isVisibleTo(dlg))
-        dlg.birthday_edit.setText('03-15')
+        dlg.birthday_edit.setText('03-15')            # 연도 없는 생일은 저장하지 않는다 (연도까지)
+        dlg.accept()
+        self.assertIsNone(self.conn.last('profile_update'))
+        dlg.birthday_edit.setText('1990-03-15')
         dlg.accept()
         self.assertEqual(self.conn.last('profile_update'),
-                         {'display_name': '길동이', 'status_message': '휴가 중', 'birthday': '03-15'})
+                         {'display_name': '길동이', 'status_message': '휴가 중', 'birthday': '1990-03-15'})
 
     def test_profile_photo_change_and_clear(self):
         dlg = ProfileEditDialog(self.state)

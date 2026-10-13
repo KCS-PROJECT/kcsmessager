@@ -426,8 +426,12 @@ class KakaoServer(AdminHandlers):
                  preview_fetcher: Optional[Callable[[str], Optional[dict]]] = None,
                  retention_days: float = 90, story_ttl_seconds: float = DEFAULT_STORY_TTL,
                  voiceroom_max_seconds: float = DEFAULT_VOICEROOM_MAX,
-                 require_password: bool = False) -> None:
+                 require_password: bool = False, portal: Optional[dict] = None,
+                 portal_client: Any = None) -> None:
         self.host = host
+        # 사내 포털 RAG 연동 설정 (portal.load_config 결과, None 이면 메신저 자체 RAG 만 - 명세 §7.6.1)
+        self.portal_config = portal
+        self.portal_client = portal_client      # 테스트용 가짜 포털 클라이언트
         # True 면 비밀번호(또는 자동 로그인 토큰) 없는 join 을 받지 않는다 (배포용 chat_server.py 기본값)
         self.require_password = require_password
         self._login_failures: dict[str, list[float]] = {}   # 아이디/IP → 최근 실패 시각
@@ -597,6 +601,15 @@ class KakaoServer(AdminHandlers):
         except Exception as exc:  # ImportError 포함: AI 기능만 비활성화
             logger.warning('RAG 비활성화: %s', exc)
             self.rag = None
+        if self.portal_config:
+            try:
+                from .portal import PortalRag
+                outbox = ':memory:' if self.db_path == ':memory:' else \
+                    os.path.join(os.path.dirname(os.path.abspath(self.db_path)), 'portal_outbox.db')
+                self.rag = PortalRag(self.rag, self.portal_config, outbox, client=self.portal_client)
+                logger.info('AI 비서: 사내 포털 RAG 연동 (%s)', self.portal_config.get('base_url'))
+            except Exception as exc:
+                logger.warning('포털 연동 비활성화 (메신저 자체 RAG 사용): %s', exc)
         self._rag_queue = queue.Queue()
 
     def _spawn(self, target: Callable, *args: Any, name: str = '') -> threading.Thread:
@@ -1907,7 +1920,14 @@ class KakaoServer(AdminHandlers):
         question = message['content'].replace(BOT_MENTION, '').strip() or message['content']
         history, _ = self.store.history(room_id, None, RAG_HISTORY_LIMIT)
         try:
-            answer = self.rag.answer(question, asker, self.store.room_ids_for_user(asker), history)
+            room_ids = self.store.room_ids_for_user(asker)
+            if getattr(self.rag, 'accepts_context', False):     # 포털 연동: 방 · 이름을 함께 넘겨 대화 저장
+                meta = self.store.room_meta(room_id) or {}
+                answer = self.rag.answer(question, asker, room_ids, history, room_id=room_id,
+                                         asker_name=self._name_of(asker), room_name=meta.get('name') or '',
+                                         bot_name=BOT_USERNAME)
+            else:
+                answer = self.rag.answer(question, asker, room_ids, history)
         except Exception:
             logger.exception('RAG 답변 생성 실패')
             answer = RAG_FAILED

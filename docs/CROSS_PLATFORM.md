@@ -69,7 +69,7 @@ python3 kcs.py build --dry-run       명령만 확인
 | 다운로드 · 문서 · 사진 폴더 | OS가 알려 주는 위치 (한글 이름 폴더 포함), 없으면 홈 |
 | 파일 · 링크 열기 | Qt 기본 앱 열기 → 안 되면 `open` / `os.startfile` / `xdg-open` |
 | 단축키 | 키 연결은 모두 `Ctrl+…` (macOS에서는 Qt가 ⌘로 연결). 화면 글자는 macOS `⇧⌘Enter`, 그 밖 `Ctrl+Shift+Enter` |
-| 앱 이름 표시 | macOS: Dock · 메뉴 막대 이름 / Windows: 작업 표시줄 묶음(AppUserModelID) / Linux: `.desktop` 연결 |
+| 앱 이름 표시 | macOS: Dock · 메뉴 막대 이름 (소스 실행은 데이터 폴더의 `KCS Talk.app` 번들에서 다시 실행) / Windows: 작업 표시줄 묶음(AppUserModelID) / Linux: `.desktop` 연결 |
 | 받은 파일 이름 | 다른 OS에서 온 이름도 저장되게 `osenv.safe_filename` (Windows 금지 글자 `: * ? " < > \|` → `_`, CON · NUL 같은 예약 이름 피하기, 경로 떼기) |
 | 비밀 파일 권한 | macOS · Linux 600, Windows는 사용자 프로필 폴더 권한 |
 | 다시 실행(로그아웃) | 소스 실행이면 파이썬 + 스크립트, 빌드한 앱이면 실행 파일 그대로 |

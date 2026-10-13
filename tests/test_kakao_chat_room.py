@@ -493,6 +493,113 @@ class InviteTests(ChatRoomTestBase):
         self.assertIsNotNone(popup.invite_button)
 
 
+class MembersStripTests(ChatRoomTestBase):
+    """대화방이 만들어지면 참여자 목록(헤더 아래 참여자 줄)이 바로 보인다"""
+
+    def _push_new_group(self, rid, members, owner='홍길동'):
+        self.conn.push('room_updated', room={
+            'room_id': rid, 'type': 'group', 'name': '', 'members': members, 'owner': owner,
+            'created_at': iso(datetime.now()), 'notice': None, 'last_message': None,
+            'read_pointers': {}, 'unread_count': 0})
+
+    def test_members_strip_shown_when_i_create_group(self):
+        opened = []
+        self.state.room_opened.connect(opened.append)
+        self.state.create_group(['김철수', '박민수', '최지우'], '프로젝트방')
+        self._push_new_group('r77', ['홍길동', '김철수', '박민수', '최지우'])
+        self.assertEqual(opened, ['r77'])
+        self.assertIn('r77', self.state.created_rooms)
+        w = ChatRoomWindow(self.state, 'r77')
+        try:
+            self.assertTrue(w.members_strip_visible())
+            self.assertNotIn('r77', self.state.created_rooms)     # 처음 열 때 한 번만
+            strip = w.members_strip
+            self.assertEqual(strip.title.text(), '대화상대 4명')
+            self.assertEqual(list(strip.chips), ['홍길동', '김철수', '박민수', '최지우'])   # 나 → 이름순
+            self.assertEqual(strip.chips['홍길동'].text(), '나')
+            self.assertIn('방장', strip.chips['홍길동'].toolTip())
+            # 초대되면 참여자 줄도 바로 바뀐다
+            self._push_new_group('r77', ['홍길동', '김철수', '박민수', '최지우', '이영희'])
+            self.assertEqual(strip.title.text(), '대화상대 5명')
+            self.assertIn('이영희', strip.chips)
+            # 칩을 누르면 프로필, [전체 보기]는 대화상대 팝업
+            with mock.patch.object(w, 'open_profile') as prof:
+                strip.chips['김철수'].click()
+            prof.assert_called_once_with('김철수')
+            with mock.patch.object(w, 'show_members_popup') as pop:
+                strip.all_button.click()
+            pop.assert_called_once()
+            # › 버튼으로 접어도 사라지지 않고 한 줄(이름 미리보기)로 남는다 → 다시 누르면 펼침
+            strip.toggle_button.click()
+            self.assertFalse(w.members_strip_visible())
+            self.assertFalse(strip.isHidden())
+            self.assertTrue(strip.area.isHidden())
+            self.assertTrue(strip.preview.text().startswith('나, '))
+            self.assertEqual(strip.toggle_button.accessibleName(), '대화상대 목록 펼치기')
+            self.assertNotIn('r77', self.state.settings.get('members_strip_open'))
+            strip.toggle_button.click()
+            self.assertTrue(w.members_strip_visible())
+            self.assertEqual(strip.toggle_button.accessibleName(), '대화상대 목록 접기')
+            self.assertEqual(strip.preview.text(), '')
+            # 머리 줄 아무 곳이나 눌러도 열렸다 닫혔다
+            QTest.mouseClick(strip.head, Qt.LeftButton, pos=strip.head.rect().center())
+            self.assertFalse(w.members_strip_visible())
+            QTest.mouseClick(strip.head, Qt.LeftButton, pos=strip.head.rect().center())
+            self.assertTrue(w.members_strip_visible())
+            # 방 메뉴로도 접기/펼치기
+            menu = w.build_room_menu()
+            next(a for a in menu.actions() if a.text() == '대화상대 목록 접기').trigger()
+            self.assertFalse(w.members_strip_visible())
+            self.assertIn('대화상대 목록 펼치기', [a.text() for a in w.build_room_menu().actions()])
+        finally:
+            w.close()
+
+    def test_members_strip_state_remembered_per_room(self):
+        self.win.set_members_strip(True)
+        self.assertIn('r1', self.state.settings.get('members_strip_open'))
+        w = ChatRoomWindow(self.state, 'r1')            # 같은 방을 다시 열면 펼친 채로
+        try:
+            self.assertTrue(w.members_strip_visible())
+        finally:
+            w.close()
+        self.win.set_members_strip(False)
+        w = ChatRoomWindow(self.state, 'r1')
+        try:
+            self.assertFalse(w.members_strip_visible())
+            self.assertFalse(w.members_strip.isHidden())
+        finally:
+            w.close()
+
+    def test_members_strip_in_every_room_collapsed_by_default(self):
+        strip = self.win.members_strip
+        self.assertIsNotNone(strip)                   # 기존 방에도 참여자 줄(접힘)이 있다
+        self.assertFalse(strip.isHidden())
+        self.assertFalse(self.win.members_strip_visible())
+        self.assertEqual(strip.title.text(), f"대화상대 {len(self.state.room('r1')['members'])}명")
+        self.assertIn('대화상대 목록 펼치기', [a.text() for a in self.win.build_room_menu().actions()])
+        self.win.set_members_strip(True)
+        self.assertEqual(len(self.win.members_strip.chips), len(self.state.room('r1')['members']))
+        theme.set_dark(True)
+        self.win.apply_theme()                       # 테마가 바뀌어도 다시 그린다
+        self.assertTrue(self.win.members_strip_visible())
+        theme.set_dark(False)
+        # 1:1 방에도 있다 (나 + 상대)
+        w = ChatRoomWindow(self.state, 'r2')
+        try:
+            self.assertEqual(w.members_strip.title.text(), '대화상대 2명')
+            w.set_members_strip(True)
+            self.assertTrue(w.members_strip_visible())
+        finally:
+            w.close()
+        w = ChatRoomWindow(self.state, 'r3')            # 나와의 채팅에는 없다
+        try:
+            self.assertIsNone(w.members_strip)
+            w.set_members_strip(True)
+            self.assertFalse(w.members_strip_visible())
+        finally:
+            w.close()
+
+
 class ThemeWallpaperTests(ChatRoomTestBase):
     def test_apply_theme_dark(self):
         theme.set_dark(True)

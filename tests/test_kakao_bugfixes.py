@@ -3,6 +3,8 @@
 
 import os
 import socket
+import subprocess
+import sys
 import tempfile
 import types
 import unittest
@@ -447,6 +449,35 @@ class CrashGuardTests(unittest.TestCase):
         except KeyError:
             hook(*sys.exc_info())
         self.assertIn("KeyError: 'root'", sys.stderr.getvalue())
+
+    def test_ctrl_c_quits_instead_of_traceback_loop(self):
+        # 터미널 Ctrl+C: 예전에는 eventFilter 안 KeyboardInterrupt 트레이스백만 찍히고 앱이 계속 돌았다
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        code = ("import os, signal, sys\n"
+                "from PyQt5.QtCore import QTimer\n"
+                "from PyQt5.QtWidgets import QApplication, QLineEdit\n"
+                "from client.kakao.app import install_crash_guard, install_interrupt_quit\n"
+                "app = QApplication([])\n"
+                "w = QLineEdit(); w.installEventFilter(w); w.show()\n"
+                "install_crash_guard(); install_interrupt_quit(app)\n"
+                "QTimer.singleShot(300, lambda: os.kill(os.getpid(), signal.SIGINT))\n"
+                "QTimer.singleShot(5000, lambda: app.exit(7))\n"
+                "sys.exit(app.exec_())\n")
+        env = dict(os.environ, QT_QPA_PLATFORM='offscreen')
+        done = subprocess.run([sys.executable, '-c', code], cwd=root, env=env, capture_output=True,
+                              text=True, timeout=30)
+        self.assertEqual(done.returncode, 130, done.stderr)            # 5초 타임아웃(7)이 아니라 Ctrl+C 로 끝남
+        self.assertNotIn('KeyboardInterrupt', done.stderr)
+
+    def test_keyboard_interrupt_in_slot_quits(self):
+        from PyQt5.QtCore import QCoreApplication
+        from client.kakao import app as app_mod
+        old_hook = sys.excepthook
+        self.addCleanup(setattr, sys, 'excepthook', old_hook)
+        hook = app_mod.install_crash_guard()
+        with mock.patch.object(QCoreApplication, 'exit') as exit_:
+            hook(KeyboardInterrupt, KeyboardInterrupt(), None)
+        exit_.assert_called_once_with(app_mod.INTERRUPT_EXIT_CODE)
 
 
 if __name__ == '__main__':

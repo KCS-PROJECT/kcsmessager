@@ -197,6 +197,7 @@ class AppState(QObject):
         self._failed_save_timer = None
         self.active_rooms = set()  # 현재 창이 열려 화면에 보이는 방(알림 억제용)
         self._pending_direct = set()
+        self.created_rooms = set()   # 내가 방금 만든 그룹방 - 처음 열 때 참여자 줄을 펼쳐 보여 준다
         self._pending_groups = []
         if conn is not None:
             conn.event_received.connect(self.handle)
@@ -280,6 +281,7 @@ class AppState(QObject):
             for pending in list(self._pending_groups):
                 if pending <= members:
                     self._pending_groups.remove(pending)
+                    self.created_rooms.add(rid)
                     self.room_opened.emit(rid)
                     break
 

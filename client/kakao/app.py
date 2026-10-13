@@ -313,8 +313,8 @@ def install_crash_guard():
     import traceback
 
     def hook(exc_type, exc, tb):
-        if issubclass(exc_type, KeyboardInterrupt):
-            sys.__excepthook__(exc_type, exc, tb)
+        if issubclass(exc_type, KeyboardInterrupt):   # Ctrl+C 가 처리기보다 먼저 슬롯에서 터졌다: 계속하지 말고 끝낸다
+            QCoreApplication.exit(INTERRUPT_EXIT_CODE)
             return
         try:
             sys.stderr.write('[KCS Talk] 처리하지 못한 오류 (앱은 계속 실행):\n'
@@ -325,6 +325,30 @@ def install_crash_guard():
 
     sys.excepthook = hook
     return hook
+
+
+INTERRUPT_EXIT_CODE = 130   # 터미널 Ctrl+C 로 끝냄 (128 + SIGINT)
+
+
+def install_interrupt_quit(app):
+    """터미널에서 Ctrl+C 를 누르면 앱을 끝낸다. 파이썬 기본 처리기는 다음에 도는 슬롯 · eventFilter 안에서
+    KeyboardInterrupt 를 일으키고, PyQt 가 그것을 excepthook 으로 넘겨 기록만 남고 앱은 계속 돌았다.
+    Qt 이벤트 루프가 쉬는 동안에는 파이썬이 신호를 볼 수 없으므로 짧은 타이머로 깨운다.
+    한 번 누르면 정상 종료, 종료가 막혀 다시 누르면 기본 동작(즉시 종료). 타이머를 돌려준다"""
+    import signal
+
+    def on_interrupt(_signum, _frame):
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
+        QCoreApplication.exit(INTERRUPT_EXIT_CODE)
+
+    try:
+        signal.signal(signal.SIGINT, on_interrupt)
+    except ValueError:                    # 주 스레드가 아니면 신호 처리기를 못 단다
+        return None
+    timer = QTimer(app)
+    timer.timeout.connect(lambda: None)   # 파이썬으로 잠깐 돌아와 대기 중인 신호를 처리
+    timer.start(250)
+    return timer
 
 
 def main(argv=None):
@@ -341,6 +365,7 @@ def main(argv=None):
             return 1
     install_korean_qt_translation(app)
     install_crash_guard()
+    install_interrupt_quit(app)
 
     from client.kakao.login import LoginDialog, talk_icon
     from client.kakao.main_window import apply_app_theme
