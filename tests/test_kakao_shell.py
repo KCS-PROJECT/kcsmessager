@@ -1015,8 +1015,8 @@ class DialogTests(ShellTestBase):
 
     def test_login_dialog_asks_for_employee_no(self):
         dlg = LoginDialog(fresh=True)
-        self.assertEqual(dlg.name_edit.placeholderText(), '사번')
-        self.assertIn('사번', dlg.subtitle.text())
+        self.assertEqual(dlg.name_edit.placeholderText(), '이메일')     # 운영 로그인 아이디 = 이메일 (2026-10-14)
+        self.assertIn('이메일', dlg.subtitle.text())
         dlg.name_edit.setText('20261009')
         self.assertFalse(dlg.login_button.isEnabled())                  # 비밀번호도 있어야
         dlg.password_edit.setText('pw1234')

@@ -3,7 +3,7 @@
 로그인 다이얼로그 - 회사 CI 네이비 배경 + ㈜케이씨에스 로고, 아이디/비밀번호 카드
 (서버 주소는 로그인 창에서 바꾸지 않는다 - 그룹 관리자가 더보기 → 정보에서 정한다, 명세 §4.3)
 처음 한 번은 [처음 사용 등록]: 소속 회사 선택(필수) + 이름 + 사번 + 이메일 + 비밀번호 (명세 §4.1)
-그다음부터는 사번 + 비밀번호로 로그인한다. 마지막으로 로그인한 사번만 미리 채운다
+그다음부터는 로그인 아이디 + 비밀번호로 로그인한다 (운영은 이메일이 아이디 · 사번·사내 계정·이름도 통함 — 명세 §4.1). 마지막으로 로그인한 아이디만 미리 채운다
 비밀번호는 저장하지 않는다
 창 크기는 고정값이 아니라 레이아웃 sizeHint로 정해진다(잘림 방지).
 """
@@ -277,7 +277,7 @@ class LoginDialog(QDialog):
         title.setAlignment(Qt.AlignCenter)
         root.addWidget(title)
         root.addSpacing(6)
-        self.subtitle = QLabel('사번과 비밀번호로 로그인하세요')
+        self.subtitle = QLabel('이메일과 비밀번호로 로그인하세요')
         self.subtitle.setObjectName('loginSubtitle')
         self.subtitle.setAlignment(Qt.AlignCenter)
         root.addWidget(self.subtitle)
@@ -292,11 +292,11 @@ class LoginDialog(QDialog):
         recent = [] if fresh else load_recent(getattr(self, 'recent_path', None))
         self.name_edit = QLineEdit(username or (recent or [''])[0])
         self.name_edit.setObjectName('idEdit')
-        self.name_edit.setPlaceholderText('사번')
-        self.name_edit.setAccessibleName('사번')
+        self.name_edit.setPlaceholderText('이메일')
+        self.name_edit.setAccessibleName('이메일')
         self.name_edit.setMaxLength(LOGIN_ID_MAX)
         self.name_edit.setMinimumWidth(288)
-        osenv.prefer_latin_input(self.name_edit)       # 창이 뜨면 바로 영문으로 사번 입력 (한글 상태 X)
+        osenv.prefer_latin_input(self.name_edit)       # 창이 뜨면 바로 영문으로 이메일 입력 (한글 상태 X)
         form_layout.addWidget(self.name_edit)
         form_layout.addWidget(_divider())
         self.password_edit = self._password_field('비밀번호')
@@ -356,8 +356,8 @@ class LoginDialog(QDialog):
         reset_layout.setSpacing(0)
         self.reset_id_edit = QLineEdit()
         self.reset_id_edit.setObjectName('idEdit')
-        self.reset_id_edit.setPlaceholderText('사번')
-        self.reset_id_edit.setAccessibleName('사번')
+        self.reset_id_edit.setPlaceholderText('이메일')
+        self.reset_id_edit.setAccessibleName('이메일')
         self.reset_id_edit.setMaxLength(LOGIN_ID_MAX)
         osenv.prefer_latin_input(self.reset_id_edit)
         self.reset_id_edit.setMinimumWidth(288)
@@ -392,7 +392,7 @@ class LoginDialog(QDialog):
         self.options_box = QWidget()          # 저장 · 자동 로그인 (재설정 화면에서는 숨김)
         options = QHBoxLayout(self.options_box)
         options.setContentsMargins(2, 0, 2, 0)
-        self.remember_check = QCheckBox('사번·비밀번호 저장')
+        self.remember_check = QCheckBox('이메일·비밀번호 저장')
         self.auto_check = QCheckBox('자동 로그인')
         for check in (self.remember_check, self.auto_check):
             check.setObjectName('loginOption')
@@ -523,7 +523,7 @@ class LoginDialog(QDialog):
         self.options_box.setVisible(not reset)
         self.reset_link.setVisible(mode == 'login')
         self.subtitle.setText({'register': '처음 한 번만 소속과 정보를 등록하세요',
-                               'reset': '새 비밀번호를 정하세요'}.get(mode, '사번과 비밀번호로 로그인하세요'))
+                               'reset': '새 비밀번호를 정하세요'}.get(mode, '이메일과 비밀번호로 로그인하세요'))
         self.login_button.setText({'register': '등록하고 시작하기', 'reset': '비밀번호 바꾸기'}.get(mode, '로그인'))
         self.mode_toggle.setText('처음 사용하시나요? · 처음 사용 등록' if mode == 'login'
                                  else '로그인 화면으로 돌아가기' if reset else '이미 등록했어요 · 로그인')
