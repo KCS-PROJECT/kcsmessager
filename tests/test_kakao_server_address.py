@@ -39,6 +39,9 @@ class ServerAddressFileTests(unittest.TestCase):
     def test_tls_flag_persists_and_survives_address_only_save(self):
         """tls 는 server.json 에 함께 저장되고, 주소만 다시 저장해도 풀리지 않는다 (2026-10-14)"""
         self.assertIs(ksettings.load_server_tls(self.dir), ksettings.DEFAULT_TLS)        # 파일 없음 → 기본값
+        ksettings.save_server_address('192.168.0.10', 6000, self.dir)                    # tls 미지정 → 키 생략
+        with open(os.path.join(self.dir, ksettings.SERVER_FILE), encoding='utf-8') as f:
+            self.assertEqual(json.load(f), {'host': '192.168.0.10', 'port': 6000})
         ksettings.save_server_address('talk.kcins.co.kr', 9550, self.dir, tls=True)
         self.assertTrue(ksettings.load_server_tls(self.dir))
         with open(os.path.join(self.dir, ksettings.SERVER_FILE), encoding='utf-8') as f:

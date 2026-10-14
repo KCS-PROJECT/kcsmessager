@@ -101,32 +101,41 @@ def load_server_address(base_dir=None):
     return (deploy['host'], deploy['port']) if deploy else None
 
 
+def _saved_tls(base_dir):
+    """server.json 에 명시된 tls (bool) - 없거나 bool 이 아니면 None"""
+    try:
+        with open(os.path.join(base_dir, SERVER_FILE), encoding='utf-8') as f:
+            value = json.load(f).get('tls')
+        return value if isinstance(value, bool) else None
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+
+
 def load_server_tls(base_dir=None):
     """TLS 사용 여부: 이 PC 의 server.json → 번들된 deploy.json → DEFAULT_TLS"""
-    path = os.path.join(base_dir or osenv.app_home(), SERVER_FILE)
-    try:
-        with open(path, encoding='utf-8') as f:
-            value = json.load(f).get('tls')
-        if isinstance(value, bool):
-            return value
-    except (OSError, ValueError, TypeError, AttributeError):
-        pass
+    saved = _saved_tls(base_dir or osenv.app_home())
+    if saved is not None:
+        return saved
     deploy = load_deploy_defaults()
     return deploy['tls'] if deploy else DEFAULT_TLS
 
 
 def save_server_address(host, port, base_dir=None, tls=None):
     """검사한 뒤 저장 (임시 파일 → 교체). 저장한 (host, port).
-    tls 를 넘기지 않으면 기존 파일의 tls 값을 그대로 둔다 — 더보기 → 정보에서 주소만 바꿔도 TLS 설정이 풀리지 않게."""
+    tls 를 넘기지 않으면 기존 파일의 tls 값을 그대로 둔다(더보기 → 정보에서 주소만 바꿔도 TLS 설정이 풀리지 않게).
+    명시한 값도 기존 값도 없으면 tls 키를 쓰지 않는다 - 파일은 {host, port} 그대로(기본값 = 생략)."""
     host, port = parse_server_address(host, port)
     base = base_dir or osenv.app_home()
     if tls is None:
-        tls = load_server_tls(base)
+        tls = _saved_tls(base)
     os.makedirs(base, exist_ok=True)
     path = os.path.join(base, SERVER_FILE)
+    data = {'host': host, 'port': port}
+    if tls is not None:
+        data['tls'] = bool(tls)
     tmp = path + '.tmp'
     with open(tmp, 'w', encoding='utf-8') as f:
-        json.dump({'host': host, 'port': port, 'tls': bool(tls)}, f, ensure_ascii=False)
+        json.dump(data, f, ensure_ascii=False)
     os.replace(tmp, path)
     return host, port
 

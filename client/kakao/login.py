@@ -439,6 +439,8 @@ class LoginDialog(QDialog):
         except (TypeError, ValueError):
             self.port = 5555
         self.tls = bool(tls)   # 로그인 전 요청(회사 목록 · 비밀번호 재설정)도 본 연결과 같은 방식으로 붙는다
+        # TLS 가 켜졌을 때만 tls= 를 넘긴다 - 평문(기본) 경로의 호출 형태를 바꾸지 않는다
+        self._net_kwargs = {'tls': True} if self.tls else {}
         root.addSpacing(36)
         footer = QLabel(f'KCS Talk v2.0 · {brand.COMPANY_NAME}')
         footer.setObjectName('loginFooter')
@@ -556,7 +558,7 @@ class LoginDialog(QDialog):
         """서버에서 소속 회사 목록을 받는다 (로그인 전 org_companies). 성공하면 True"""
         _name, host, port = self.values()
         try:
-            names = fetch_companies(host, port, tls=self.tls)
+            names = fetch_companies(host, port, **self._net_kwargs)
         except OSError:
             self.show_error('서버에 연결할 수 없어 소속 회사 목록을 불러오지 못했습니다. 잠시 후 다시 시도하거나 관리자에게 문의해 주세요.')
             return False
@@ -735,7 +737,7 @@ class LoginDialog(QDialog):
             return
         try:
             reset_password(host, port, login_id, email, new_password, code=self.reset_code_edit.text().strip(),
-                           tls=self.tls)
+                           **self._net_kwargs)
         except ResetRejected as exc:
             self.show_error(str(exc))
             return
