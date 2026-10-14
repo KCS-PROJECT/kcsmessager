@@ -105,7 +105,7 @@ class ChatConnection(QObject):
     def connect_to(self, host, port, username, timeout=5.0, password=None, token=None, remember=False,
                    registration=None, tls=False):
         """연결 후 join 요청을 보낸다(password가 있으면 아이디/비밀번호 로그인). 실패 시 OSError를 그대로 올린다.
-        registration={company, name, employee_no, email, password} 이면 join 대신 처음 사용 등록(register)을 보낸다 (명세 §4.1)"""
+        registration={company, name, email, password[, employee_no]} 이면 join 대신 처음 사용 등록(register)을 보낸다 (명세 §4.1)"""
         sock = open_socket(host, port, timeout=timeout, tls=tls)
         sock.settimeout(None)
         self._sock = sock

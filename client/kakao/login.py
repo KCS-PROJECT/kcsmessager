@@ -2,7 +2,7 @@
 """
 로그인 다이얼로그 - 회사 CI 네이비 배경 + ㈜케이씨에스 로고, 아이디/비밀번호 카드
 (서버 주소는 로그인 창에서 바꾸지 않는다 - 그룹 관리자가 더보기 → 정보에서 정한다, 명세 §4.3)
-처음 한 번은 [처음 사용 등록]: 소속 회사 선택(필수) + 이름 + 사번 + 이메일 + 비밀번호 (명세 §4.1)
+처음 한 번은 [처음 사용 등록]: 소속 회사 선택(필수) + 이름 + 이메일 + 비밀번호 (명세 §4.1) — 사번 칸은 없다 (2026-10-14)
 그다음부터는 로그인 아이디 + 비밀번호로 로그인한다 (운영은 이메일이 아이디 · 사번·사내 계정·이름도 통함 — 명세 §4.1). 마지막으로 로그인한 아이디만 미리 채운다
 비밀번호는 저장하지 않는다
 창 크기는 고정값이 아니라 레이아웃 sizeHint로 정해진다(잘림 방지).
@@ -37,7 +37,7 @@ def saved_path():
     return SAVED_PATH or _home_file('saved_login.json')
 MAX_RECENT = 6
 PASSWORD_MIN, PASSWORD_MAX = 4, 64   # 서버와 같은 규칙 (명세 §4.1)
-NAME_MAX, LOGIN_ID_MAX, EMAIL_MAX, EMPLOYEE_NO_MAX = 20, 120, 120, 20
+NAME_MAX, LOGIN_ID_MAX, EMAIL_MAX = 20, 120, 120
 EMAIL_RE = re.compile(r'[^@\s]+@[^@\s]+\.[^@\s]+')
 EMPLOYEE_NO_RE = re.compile(r'[0-9A-Za-z][0-9A-Za-z_-]{0,19}')   # 서버와 같은 규칙
 FIELD_HINT = '#8A8F99'   # 흰 카드 위 보조 회색 (로그인 창은 다크 모드와 무관한 CI 색)
@@ -326,24 +326,19 @@ class LoginDialog(QDialog):
         self.reg_name_edit.setMaxLength(NAME_MAX)
         reg_layout.addWidget(self.reg_name_edit)
         reg_layout.addWidget(_divider())
-        self.reg_employee_edit = QLineEdit()
-        self.reg_employee_edit.setObjectName('idEdit')
-        self.reg_employee_edit.setPlaceholderText('사번 (다음부터 로그인 아이디)')
-        self.reg_employee_edit.setAccessibleName('사번')
-        osenv.prefer_latin_input(self.reg_employee_edit)
-        self.reg_employee_edit.setMaxLength(EMPLOYEE_NO_MAX)
-        reg_layout.addWidget(self.reg_employee_edit)
-        reg_layout.addWidget(_divider())
+        # 사번 칸은 없다 (2026-10-14): 운영 로그인 아이디가 이메일이라 등록 때 받은 이메일이 다음부터의 아이디
         self.reg_email_edit = QLineEdit()
         self.reg_email_edit.setObjectName('idEdit')
-        self.reg_email_edit.setPlaceholderText('이메일 주소')
+        self.reg_email_edit.setPlaceholderText('이메일 (다음부터 로그인 아이디)')
+        self.reg_email_edit.setAccessibleName('이메일')
+        osenv.prefer_latin_input(self.reg_email_edit)
         self.reg_email_edit.setMaxLength(EMAIL_MAX)
         reg_layout.addWidget(self.reg_email_edit)
         reg_layout.addWidget(_divider())
         self.reg_password_edit = self._password_field(f'비밀번호 ({PASSWORD_MIN}~{PASSWORD_MAX}자)')
         reg_layout.addWidget(self.reg_password_edit)
         root.addWidget(self.register_form)
-        self.register_hint = QLabel('한 번만 등록하면 다음부터는 사번과 비밀번호만으로 로그인합니다.')
+        self.register_hint = QLabel('한 번만 등록하면 다음부터는 이메일과 비밀번호만으로 로그인합니다.')
         self.register_hint.setObjectName('loginHint')
         self.register_hint.setWordWrap(True)
         root.addWidget(self.register_hint)
@@ -448,7 +443,7 @@ class LoginDialog(QDialog):
         root.addWidget(footer)
 
         self.login_button.clicked.connect(self.accept)
-        for edit in (self.name_edit, self.password_edit, self.reg_name_edit, self.reg_employee_edit,
+        for edit in (self.name_edit, self.password_edit, self.reg_name_edit,
                      self.reg_email_edit, self.reg_password_edit):
             edit.textChanged.connect(self._update_state)
         self.company_combo.currentIndexChanged.connect(self._update_state)
@@ -460,8 +455,7 @@ class LoginDialog(QDialog):
         self.reset_email_edit.returnPressed.connect(self.reset_code_edit.setFocus)
         self.reset_code_edit.returnPressed.connect(self.reset_password_edit.setFocus)
         self.reset_password_edit.returnPressed.connect(self.accept)
-        self.reg_name_edit.returnPressed.connect(self.reg_employee_edit.setFocus)
-        self.reg_employee_edit.returnPressed.connect(self.reg_email_edit.setFocus)
+        self.reg_name_edit.returnPressed.connect(self.reg_email_edit.setFocus)
         self.reg_email_edit.returnPressed.connect(self.reg_password_edit.setFocus)
         self.reg_password_edit.returnPressed.connect(self.accept)
         self.auto_check.toggled.connect(lambda on: on and self.remember_check.setChecked(True))
@@ -477,7 +471,6 @@ class LoginDialog(QDialog):
             if index > 0:
                 self.company_combo.setCurrentIndex(index)
             self.reg_name_edit.setText(registration.get('name') or '')
-            self.reg_employee_edit.setText(registration.get('employee_no') or '')
             self.reg_email_edit.setText(registration.get('email') or '')
             self.reg_password_edit.setText(registration.get('password') or '')
         (self.password_edit if self.name_edit.text() else self.name_edit).setFocus()
@@ -574,11 +567,10 @@ class LoginDialog(QDialog):
         self.company_combo.style().polish(self.company_combo)
 
     def registration(self):
-        """처음 사용 등록 입력값 {company, name, employee_no, email, password} - 로그인 화면이면 None"""
+        """처음 사용 등록 입력값 {company, name, email, password} - 로그인 화면이면 None (사번은 보내지 않는다)"""
         if not self.is_register():
             return None
         return {'company': self.company_combo.currentData() or '', 'name': self.reg_name_edit.text().strip(),
-                'employee_no': self.reg_employee_edit.text().strip(),
                 'email': self.reg_email_edit.text().strip(), 'password': self.reg_password_edit.text()}
 
     def _apply_style(self):
@@ -648,7 +640,6 @@ class LoginDialog(QDialog):
             self._refresh_combo_placeholder()
             self.login_button.setEnabled(self.company_combo.currentIndex() > 0
                                          and bool(self.reg_name_edit.text().strip())
-                                         and bool(self.reg_employee_edit.text().strip())
                                          and bool(self.reg_email_edit.text().strip())
                                          and bool(self.reg_password_edit.text()))
             return
@@ -664,9 +655,7 @@ class LoginDialog(QDialog):
             self.set_mode('register')
             if '@' in login_id:
                 self.reg_email_edit.setText(self.reg_email_edit.text() or login_id)
-            elif EMPLOYEE_NO_RE.fullmatch(login_id):      # 로그인 칸에는 사번을 넣는다
-                self.reg_employee_edit.setText(self.reg_employee_edit.text() or login_id)
-            elif len(login_id) <= NAME_MAX:
+            elif len(login_id) <= NAME_MAX and not EMPLOYEE_NO_RE.fullmatch(login_id):   # 사번 모양은 옮길 칸이 없다
                 self.reg_name_edit.setText(self.reg_name_edit.text() or login_id)
         self.error_label.setText(text or '')
         self.error_label.setVisible(bool(text))
@@ -694,8 +683,8 @@ class LoginDialog(QDialog):
         return self.auto_check.isChecked()
 
     def values(self):
-        """(로그인 아이디, host, port) - 로그인 아이디는 사번 (등록 화면이면 등록할 사번)"""
-        name = self.reg_employee_edit.text().strip() if getattr(self, '_mode', '') == 'register' \
+        """(로그인 아이디, host, port) - 등록 화면이면 등록할 이메일이 다음부터의 로그인 아이디"""
+        name = self.reg_email_edit.text().strip() if getattr(self, '_mode', '') == 'register' \
             else self.name_edit.text().strip()
         return name, self.host, self.port
 
@@ -710,10 +699,6 @@ class LoginDialog(QDialog):
         if not name or '@' in name:
             self.reg_name_edit.setFocus()
             return '이름을 입력해 주세요.' if not name else '이름에는 @ 를 쓸 수 없습니다.'
-        employee_no = self.reg_employee_edit.text().strip()
-        if not EMPLOYEE_NO_RE.fullmatch(employee_no):
-            self.reg_employee_edit.setFocus()
-            return '사번을 입력해 주세요.' if not employee_no else '사번은 영문·숫자 20자 이내로 입력해 주세요.'
         if not EMAIL_RE.fullmatch(self.reg_email_edit.text().strip()):
             self.reg_email_edit.setFocus()
             return '이메일 주소 형식이 올바르지 않습니다.'
@@ -775,7 +760,7 @@ class LoginDialog(QDialog):
             super().accept()
             return
         if not name:
-            self.show_error('사번을 입력해 주세요.')
+            self.show_error('이메일을 입력해 주세요.')
             return
         if not self.saved_token() and not PASSWORD_MIN <= len(self.password()) <= PASSWORD_MAX:
             self.show_error(f'비밀번호는 {PASSWORD_MIN}~{PASSWORD_MAX}자로 입력해 주세요.')

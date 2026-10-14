@@ -120,9 +120,9 @@ class Session:
         self.password = password   # 자동 재연결용으로 메모리에만 둔다
         self.token = token         # 자동 로그인 토큰 (저장된 로그인)
         self.remember = remember
-        self.registration = registration   # 처음 사용 등록 {company, name, employee_no, email, password} (명세 §4.1)
-        if registration:                   # 다음부터의 로그인 아이디는 사번
-            self.username = registration.get('employee_no') or registration['name']
+        self.registration = registration   # 처음 사용 등록 {company, name, email, password[, employee_no]} (명세 §4.1)
+        if registration:                   # 다음부터의 로그인 아이디: 사번(예전 클라이언트) → 이메일 → 이름
+            self.username = registration.get('employee_no') or registration.get('email') or registration['name']
             self.password = registration['password']
         self.settings = LocalSettings(self.username)   # welcome 때 실제 사용자 이름 파일로 바뀐다
         self.conn = ChatConnection()

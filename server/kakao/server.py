@@ -70,7 +70,7 @@ SECRET_FORBIDDEN = '비밀채팅방에서는 사용할 수 없는 기능입니�
 LOGIN_FAILED = '아이디 또는 비밀번호가 올바르지 않습니다.'
 LOGIN_TOKEN_EXPIRED = '저장된 로그인 정보가 만료되었습니다. 비밀번호를 입력해 주세요.'
 RESET_MISMATCH = '아이디 · 가입한 이메일 · 재설정 코드가 맞지 않습니다. 코드는 관리자에게 받고 30분 동안 한 번만 쓸 수 있습니다.'
-NEEDS_REGISTER = '처음 사용하는 아이디입니다. [처음 사용 등록]에서 소속 회사·이름·사번·이메일·비밀번호를 등록해 주세요.'
+NEEDS_REGISTER = '처음 사용하는 아이디입니다. [처음 사용 등록]에서 소속 회사·이름·이메일·비밀번호를 등록해 주세요.'
 
 CALL_MODES = ('voice', 'video', 'voiceroom')
 CALL_ROLES = ('host', 'speaker', 'listener')
@@ -1049,8 +1049,8 @@ class KakaoServer(AdminHandlers):
                              remember=msg.get('remember') is True and msg.get('password') is not None)
 
     def _h_register(self, conn: Connection, msg: dict) -> None:
-        """처음 사용 등록: 소속 회사 + 이름 + 사번 + 이메일 + 비밀번호 (명세 §4.1). 성공하면 join 과 같은 welcome.
-        다음부터는 사번과 비밀번호로 로그인한다"""
+        """처음 사용 등록: 소속 회사 + 이름 + 이메일 + 비밀번호 (명세 §4.1). 성공하면 join 과 같은 welcome.
+        다음부터는 이메일과 비밀번호로 로그인한다. employee_no(사번)는 선택 — 2026-10-14 부터 클라이언트가 보내지 않는다"""
         if conn.username is not None:
             raise ProtocolError('이미 로그인된 연결입니다.')
         company = msg.get('company')
@@ -1062,9 +1062,7 @@ class KakaoServer(AdminHandlers):
         if name == BOT_USERNAME or self.store.is_bot(name):
             raise ProtocolError('봇 계정으로는 등록할 수 없습니다.')
         employee_no = msg.get('employee_no').strip() if isinstance(msg.get('employee_no'), str) else ''
-        if not employee_no:
-            raise ProtocolError('사번을 입력해 주세요.')
-        if not EMPLOYEE_NO_RE.fullmatch(employee_no):
+        if employee_no and not EMPLOYEE_NO_RE.fullmatch(employee_no):
             raise ProtocolError('사번은 영문·숫자 20자 이내로 입력해 주세요.')
         email = msg.get('email').strip() if isinstance(msg.get('email'), str) else ''
         if len(email) > 120 or not EMAIL_RE.fullmatch(email):
@@ -1078,7 +1076,7 @@ class KakaoServer(AdminHandlers):
         try:
             created = self.store.register_user(name, company.strip(), email, password, employee_no)
         except ValueError as exc:
-            self._record_login_failure(keys)   # 남의 조직도 계정 사번을 맞혀 보는 것도 로그인 실패처럼 막는다
+            self._record_login_failure(keys)   # 남의 조직도 계정 이메일·사번을 맞혀 보는 것도 로그인 실패처럼 막는다
             raise ProtocolError(str(exc)) from None
         self._complete_login(conn, msg, 'register', name, created, remember=msg.get('remember') is True)
 
