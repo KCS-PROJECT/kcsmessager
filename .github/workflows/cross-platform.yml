@@ -17,6 +17,13 @@ on:
         description: 'TLS 로 접속 (nginx stream 종단)'
         type: boolean
         default: true
+      tests:
+        description: '단위 테스트 대상 모듈 (공백 구분, 예: tests.test_kakao_shell). 비우면 전체 discover'
+        default: ''
+      build_setup:
+        description: '설치파일(setup 잡)도 만들기'
+        type: boolean
+        default: true
 
 jobs:
   check:
@@ -50,8 +57,17 @@ jobs:
       - name: kcs.py doctor
         run: python kcs.py doctor
 
-      - name: 단위 테스트 (전체)
-        run: python -X faulthandler -m unittest discover -s tests -p "test_*.py" -v
+      - name: 단위 테스트 (전체 · dispatch 시 tests 입력으로 대상 모듈만)
+        shell: bash
+        env:
+          TESTS: ${{ inputs.tests }}
+        run: |
+          if [ -n "$TESTS" ]; then
+            echo "대상 모듈만: $TESTS"
+            python -X faulthandler -m unittest -v $TESTS
+          else
+            python -X faulthandler -m unittest discover -s tests -p "test_*.py" -v
+          fi
 
       - name: 소스 실행 점검 (서버 접속 · 클라이언트 self-check)
         if: ${{ !cancelled() }}
@@ -112,6 +128,7 @@ jobs:
   # ───────────────────────────────────────────────────────────────────────────
   stamp:
     name: 설치파일 시각 스탬프 (KST)
+    if: github.event_name != 'workflow_dispatch' || inputs.build_setup
     runs-on: ubuntu-latest
     outputs:
       value: ${{ steps.s.outputs.value }}
@@ -122,6 +139,7 @@ jobs:
   setup:
     name: 설치파일 ${{ matrix.os }}
     needs: stamp
+    if: github.event_name != 'workflow_dispatch' || inputs.build_setup
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
