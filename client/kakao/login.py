@@ -250,7 +250,8 @@ def _divider():
 
 
 class LoginDialog(QDialog):
-    def __init__(self, host='127.0.0.1', port=5555, username='', parent=None, registration=None, fresh=False):
+    def __init__(self, host='127.0.0.1', port=5555, username='', parent=None, registration=None, fresh=False,
+                 tls=False):
         """fresh=True: 처음 로그인하는 상태 - 최근 아이디·저장된 로그인을 채우지 않는다 (런처에서 연 창)"""
         super().__init__(parent)
         self.fresh = fresh
@@ -437,6 +438,7 @@ class LoginDialog(QDialog):
             self.port = int(port)
         except (TypeError, ValueError):
             self.port = 5555
+        self.tls = bool(tls)   # 로그인 전 요청(회사 목록 · 비밀번호 재설정)도 본 연결과 같은 방식으로 붙는다
         root.addSpacing(36)
         footer = QLabel(f'KCS Talk v2.0 · {brand.COMPANY_NAME}')
         footer.setObjectName('loginFooter')
@@ -554,7 +556,7 @@ class LoginDialog(QDialog):
         """서버에서 소속 회사 목록을 받는다 (로그인 전 org_companies). 성공하면 True"""
         _name, host, port = self.values()
         try:
-            names = fetch_companies(host, port)
+            names = fetch_companies(host, port, tls=self.tls)
         except OSError:
             self.show_error('서버에 연결할 수 없어 소속 회사 목록을 불러오지 못했습니다. 잠시 후 다시 시도하거나 관리자에게 문의해 주세요.')
             return False
@@ -732,7 +734,8 @@ class LoginDialog(QDialog):
             self.show_error(f'비밀번호는 {PASSWORD_MIN}~{PASSWORD_MAX}자로 입력해 주세요.')
             return
         try:
-            reset_password(host, port, login_id, email, new_password, code=self.reset_code_edit.text().strip())
+            reset_password(host, port, login_id, email, new_password, code=self.reset_code_edit.text().strip(),
+                           tls=self.tls)
         except ResetRejected as exc:
             self.show_error(str(exc))
             return
