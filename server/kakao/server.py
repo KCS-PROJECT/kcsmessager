@@ -1963,9 +1963,10 @@ class KakaoServer(AdminHandlers):
             room_ids = self.store.room_ids_for_user(asker)
             if getattr(self.rag, 'accepts_context', False):     # 포털 연동: 방 · 이름을 함께 넘겨 대화 저장
                 meta = self.store.room_meta(room_id) or {}
+                asker_row = self.store.get_user(asker) or {}
                 answer = self.rag.answer(question, asker, room_ids, history, room_id=room_id,
                                          asker_name=self._name_of(asker), room_name=meta.get('name') or '',
-                                         bot_name=BOT_USERNAME)
+                                         bot_name=BOT_USERNAME, asker_email=asker_row.get('email') or '')
             else:
                 answer = self.rag.answer(question, asker, room_ids, history)
         except Exception:
