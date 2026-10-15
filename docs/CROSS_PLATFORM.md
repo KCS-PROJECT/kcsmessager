@@ -63,8 +63,8 @@ python3 kcs.py build --dry-run       명령만 확인
 
 | 항목 | 처리 |
 |---|---|
-| 화면 모양 | Qt `Fusion` 스타일 + 앱에 든 Pretendard 글꼴 → 세 OS 같은 모양 |
-| 한글 글꼴 예비 순서 | Pretendard → macOS Apple SD Gothic Neo / Windows 맑은 고딕 / Linux Noto Sans CJK KR |
+| 화면 모양 | Qt `Fusion` 스타일 + 앱에 든 글꼴(영문 · 숫자 KCS Talk Mono = JetBrains Mono 수정판, 한글 KoPub 돋움) → 세 OS 같은 모양 |
+| 한글 글꼴 예비 순서 | KCS Talk Mono → KoPub 돋움 → macOS Apple SD Gothic Neo / Windows 맑은 고딕 / Linux Noto Sans CJK KR |
 | 이모지 | macOS Apple Color Emoji / Windows Segoe UI Emoji / Linux Noto Color Emoji |
 | 사용자 데이터 | 모든 OS `~/.kcs_messenger` (예전 설치와 같은 폴더). `KCS_MESSENGER_HOME`으로 바꿀 수 있음 |
 | 다운로드 · 문서 · 사진 폴더 | OS가 알려 주는 위치 (한글 이름 폴더 포함), 없으면 홈 |

@@ -5,7 +5,7 @@
 
 KCS Ink (2026-10-10): 회사 CI 네이비를 '잉크', 채팅 배경을 차가운 '종이'로 본다.
 중립색은 모두 네이비 쪽으로 살짝 기운 회색이고, 다크 모드는 검정이 아닌 깊은 남색이다.
-글꼴은 앱에 들어 있는 Pretendard(SIL OFL, assets/fonts) 를 먼저 쓴다.
+글꼴은 앱에 들어 있는 KCS Talk Mono(영문 · 숫자, JetBrains Mono 수정판, SIL OFL) + KoPub World 돋움(한글 · 공백, assets/fonts) 을 먼저 쓴다.
 """
 
 import os
@@ -15,10 +15,18 @@ from PyQt5.QtGui import QFont, QColor
 from client.kakao import osenv
 
 FONT_DIR = osenv.resource_path('assets', 'fonts')
-# Pretendard v1.3.9 정적 글꼴 300~900 (github.com/orioncactus/pretendard, SIL OFL 1.1 - Pretendard-OFL.txt)
-BUNDLED_FONTS = ('Pretendard-Light.otf', 'Pretendard-Regular.otf', 'Pretendard-Medium.otf', 'Pretendard-SemiBold.otf',
-                 'Pretendard-Bold.otf', 'Pretendard-ExtraBold.otf', 'Pretendard-Black.otf')
-FONT_FAMILIES = osenv.ui_font_families()   # Pretendard → 이 OS 기본 한글 글꼴 → 다른 OS 글꼴
+# 앱 글꼴 (2026-10-15, Pretendard 대체):
+# - KCS Talk Mono 300 · 400 · 500 · 600 · 700 (Light · Regular · Medium · SemiBold · Bold, SIL OFL 1.1 - JetBrainsMono-OFL.txt)
+#   영문 · 숫자 · 기호. JetBrains Mono NL(합자 없음)의 수정판: Nerd Font 아이콘과 공백 글리프를 빼고 이름을 바꿨다
+#   (scripts/make_app_fonts.py). 고정폭이라 시각 · 숫자 줄이 가지런하다
+# - KoPubWorld 돋움 Light · Medium · Bold (한국출판인회의, 무료 배포 · 임베딩 허용 - KoPubWorld-LICENSE.txt)
+#   한글 · 한자 · KS 기호 · 공백. KCS Talk Mono 에 없는 글자는 Qt 가 이 글꼴로 내려 그린다 (공백 0.29em 이라 띄어쓰기가 자연스럽다)
+BUNDLED_FONTS = ('KCSTalkMono-Light.ttf', 'KCSTalkMono-Regular.ttf', 'KCSTalkMono-Medium.ttf', 'KCSTalkMono-SemiBold.ttf',
+                 'KCSTalkMono-Bold.ttf', 'KoPubWorldDotum-Light.ttf', 'KoPubWorldDotum-Medium.ttf', 'KoPubWorldDotum-Bold.ttf')
+BUNDLED_FONT_LICENSES = ('JetBrainsMono-OFL.txt', 'KoPubWorld-LICENSE.txt')
+BUNDLED_LATIN_FAMILY = osenv.BUNDLED_LATIN_FAMILY
+BUNDLED_HANGUL_FAMILIES = osenv.BUNDLED_HANGUL_FAMILIES
+FONT_FAMILIES = osenv.ui_font_families()   # KCS Talk Mono → KoPub 돋움 → 이 OS 기본 한글 글꼴 → 다른 OS 글꼴
 
 LIGHT = {
     'bg': '#FFFFFF',
@@ -289,7 +297,7 @@ _available = None
 
 
 def load_bundled_fonts():
-    """assets/fonts 의 Pretendard 를 앱 글꼴로 등록 (앱마다 한 번). 등록된 글꼴 이름 목록"""
+    """assets/fonts 의 KCS Talk Mono · KoPub 돋움을 앱 글꼴로 등록 (앱마다 한 번). 등록된 글꼴 이름 목록"""
     from PyQt5.QtGui import QFontDatabase
     names = []
     for name in BUNDLED_FONTS:
@@ -326,17 +334,23 @@ def font_families():
     return installed(FONT_FAMILIES) or list(FONT_FAMILIES)
 
 
+def bundled_fonts_ready():
+    """앱에 든 글꼴이 둘 다 등록됐는가 (영문 KCS Talk Mono + 한글 KoPub 돋움, 한글 쪽은 영문 · 한글 이름 중 하나)"""
+    families = set(font_families())
+    return BUNDLED_LATIN_FAMILY in families and any(f in families for f in BUNDLED_HANGUL_FAMILIES)
+
+
 def size_of(size):
     """글자 크기: 단계 이름('meta') 또는 px 숫자 → px 숫자 (배율 적용 전)"""
     return TYPE_SCALE[size] if isinstance(size, str) else size
 
 
-# CSS 굵기(300~900) → Qt5 QFont 굵기. 앱에 든 Pretendard 정적 글꼴 7종과 1:1 (Light ~ Black)
+# CSS 굵기(300~900) → Qt5 QFont 굵기. 앱 글꼴은 KCS Talk Mono 300~700 (Light · Regular · Medium · SemiBold · Bold),
+# KoPub 돋움 Light · Medium · Bold 로, Qt 가 글꼴마다 가장 가까운 굵기 파일을 고른다 (800 · 900 은 Bold 로)
 FONT_WEIGHTS = {300: QFont.Light, 400: QFont.Normal, 500: QFont.Medium, 600: QFont.DemiBold,
                 700: QFont.Bold, 800: QFont.ExtraBold, 900: QFont.Black}
-# Qt5 는 Pretendard ExtraBold 파일을 Black 과 같은 굵기(87)로 읽어 숫자만으로는 800/900 이 갈리지 않는다 → 스타일 이름으로 고른다
-PRETENDARD_STYLES = {300: 'Light', 400: 'Regular', 500: 'Medium', 600: 'SemiBold', 700: 'Bold',
-                     800: 'ExtraBold', 900: 'Black'}
+# 굵기 → 앱 글꼴(KCS Talk Mono) 스타일 이름
+BUNDLED_STYLES = {300: 'Light', 400: 'Regular', 500: 'Medium', 600: 'SemiBold', 700: 'Bold', 800: 'Bold', 900: 'Bold'}
 
 
 def font(size='body', bold=False, scaled=True, weight=None):
@@ -352,8 +366,6 @@ def font(size='body', bold=False, scaled=True, weight=None):
         if weight not in FONT_WEIGHTS:
             raise ValueError(f'font weight must be one of {sorted(FONT_WEIGHTS)}: {weight}')
         f.setWeight(FONT_WEIGHTS[weight])
-        if font_families()[0] == 'Pretendard':
-            f.setStyleName(PRETENDARD_STYLES[weight])
     else:
         f.setBold(bold)
     f.setStyleHint(QFont.SansSerif)
