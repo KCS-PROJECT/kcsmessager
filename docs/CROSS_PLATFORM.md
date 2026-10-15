@@ -73,7 +73,7 @@ python3 kcs.py build --dry-run       명령만 확인
 | 앱 이름 표시 | macOS: Dock · 메뉴 막대 이름 (소스 실행은 데이터 폴더의 `KCS Talk.app` 번들에서 다시 실행) / Windows: 작업 표시줄 묶음(AppUserModelID) / Linux: `.desktop` 연결 |
 | 받은 파일 이름 | 다른 OS에서 온 이름도 저장되게 `osenv.safe_filename` (Windows 금지 글자 `: * ? " < > \|` → `_`, CON · NUL 같은 예약 이름 피하기, 경로 떼기) |
 | 비밀 파일 권한 | macOS · Linux 600, Windows는 사용자 프로필 폴더 권한 |
-| 다시 실행(로그아웃) | 소스 실행이면 파이썬 + 스크립트, 빌드한 앱이면 실행 파일 그대로 |
+| 다시 실행(로그아웃) | 소스 실행이면 파이썬 + 스크립트, 빌드한 앱이면 실행 파일 그대로. 단일 실행파일(onefile)은 `PYINSTALLER_RESET_ENVIRONMENT=1` 로 새 인스턴스가 자기 임시 폴더를 따로 풀게 한다(안 그러면 원래 인스턴스가 끝날 때 임시 폴더가 지워져 `base_library.zip 없음` 으로 죽는다) |
 
 ## 5. 개발 규칙
 

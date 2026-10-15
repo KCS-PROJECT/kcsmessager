@@ -266,9 +266,13 @@ class StartupTest(unittest.TestCase):
             prog, args = osenv.relaunch_command(['client/kakao/app.py', '--port', '5555'])
             self.assertEqual(prog, sys.executable)
             self.assertEqual(args, [os.path.abspath('client/kakao/app.py'), '--port', '5555'])
-        with mock.patch.object(sys, 'frozen', True, create=True):
+        with mock.patch.object(sys, 'frozen', True, create=True), mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(osenv.PYINSTALLER_RESET_ENV, None)
             prog, args = osenv.relaunch_command(['/Applications/KCS Talk.app/Contents/MacOS/KCS Talk', '--port', '1'])
             self.assertEqual((prog, args), (sys.executable, ['--port', '1']))   # 빌드한 앱은 실행 파일 그대로
+            # onefile 새 인스턴스가 부모의 _MEI 임시 폴더를 물려받지 않도록 (로그아웃 → 재로그인 때 base_library.zip 없음 오류)
+            self.assertEqual(os.environ.get(osenv.PYINSTALLER_RESET_ENV), '1')
+        self.assertNotIn(osenv.PYINSTALLER_RESET_ENV, os.environ)              # 소스 실행에서는 건드리지 않는다
 
     def test_server_data_next_to_frozen_executable(self):
         import importlib

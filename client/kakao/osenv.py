@@ -10,7 +10,7 @@
 - 단축키 표기: shortcut_text('Ctrl+Shift+Enter') → macOS '⇧⌘Enter' (Apple 순서 ⌃⌥⇧⌘), 그 밖 'Ctrl+Shift+Enter'
   (Qt 는 QKeySequence 의 Ctrl 을 macOS 에서 ⌘ 로 자동으로 바꾸므로 키 연결은 어디서나 'Ctrl+…' 로 쓴다)
 - 시작 보정: prepare_process() (QApplication 전) · configure_app(app) (QApplication 직후)
-- 다시 실행: relaunch_command(argv)
+- 다시 실행: relaunch_command(argv) (빌드한 앱은 PYINSTALLER_RESET_ENVIRONMENT=1 로 새 임시 폴더)
 - 영문 입력: prefer_latin_input(edit) - 사번 칸에 포커스가 오면 한글 대신 영문 입력 상태로
 
 함수는 부를 때마다 sys.platform 을 읽는다 (테스트에서 OS 를 바꿔 끼울 수 있게).
@@ -407,9 +407,19 @@ def _x11_idle_seconds():
 
 
 # ---------------------------------------------------------------- 다시 실행
+# PyInstaller 6 단일 실행파일(onefile)은 sys.executable 로 띄운 새 복사본을 '같은 앱의 하위 프로세스'로 보고 부모가
+# 풀어 둔 임시 폴더(_MEIxxxx)를 그대로 쓰게 한다. 로그아웃 → 다시 로그인처럼 새 인스턴스를 띄우고 원래 인스턴스가
+# 종료하면 그 임시 폴더가 지워져 새 인스턴스가 "No such file or directory: ..._MEIxxxx\base_library.zip" 으로 죽는다.
+# 이 변수를 1 로 주면 부트로더가 환경을 초기화하고 자기 임시 폴더를 새로 푼다 (bootloader pyi_main.c).
+PYINSTALLER_RESET_ENV = 'PYINSTALLER_RESET_ENVIRONMENT'
+
+
 def relaunch_command(argv=None):
-    """(프로그램, 인자) - 지금 앱을 같은 방식으로 다시 띄우는 명령. 빌드한 앱이면 실행 파일 그대로"""
+    """(프로그램, 인자) - 지금 앱을 같은 방식으로 다시 띄우는 명령. 빌드한 앱이면 실행 파일 그대로.
+    빌드한 앱에서는 새 인스턴스가 독립된 임시 폴더를 쓰도록 환경 변수 PYINSTALLER_RESET_ENVIRONMENT=1 도 둔다
+    (startDetached 는 지금 프로세스 환경을 물려준다)"""
     argv = list(sys.argv if argv is None else argv)
     if getattr(sys, 'frozen', False):
+        os.environ[PYINSTALLER_RESET_ENV] = '1'
         return sys.executable, argv[1:]
     return sys.executable, [os.path.abspath(argv[0])] + argv[1:]
