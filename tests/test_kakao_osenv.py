@@ -93,28 +93,28 @@ class PathTest(unittest.TestCase):
 
     def test_theme_and_brand_find_assets(self):
         from client.kakao import theme, brand
-        self.assertTrue(os.path.exists(os.path.join(theme.FONT_DIR, 'KCSTalkMono-Regular.ttf')))
+        self.assertTrue(os.path.exists(os.path.join(theme.FONT_DIR, 'Poppins-SemiBold.ttf')))
         self.assertTrue(os.path.exists(os.path.join(theme.FONT_DIR, 'KoPubWorldDotum-Medium.ttf')))
         self.assertTrue(os.path.isdir(brand.BRAND_DIR))
 
-    def test_bundled_fonts_kcs_talk_mono_and_kopub(self):
-        """앱 글꼴(2026-10-15): 영문 · 숫자 KCS Talk Mono(JetBrains Mono NL 수정판) 300~700 다섯 굵기 + 한글 KoPub 돋움 세 굵기,
-        라이선스 파일 둘. 영문은 KCS Talk Mono 로, 한글 · 공백은 KoPub 돋움으로 그리고 굵기마다 가장 가까운 파일을 쓴다"""
-        from PyQt5.QtGui import QFontInfo, QFontDatabase, QFontMetrics
+    def test_bundled_fonts_poppins_and_kopub(self):
+        """앱 글꼴(2026-10-15): 영문 · 숫자 Poppins SemiBold · Bold + 한글 KoPub 돋움 세 굵기, 라이선스 파일 둘.
+        영문은 Poppins(300~600 은 SemiBold, 700~ 은 Bold)로, 한글은 KoPub 돋움으로 그린다"""
+        from PyQt5.QtGui import QFont, QFontInfo, QFontDatabase, QFontMetrics
         from client.kakao import theme
         app()
         self.assertEqual(sorted(theme.FONT_WEIGHTS), [300, 400, 500, 600, 700, 800, 900])
         for name in theme.BUNDLED_FONTS:
             self.assertTrue(os.path.getsize(os.path.join(theme.FONT_DIR, name)) > 100_000, name)
-        with open(os.path.join(theme.FONT_DIR, 'JetBrainsMono-OFL.txt'), encoding='utf-8') as f:
+        with open(os.path.join(theme.FONT_DIR, 'Poppins-OFL.txt'), encoding='utf-8') as f:
             text = f.read()
         self.assertIn('SIL OPEN FONT LICENSE', text.upper())
-        self.assertIn('KCS Talk Mono', text)                                       # 수정판 고지 (OFL 3조)
+        self.assertIn('Poppins', text)
         with open(os.path.join(theme.FONT_DIR, 'KoPubWorld-LICENSE.txt'), encoding='utf-8') as f:
             self.assertIn('한국출판인회의', f.read())
         theme.load_bundled_fonts()
         db = QFontDatabase()
-        self.assertEqual(set(db.styles(theme.BUNDLED_LATIN_FAMILY)), {'Light', 'Regular', 'Medium', 'SemiBold', 'Bold'})
+        self.assertEqual(set(db.styles(theme.BUNDLED_LATIN_FAMILY)), {'SemiBold', 'Bold'})
         hangul = next((f for f in theme.BUNDLED_HANGUL_FAMILIES if db.styles(f)), None)
         self.assertIsNotNone(hangul, '한글 글꼴 KoPub 돋움이 등록되지 않음')
         self.assertEqual(set(db.styles(hangul)), {'Light', 'Medium', 'Bold'})
@@ -126,11 +126,12 @@ class PathTest(unittest.TestCase):
         for weight, style in theme.BUNDLED_STYLES.items():
             self.assertEqual(QFontInfo(theme.font('body', weight=weight)).styleName(), style, weight)
         self.assertEqual(QFontInfo(theme.font(bold=True)).styleName(), 'Bold')
-        # 한글 · 공백은 KCS Talk Mono 에 없으니 KoPub 돋움으로 내려 그린다: 공백이 영문 한 칸(0.6em)보다 좁다 (띄어쓰기가
-        # 두 칸처럼 벌어지지 않는다), 한글은 영문 한 칸보다 넓다
+        # 한글은 Poppins 에 없으니 KoPub 돋움으로 내려 그린다 (KoPub 만으로 잰 폭과 같다)
         fm = QFontMetrics(theme.font('body'))
-        self.assertGreater(fm.horizontalAdvance('한'), fm.horizontalAdvance('W'))
-        self.assertLess(fm.horizontalAdvance(' '), fm.horizontalAdvance('W') * 0.7)
+        kopub = QFont(hangul)
+        kopub.setPixelSize(theme.font('body').pixelSize())
+        self.assertEqual(fm.horizontalAdvance('한글'), QFontMetrics(kopub).horizontalAdvance('한글'))
+        self.assertGreater(fm.horizontalAdvance('한글'), 0)
         with self.assertRaises(ValueError):
             theme.font(weight=450)
 
@@ -211,7 +212,7 @@ class TextTest(unittest.TestCase):
         for name, first in expect_first.items():
             with on(name):
                 fams = osenv.ui_font_families()
-                self.assertEqual(fams[0], osenv.BUNDLED_LATIN_FAMILY)      # 앱에 든 글꼴이 먼저 (영문 KCS Talk Mono)
+                self.assertEqual(fams[0], osenv.BUNDLED_LATIN_FAMILY)      # 앱에 든 글꼴이 먼저 (영문 Poppins)
                 self.assertEqual(tuple(fams[1:3]), osenv.BUNDLED_HANGUL_FAMILIES)   # 한글 KoPub 돋움 (영문 · 한글 이름)
                 self.assertEqual(fams[3], first)                           # 그 다음 이 OS 한글 글꼴
                 self.assertEqual(len(fams), len(set(fams)))
@@ -358,7 +359,7 @@ class LauncherTest(unittest.TestCase):
     def test_doctor_ok_here(self):
         lines = []
         self.assertEqual(self.kcs.doctor(out=lines.append), 0)
-        self.assertTrue(any('KCS Talk Mono · KoPub 돋움 8/8' in line for line in lines))   # 영문 5 + 한글 3
+        self.assertTrue(any('Poppins · KoPub 돋움 5/5' in line for line in lines))   # 영문 2 + 한글 3
 
     def test_command_routing(self):
         calls = []

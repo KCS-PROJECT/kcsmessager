@@ -1,16 +1,9 @@
-KCS Talk Mono (assets/fonts/KCSTalkMono-{Light,Regular,Medium,SemiBold,Bold}.ttf)
-= JetBrains Mono 의 수정판(Modified Version). SIL Open Font License 1.1 로 배포한다.
+Copyright 2020 The Poppins Project Authors (https://github.com/itfoundry/Poppins)
 
-원 글꼴: JetBrains Mono (https://github.com/JetBrains/JetBrainsMono)
-Copyright 2020 The JetBrains Mono Project Authors.
 This Font Software is licensed under the SIL Open Font License, Version 1.1.
-Reserved Font Name: "JetBrains Mono".
+This license is copied below, and is also available with a FAQ at:
+http://scripts.sil.org/OFL
 
-만든 방법 (scripts/make_app_fonts.py): Nerd Fonts (https://github.com/ryanoasis/nerd-fonts, MIT) 가 JetBrains Mono NL(합자 없음)에
-아이콘을 더해 "JetBrainsMonoNL Nerd Font Propo" 로 내놓은 TTF 에서
-  - Nerd Font 아이콘(사용자 영역 U+E000~) 과 공백(U+0020 · U+00A0) 글리프를 빼고 (공백 · 한글은 다음 글꼴 KoPub 돋움이 그린다)
-  - OFL 1.1 3조(수정판은 예약 글꼴 이름을 쓸 수 없다)에 따라 글꼴 이름을 "KCS Talk Mono" 로 바꿨다.
-글자 모양 · 힌팅은 JetBrains Mono 그대로다. 이 수정판도 아래 OFL 1.1 조건으로만 배포할 수 있다 (단독 판매 불가).
 
 -----------------------------------------------------------
 SIL OPEN FONT LICENSE Version 1.1 - 26 February 2007
@@ -25,7 +18,7 @@ with others.
 
 The OFL allows the licensed fonts to be used, studied, modified and
 redistributed freely as long as they are not sold by themselves. The
-fonts, including any derivative works, can be bundled, embedded,
+fonts, including any derivative works, can be bundled, embedded, 
 redistributed and/or sold with any software provided that any reserved
 names are not used by derivative works. The fonts and derivatives,
 however, cannot be released under any other type of license. The

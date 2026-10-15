@@ -181,17 +181,16 @@ _UI_FONTS = {
     'linux': ['Noto Sans CJK KR', 'Noto Sans KR', 'NanumGothic', 'Nanum Gothic', 'UnDotum', 'DejaVu Sans'],
 }
 _EMOJI_FONTS = {'mac': ['Apple Color Emoji'], 'windows': ['Segoe UI Emoji'], 'linux': ['Noto Color Emoji']}
-# 앱에 든 글꼴(assets/fonts, theme.BUNDLED_FONTS) 의 글꼴 이름. 영문 · 숫자 · 기호는 'KCS Talk Mono'(JetBrains Mono NL 의
-# 수정판 - 공백 · 아이콘 글리프를 빼고 OFL 규칙대로 이름을 바꿈, scripts/make_app_fonts.py), 한글 · 공백은 KoPub World 돋움.
-# KCS Talk Mono 에 없는 글자(한글 · 공백)는 Qt 가 다음 글꼴(KoPub)로 내려 그린다.
-# Windows 는 한글 이름('KoPubWorld돋움체')으로 등록될 수 있어 두 이름을 모두 둔다 (theme.installed 가 있는 것만 남긴다).
-BUNDLED_LATIN_FAMILY = 'KCS Talk Mono'
+# 앱에 든 글꼴(assets/fonts, theme.BUNDLED_FONTS) 의 글꼴 이름. 영문 · 숫자 · 기호는 Poppins(Indian Type Foundry, SIL OFL;
+# SemiBold 를 기본 굵기로, 굵은 글씨는 Bold), 한글은 KoPub World 돋움. Poppins 에 없는 글자(한글)는 Qt 가 다음 글꼴(KoPub)로
+# 내려 그린다. Windows 는 한글 이름('KoPubWorld돋움체')으로 등록될 수 있어 두 이름을 모두 둔다 (theme.installed 가 있는 것만).
+BUNDLED_LATIN_FAMILY = 'Poppins'
 BUNDLED_HANGUL_FAMILIES = ('KoPubWorldDotum', 'KoPubWorld돋움체')
 BUNDLED_FAMILIES = (BUNDLED_LATIN_FAMILY,) + BUNDLED_HANGUL_FAMILIES
 
 
 def ui_font_families():
-    """UI 글꼴 순서: 앱에 든 KCS Talk Mono(영문·숫자, JetBrains Mono) → KoPub 돋움(한글·공백) → 이 OS 기본 한글 글꼴 → 다른 OS 글꼴"""
+    """UI 글꼴 순서: 앱에 든 Poppins(영문·숫자) → KoPub 돋움(한글) → 이 OS 기본 한글 글꼴 → 다른 OS 글꼴(원격 데스크톱 등 대비)"""
     own = _UI_FONTS[current()]
     others = [f for key, names in _UI_FONTS.items() if key != current() for f in names]
     return list(dict.fromkeys(list(BUNDLED_FAMILIES) + own + others))
