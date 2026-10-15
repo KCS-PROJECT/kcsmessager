@@ -170,7 +170,10 @@ class LayoutTest(unittest.TestCase):
         self.assertFalse(tab.story_bar.compose_link.isHidden())
         sections = tab.sections
         self.assertIn('박민수', sections['registered'])
-        self.assertNotIn('박민수', sections['online'] + sections['offline'])
+        self.assertNotIn('박민수', sections['offline'])                   # 다른 구역에 든 사람은 '오프라인' 에 안 겹친다
+        # '온라인' 은 접속 중인 모든 친구 - 내가 추가한 친구 · 내 부서 동료도 접속해 있으면 함께 보인다 (2026-10-15)
+        online = {u['username'] for u in self.state.friends() if self.state.is_online(u['username'])}
+        self.assertEqual(set(sections['online']), online)
         tab.close()
 
     def test_more_tab_grouped(self):
@@ -237,7 +240,8 @@ class WorkFirstAndKeyboardTest(unittest.TestCase):
         self.assertTrue(tab.story_bar.isHidden())
         self.assertEqual(tab.sections['team'], ['김철수'])               # 같은 부서(기술연구소1실)
         self.assertEqual(tab.sections['birthday'], [])                 # 소식 기능 꺼짐
-        self.assertNotIn('김철수', tab.sections['online'] + tab.sections['offline'])
+        self.assertNotIn('김철수', tab.sections['offline'])
+        self.assertIn('김철수', tab.sections['online'])                  # 접속 중인 동료는 '온라인' 에도 보인다
         data = [tab.list.item(i).data(0x0100) for i in range(tab.list.count())]
         sections = [d[1] for d in data if d[0] == 'section']
         self.assertEqual(sections[0], 'team')
