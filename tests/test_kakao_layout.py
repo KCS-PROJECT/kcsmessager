@@ -285,3 +285,93 @@ class WorkFirstAndKeyboardTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class StrayWindowAndTrayTest(unittest.TestCase):
+    """2026-10-15: (1) 탭을 만들거나 친구 구역을 접고 펼 때 부모 없는 위젯이 최상위 창으로 번쩍이지 않는다
+    (Windows 에서 작은 창들이 여러 개 나타났다 사라지던 문제). (2) 창 닫기(X) 는 트레이로 내려가고 [종료] 만 끝낸다"""
+
+    def setUp(self):
+        from PyQt5.QtCore import QObject, QEvent
+        from PyQt5.QtWidgets import QWidget
+        app()
+        self.state, self.conn = make_demo_state()
+
+        class Probe(QObject):
+            def __init__(self):
+                super().__init__()
+                self.shown = []
+
+            def eventFilter(self, obj, ev):
+                if ev.type() == QEvent.Show and isinstance(obj, QWidget) and obj.isWindow():
+                    self.shown.append(type(obj).__name__)
+                return False
+        self.probe = Probe()
+        app().installEventFilter(self.probe)
+
+    def tearDown(self):
+        app().removeEventFilter(self.probe)
+
+    def test_no_stray_toplevel_windows(self):
+        from client.kakao.main_window import MainWindow, apply_app_theme
+        from client.kakao.widgets import set_shown
+        from PyQt5.QtWidgets import QLabel, QWidget, QVBoxLayout
+        apply_app_theme(self.state.settings)
+        win = MainWindow(self.state, self.state.settings)
+        win.resize(420, 720)
+        win.show()
+        pump()
+        for tab in ('friends', 'chats', 'org', 'calendar', 'more'):
+            win.set_tab(tab)
+            pump()
+        friends = win.tabs['friends']
+        for key in ('online', 'offline', 'birthday'):
+            friends.toggle_section(key)
+            pump()
+            friends.toggle_section(key)
+            pump()
+        self.assertEqual([n for n in self.probe.shown if n != 'MainWindow'], [])   # 메인 창 말고는 최상위 창이 뜨지 않는다
+        win.close()
+        app().removeEventFilter(self.probe)        # 아래 holder 는 일부러 띄우는 최상위 창
+        # set_shown: 부모 없는 위젯은 보이기를 미루고, 레이아웃에 들어가 부모가 보이면 함께 보인다. 숨기기는 바로 적용
+        label = QLabel('x')
+        set_shown(label, False)
+        set_shown(label, True)
+        self.assertFalse(label.isVisible())
+        holder = QWidget()
+        QVBoxLayout(holder).addWidget(label)
+        holder.show()
+        pump()
+        self.assertTrue(label.isVisible())
+        set_shown(label, False)
+        self.assertFalse(label.isVisible())
+        set_shown(label, True)
+        self.assertTrue(label.isVisible())
+        hidden = QLabel('y')
+        set_shown(hidden, False)
+        holder.layout().addWidget(hidden)
+        pump()
+        self.assertFalse(hidden.isVisible())                                    # 명시적으로 숨긴 것은 부모가 보여도 숨김
+        holder.close()
+
+    def test_close_hides_to_tray_and_quit_really_closes(self):
+        from PyQt5.QtWidgets import QSystemTrayIcon
+        from client.kakao.main_window import MainWindow, apply_app_theme
+        apply_app_theme(self.state.settings)
+        win = MainWindow(self.state, self.state.settings)
+        win.show()
+        pump()
+        if win.tray is None:                       # 오프스크린 · CI 에는 트레이가 없다 → 트레이가 있는 것처럼
+            win.tray = QSystemTrayIcon(win)
+        win.close()
+        pump()
+        self.assertFalse(win.isVisible())          # 숨겨졌을 뿐
+        self.assertFalse(win._quitting)
+        win.bring_to_front()
+        pump()
+        self.assertTrue(win.isVisible())           # 트레이 아이콘 → 다시 열기
+        win.quit_app()
+        pump()
+        self.assertTrue(win._quitting)
+        self.assertFalse(win.isVisible())
+        win.tray = None
